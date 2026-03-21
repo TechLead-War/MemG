@@ -1,0 +1,41 @@
+# Binaries
+memg
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+coverage.html
+coverage.txt
+
+# Dependency cache
+vendor/
+
+# IDE
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+
+# SQLite databases
+*.db
+*.db-journal
+
+# Build output
+/bin/
+/dist/
+
+# Sensitive files
+*.pem
+*.key

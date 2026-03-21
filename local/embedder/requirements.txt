@@ -1,0 +1,5 @@
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+sentence-transformers>=2.2.0
+torch>=2.0.0
+protobuf>=4.25.0

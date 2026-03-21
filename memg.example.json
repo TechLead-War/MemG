@@ -1,0 +1,29 @@
+{
+  "port": 8787,
+  "target": "https://api.openai.com",
+  "entity": "",
+  "db": "~/.memg/memory.db",
+
+  "llm": {
+    "provider": "openai",
+    "model": "gpt-4o-mini"
+  },
+
+  "embed": {
+    "provider": "openai",
+    "model": "text-embedding-3-small"
+  },
+
+  "recall": {
+    "limit": 100,
+    "threshold": 0.10
+  },
+
+  "session": {
+    "timeout": "30m"
+  },
+
+  "conscious": true,
+  "prune_interval": "5m",
+  "debug": false
+}

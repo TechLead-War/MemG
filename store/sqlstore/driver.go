@@ -1,0 +1,999 @@
+// Package sqlstore provides a generic SQL-backed implementation of store.Repository.
+// Database-specific dialects supply the query templates via the Queries struct.
+package sqlstore
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"memg/store"
+)
+
+// Queries holds every SQL statement a dialect must supply.
+type Queries struct {
+	// Schema DDL executed in order during Migrate.
+	CreateTables []string
+
+	// Entity
+	EntityInsert   string // INSERT-ignore style upsert
+	EntitySelectID string // SELECT uuid WHERE external_id = ?
+	EntitySelect   string // SELECT uuid, external_id, created_at WHERE external_id = ?
+
+	// Fact
+	FactInsert string // INSERT with all columns including lifecycle metadata
+	FactSelect string // SELECT WHERE entity_id = ? ORDER BY created_at DESC LIMIT ?
+
+	// Fact lifecycle
+	FactFindByKey          string // SELECT WHERE entity_id = ? AND content_key = ?
+	FactUpdateStatus       string // UPDATE SET temporal_status = ? WHERE uuid = ?
+	FactReinforce          string // UPDATE SET reinforced_at = ?, reinforced_count = reinforced_count + 1, expires_at = ? WHERE uuid = ?
+	FactPruneExpired       string // DELETE WHERE entity_id = ? AND expires_at IS NOT NULL AND expires_at < ?
+	FactDelete             string // DELETE WHERE uuid = ? AND entity_id = ?
+	FactDeleteAll          string // DELETE WHERE entity_id = ?
+	FactUpdateSignificance string // UPDATE SET significance = ?, updated_at = ? WHERE uuid = ?
+	FactUpdateRecallUsage  string // UPDATE SET recall_count = recall_count + 1, last_recalled_at = ? WHERE uuid = ?
+	FactUpdateEmbedding    string // UPDATE embedding = ?, embedding_model = ?, updated_at = ? WHERE uuid = ?
+
+	// Conversation
+	ConvInsert             string // INSERT (uuid, session_id, entity_id, created_at, updated_at)
+	ConvSelect             string // SELECT WHERE uuid = ?
+	ConvSelectActive       string // SELECT WHERE session_id = ? ORDER BY created_at DESC LIMIT 1
+	ConvUpdateSummary      string // UPDATE SET summary = ?, summary_embedding = ?, updated_at = ? WHERE uuid = ?
+	ConvSelectSummaries    string // SELECT WHERE entity_id != '' AND summary != '' AND summary_embedding IS NOT NULL ORDER BY created_at DESC LIMIT ?
+	ConvSelectUnsummarized string // SELECT WHERE entity_id = ? AND summary = '' AND session_id != ? ORDER BY created_at DESC LIMIT 1
+	ConvPruneSummaries     string // UPDATE SET summary = '', summary_embedding = NULL WHERE summary != '' AND created_at < ?
+
+	// Message
+	MsgInsert       string // INSERT (uuid, conversation_id, role, content, kind, created_at)
+	MsgSelect       string // SELECT WHERE conversation_id = ? ORDER BY created_at ASC
+	MsgSelectRecent string // SELECT ... ORDER BY created_at DESC LIMIT ? then reverse in Go
+
+	// Session
+	SessionInsert string // INSERT (uuid, entity_id, process_id, created_at, expires_at)
+	SessionSelect string // SELECT active WHERE entity_id = ? AND process_id = ? AND expires_at > ?
+	SessionSlide  string // UPDATE mg_session SET expires_at = ? WHERE uuid = ?
+
+	// Process
+	ProcessInsert   string // INSERT-ignore style upsert
+	ProcessSelectID string // SELECT uuid WHERE external_id = ?
+
+	// Attribute
+	AttrInsert string // INSERT (uuid, process_id, key, value, created_at)
+
+	// Schema versioning
+	SchemaRead  string
+	SchemaWrite string
+}
+
+// Repository implements store.Repository on top of database/sql.
+type Repository struct {
+	db *sql.DB
+	q  Queries
+}
+
+// New creates a Repository with the given SQL handle and query set.
+func New(db *sql.DB, q Queries) *Repository {
+	return &Repository{db: db, q: q}
+}
+
+// ---- Migrator ----
+
+func (r *Repository) Migrate(ctx context.Context) error {
+	for _, ddl := range r.q.CreateTables {
+		if _, err := r.db.ExecContext(ctx, ddl); err != nil {
+			return fmt.Errorf("sqlstore migrate: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r *Repository) SchemaVersion(ctx context.Context) (int, error) {
+	var ver int
+	err := r.db.QueryRowContext(ctx, r.q.SchemaRead).Scan(&ver)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return ver, err
+}
+
+// ---- EntityWriter ----
+
+func (r *Repository) UpsertEntity(ctx context.Context, externalID string) (string, error) {
+	id := uuid.New().String()
+	if _, err := r.db.ExecContext(ctx, r.q.EntityInsert, id, externalID); err != nil {
+		return "", fmt.Errorf("upsert entity: %w", err)
+	}
+	var resultID string
+	if err := r.db.QueryRowContext(ctx, r.q.EntitySelectID, externalID).Scan(&resultID); err != nil {
+		return "", fmt.Errorf("read entity uuid: %w", err)
+	}
+	return resultID, nil
+}
+
+// ---- EntityReader ----
+
+func (r *Repository) LookupEntity(ctx context.Context, externalID string) (*store.Entity, error) {
+	e := &store.Entity{}
+	err := r.db.QueryRowContext(ctx, r.q.EntitySelect, externalID).Scan(
+		&e.UUID, &e.ExternalID, &e.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup entity: %w", err)
+	}
+	return e, nil
+}
+
+// ---- EntityLister ----
+
+func (r *Repository) ListEntityUUIDs(ctx context.Context, limit int) ([]string, error) {
+	query := "SELECT uuid FROM mg_entity ORDER BY created_at ASC LIMIT " + fmt.Sprintf("%d", limit)
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list entity uuids: %w", err)
+	}
+	defer rows.Close()
+	var uuids []string
+	for rows.Next() {
+		var uuid string
+		if err := rows.Scan(&uuid); err != nil {
+			return nil, fmt.Errorf("scan entity uuid: %w", err)
+		}
+		uuids = append(uuids, uuid)
+	}
+	return uuids, rows.Err()
+}
+
+// ---- FactWriter ----
+
+func (r *Repository) InsertFact(ctx context.Context, entityUUID string, fact *store.Fact) error {
+	fact.UUID = uuid.New().String()
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, r.q.FactInsert,
+		fact.UUID, entityUUID, fact.Content, encodeEmbedding(fact.Embedding), now, now,
+		string(fact.Type), string(fact.TemporalStatus), int(fact.Significance),
+		fact.ContentKey, nullTime(fact.ReferenceTime), nullTime(fact.ExpiresAt),
+		nullTime(fact.ReinforcedAt), fact.ReinforcedCount, fact.Tag,
+		fact.Slot, fact.Confidence, fact.EmbeddingModel, fact.SourceRole,
+		fact.RecallCount, nullTime(fact.LastRecalledAt),
+	)
+	if err != nil {
+		return fmt.Errorf("insert fact: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) InsertFacts(ctx context.Context, entityUUID string, facts []*store.Fact) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, r.q.FactInsert)
+	if err != nil {
+		return fmt.Errorf("prepare insert: %w", err)
+	}
+	defer stmt.Close()
+
+	now := time.Now().UTC()
+	for _, f := range facts {
+		f.UUID = uuid.New().String()
+		if _, err := stmt.ExecContext(ctx,
+			f.UUID, entityUUID, f.Content, encodeEmbedding(f.Embedding), now, now,
+			string(f.Type), string(f.TemporalStatus), int(f.Significance),
+			f.ContentKey, nullTime(f.ReferenceTime), nullTime(f.ExpiresAt),
+			nullTime(f.ReinforcedAt), f.ReinforcedCount, f.Tag,
+			f.Slot, f.Confidence, f.EmbeddingModel, f.SourceRole,
+			f.RecallCount, nullTime(f.LastRecalledAt),
+		); err != nil {
+			return fmt.Errorf("insert fact %s: %w", f.UUID, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// ---- FactReader ----
+
+func (r *Repository) ListFacts(ctx context.Context, entityUUID string, limit int) ([]*store.Fact, error) {
+	rows, err := r.db.QueryContext(ctx, r.q.FactSelect, entityUUID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list facts: %w", err)
+	}
+	defer rows.Close()
+	return scanFacts(rows)
+}
+
+// ---- FactManager ----
+
+func (r *Repository) FindFactByKey(ctx context.Context, entityUUID, contentKey string) (*store.Fact, error) {
+	f := &store.Fact{}
+	var raw []byte
+	var factType, temporalStatus string
+	var significance int
+	var createdAt, updatedAt flexTime
+	var refTime, expiresAt, reinforcedAt flexTime
+	var lastRecalledAt flexTime
+	err := r.db.QueryRowContext(ctx, r.q.FactFindByKey, entityUUID, contentKey).Scan(
+		&f.UUID, &f.Content, &raw, &createdAt, &updatedAt,
+		&factType, &temporalStatus, &significance,
+		&f.ContentKey, &refTime, &expiresAt,
+		&reinforcedAt, &f.ReinforcedCount, &f.Tag,
+		&f.Slot, &f.Confidence, &f.EmbeddingModel, &f.SourceRole,
+		&f.RecallCount, &lastRecalledAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find fact by key: %w", err)
+	}
+	f.Embedding = decodeEmbedding(raw)
+	f.Type = store.FactType(factType)
+	f.TemporalStatus = store.TemporalStatus(temporalStatus)
+	f.Significance = store.Significance(significance)
+	f.CreatedAt = createdAt.Time
+	f.UpdatedAt = updatedAt.Time
+	if refTime.Valid {
+		f.ReferenceTime = &refTime.Time
+	}
+	if expiresAt.Valid {
+		f.ExpiresAt = &expiresAt.Time
+	}
+	if reinforcedAt.Valid {
+		f.ReinforcedAt = &reinforcedAt.Time
+	}
+	if lastRecalledAt.Valid {
+		f.LastRecalledAt = &lastRecalledAt.Time
+	}
+	return f, nil
+}
+
+func (r *Repository) UpdateTemporalStatus(ctx context.Context, factUUID string, status store.TemporalStatus) error {
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, r.q.FactUpdateStatus, string(status), now, factUUID)
+	if err != nil {
+		return fmt.Errorf("update temporal status: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) ReinforceFact(ctx context.Context, factUUID string, newExpiresAt *time.Time) error {
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, r.q.FactReinforce, now, nullTime(newExpiresAt), now, factUUID)
+	if err != nil {
+		return fmt.Errorf("reinforce fact: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) PruneExpiredFacts(ctx context.Context, entityUUID string, now time.Time) (int64, error) {
+	var res sql.Result
+	var err error
+	if entityUUID == "" {
+		// Two-step batch prune for cross-dialect compatibility.
+		// MySQL < 8.0.19 disallows self-referencing subqueries in DELETE,
+		// so we SELECT the UUIDs first, then DELETE by UUID list.
+		selectQuery := `SELECT uuid FROM mg_entity_fact WHERE expires_at IS NOT NULL AND expires_at < ` + r.placeholder(1) + ` LIMIT 1000`
+		rows, qErr := r.db.QueryContext(ctx, selectQuery, now)
+		if qErr != nil {
+			return 0, fmt.Errorf("prune select: %w", qErr)
+		}
+		var uuids []string
+		for rows.Next() {
+			var id string
+			if sErr := rows.Scan(&id); sErr != nil {
+				rows.Close()
+				return 0, fmt.Errorf("prune scan: %w", sErr)
+			}
+			uuids = append(uuids, id)
+		}
+		rows.Close()
+		if rErr := rows.Err(); rErr != nil {
+			return 0, fmt.Errorf("prune rows: %w", rErr)
+		}
+		if len(uuids) == 0 {
+			return 0, nil
+		}
+		// Step 2: Delete by UUID list.
+		placeholders := make([]string, len(uuids))
+		args := make([]any, len(uuids))
+		for i, id := range uuids {
+			placeholders[i] = r.placeholder(i + 1)
+			args[i] = id
+		}
+		deleteQuery := `DELETE FROM mg_entity_fact WHERE uuid IN (` + strings.Join(placeholders, ",") + `)`
+		res, err = r.db.ExecContext(ctx, deleteQuery, args...)
+	} else {
+		res, err = r.db.ExecContext(ctx, r.q.FactPruneExpired, entityUUID, now)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("prune expired facts: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// placeholder returns a dialect-appropriate parameter placeholder for position n.
+func (r *Repository) placeholder(n int) string {
+	if containsDollarParam(r.q.FactInsert) {
+		return fmt.Sprintf("$%d", n)
+	}
+	return "?"
+}
+
+func (r *Repository) UpdateSignificance(ctx context.Context, factUUID string, sig store.Significance) error {
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, r.q.FactUpdateSignificance, int(sig), now, factUUID)
+	if err != nil {
+		return fmt.Errorf("update significance: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) UpdateFactEmbedding(ctx context.Context, factUUID string, embedding []float32, model string) error {
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, r.q.FactUpdateEmbedding, encodeEmbedding(embedding), model, now, factUUID)
+	if err != nil {
+		return fmt.Errorf("update fact embedding: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) DeleteFact(ctx context.Context, entityUUID, factUUID string) error {
+	_, err := r.db.ExecContext(ctx, r.q.FactDelete, factUUID, entityUUID)
+	if err != nil {
+		return fmt.Errorf("delete fact: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) DeleteEntityFacts(ctx context.Context, entityUUID string) (int64, error) {
+	res, err := r.db.ExecContext(ctx, r.q.FactDeleteAll, entityUUID)
+	if err != nil {
+		return 0, fmt.Errorf("delete entity facts: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// ---- RecallUsageTracker ----
+
+func (r *Repository) UpdateRecallUsage(ctx context.Context, factUUIDs []string) error {
+	if len(factUUIDs) == 0 || r.q.FactUpdateRecallUsage == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, r.q.FactUpdateRecallUsage)
+	if err != nil {
+		return fmt.Errorf("prepare recall usage update: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, id := range factUUIDs {
+		if _, err := stmt.ExecContext(ctx, now, id); err != nil {
+			return fmt.Errorf("update recall usage for %s: %w", id, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// ---- FactFilteredReader ----
+
+func (r *Repository) ListFactsFiltered(ctx context.Context, entityUUID string, filter store.FactFilter, limit int) ([]*store.Fact, error) {
+	query := `SELECT uuid, content, embedding, created_at, updated_at,
+		fact_type, temporal_status, significance, content_key,
+		reference_time, expires_at, reinforced_at, reinforced_count, tag,
+		slot, confidence, embedding_model, source_role,
+		recall_count, last_recalled_at
+		FROM mg_entity_fact WHERE entity_id = ?`
+	args := []any{entityUUID}
+
+	if len(filter.Types) > 0 {
+		placeholders := make([]string, len(filter.Types))
+		for i, t := range filter.Types {
+			placeholders[i] = "?"
+			args = append(args, string(t))
+		}
+		query += " AND fact_type IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if len(filter.Statuses) > 0 {
+		placeholders := make([]string, len(filter.Statuses))
+		for i, s := range filter.Statuses {
+			placeholders[i] = "?"
+			args = append(args, string(s))
+		}
+		query += " AND temporal_status IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if len(filter.Tags) > 0 {
+		placeholders := make([]string, len(filter.Tags))
+		for i, t := range filter.Tags {
+			placeholders[i] = "?"
+			args = append(args, t)
+		}
+		query += " AND tag IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if filter.MinSignificance > 0 {
+		query += " AND significance >= ?"
+		args = append(args, int(filter.MinSignificance))
+	}
+	if filter.ExcludeExpired {
+		query += " AND (expires_at IS NULL OR expires_at > ?)"
+		args = append(args, time.Now().UTC())
+	}
+	if filter.ReferenceTimeAfter != nil {
+		query += " AND reference_time IS NOT NULL AND reference_time >= ?"
+		args = append(args, *filter.ReferenceTimeAfter)
+	}
+	if filter.ReferenceTimeBefore != nil {
+		query += " AND reference_time IS NOT NULL AND reference_time <= ?"
+		args = append(args, *filter.ReferenceTimeBefore)
+	}
+	if len(filter.Slots) > 0 {
+		placeholders := make([]string, len(filter.Slots))
+		for i, sl := range filter.Slots {
+			placeholders[i] = "?"
+			args = append(args, sl)
+		}
+		query += " AND slot IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if filter.MinConfidence > 0 {
+		query += " AND confidence >= ?"
+		args = append(args, filter.MinConfidence)
+	}
+	if len(filter.SourceRoles) > 0 {
+		placeholders := make([]string, len(filter.SourceRoles))
+		for i, sr := range filter.SourceRoles {
+			placeholders[i] = "?"
+			args = append(args, sr)
+		}
+		query += " AND source_role IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	query += " ORDER BY created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	// Convert ? placeholders to dialect-specific ones for postgres ($1, $2, ...).
+	query = r.rewritePlaceholders(query)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list facts filtered: %w", err)
+	}
+	defer rows.Close()
+	return scanFacts(rows)
+}
+
+// ---- FactRecallReader ----
+
+func (r *Repository) ListFactsForRecall(ctx context.Context, entityUUID string, filter store.FactFilter, limit int) ([]*store.Fact, error) {
+	query := `SELECT uuid, content, embedding, created_at, updated_at,
+		fact_type, temporal_status, significance, content_key,
+		reference_time, expires_at, reinforced_at, reinforced_count, tag,
+		slot, confidence, embedding_model, source_role,
+		recall_count, last_recalled_at
+		FROM mg_entity_fact WHERE entity_id = ?`
+	args := []any{entityUUID}
+
+	if len(filter.Types) > 0 {
+		placeholders := make([]string, len(filter.Types))
+		for i, t := range filter.Types {
+			placeholders[i] = "?"
+			args = append(args, string(t))
+		}
+		query += " AND fact_type IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if len(filter.Statuses) > 0 {
+		placeholders := make([]string, len(filter.Statuses))
+		for i, s := range filter.Statuses {
+			placeholders[i] = "?"
+			args = append(args, string(s))
+		}
+		query += " AND temporal_status IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if len(filter.Tags) > 0 {
+		placeholders := make([]string, len(filter.Tags))
+		for i, t := range filter.Tags {
+			placeholders[i] = "?"
+			args = append(args, t)
+		}
+		query += " AND tag IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if filter.MinSignificance > 0 {
+		query += " AND significance >= ?"
+		args = append(args, int(filter.MinSignificance))
+	}
+	if filter.ExcludeExpired {
+		query += " AND (expires_at IS NULL OR expires_at > ?)"
+		args = append(args, time.Now().UTC())
+	}
+	if filter.ReferenceTimeAfter != nil {
+		query += " AND reference_time IS NOT NULL AND reference_time >= ?"
+		args = append(args, *filter.ReferenceTimeAfter)
+	}
+	if filter.ReferenceTimeBefore != nil {
+		query += " AND reference_time IS NOT NULL AND reference_time <= ?"
+		args = append(args, *filter.ReferenceTimeBefore)
+	}
+	if len(filter.Slots) > 0 {
+		placeholders := make([]string, len(filter.Slots))
+		for i, sl := range filter.Slots {
+			placeholders[i] = "?"
+			args = append(args, sl)
+		}
+		query += " AND slot IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if filter.MinConfidence > 0 {
+		query += " AND confidence >= ?"
+		args = append(args, filter.MinConfidence)
+	}
+	if len(filter.SourceRoles) > 0 {
+		placeholders := make([]string, len(filter.SourceRoles))
+		for i, sr := range filter.SourceRoles {
+			placeholders[i] = "?"
+			args = append(args, sr)
+		}
+		query += " AND source_role IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	query = r.rewritePlaceholders(query)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list facts for recall: %w", err)
+	}
+	defer rows.Close()
+	return scanFacts(rows)
+}
+
+// ---- FactMetadataReader ----
+
+func (r *Repository) ListFactsMetadata(ctx context.Context, entityUUID string, filter store.FactFilter, limit int) ([]*store.Fact, error) {
+	query := `SELECT uuid, content, created_at, updated_at,
+		fact_type, temporal_status, significance, content_key,
+		reference_time, expires_at, reinforced_at, reinforced_count, tag,
+		slot, confidence, embedding_model, source_role,
+		recall_count, last_recalled_at
+		FROM mg_entity_fact WHERE entity_id = ?`
+	args := []any{entityUUID}
+
+	if len(filter.Types) > 0 {
+		placeholders := make([]string, len(filter.Types))
+		for i, t := range filter.Types {
+			placeholders[i] = "?"
+			args = append(args, string(t))
+		}
+		query += " AND fact_type IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if len(filter.Statuses) > 0 {
+		placeholders := make([]string, len(filter.Statuses))
+		for i, s := range filter.Statuses {
+			placeholders[i] = "?"
+			args = append(args, string(s))
+		}
+		query += " AND temporal_status IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if len(filter.Tags) > 0 {
+		placeholders := make([]string, len(filter.Tags))
+		for i, t := range filter.Tags {
+			placeholders[i] = "?"
+			args = append(args, t)
+		}
+		query += " AND tag IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if filter.MinSignificance > 0 {
+		query += " AND significance >= ?"
+		args = append(args, int(filter.MinSignificance))
+	}
+	if filter.ExcludeExpired {
+		query += " AND (expires_at IS NULL OR expires_at > ?)"
+		args = append(args, time.Now().UTC())
+	}
+	if filter.ReferenceTimeAfter != nil {
+		query += " AND reference_time IS NOT NULL AND reference_time >= ?"
+		args = append(args, *filter.ReferenceTimeAfter)
+	}
+	if filter.ReferenceTimeBefore != nil {
+		query += " AND reference_time IS NOT NULL AND reference_time <= ?"
+		args = append(args, *filter.ReferenceTimeBefore)
+	}
+	if len(filter.Slots) > 0 {
+		placeholders := make([]string, len(filter.Slots))
+		for i, sl := range filter.Slots {
+			placeholders[i] = "?"
+			args = append(args, sl)
+		}
+		query += " AND slot IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if filter.MinConfidence > 0 {
+		query += " AND confidence >= ?"
+		args = append(args, filter.MinConfidence)
+	}
+	if len(filter.SourceRoles) > 0 {
+		placeholders := make([]string, len(filter.SourceRoles))
+		for i, sr := range filter.SourceRoles {
+			placeholders[i] = "?"
+			args = append(args, sr)
+		}
+		query += " AND source_role IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	query += " ORDER BY created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	query = r.rewritePlaceholders(query)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list facts metadata: %w", err)
+	}
+	defer rows.Close()
+	return scanFactsMetadata(rows)
+}
+
+// scanFactsMetadata scans fact rows without embedding data.
+func scanFactsMetadata(rows *sql.Rows) ([]*store.Fact, error) {
+	var out []*store.Fact
+	for rows.Next() {
+		f := &store.Fact{}
+		var factType, temporalStatus string
+		var significance int
+		var createdAt, updatedAt flexTime
+		var refTime, expiresAt, reinforcedAt flexTime
+		var lastRecalledAt flexTime
+		if err := rows.Scan(
+			&f.UUID, &f.Content, &createdAt, &updatedAt,
+			&factType, &temporalStatus, &significance,
+			&f.ContentKey, &refTime, &expiresAt,
+			&reinforcedAt, &f.ReinforcedCount, &f.Tag,
+			&f.Slot, &f.Confidence, &f.EmbeddingModel, &f.SourceRole,
+			&f.RecallCount, &lastRecalledAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan fact metadata: %w", err)
+		}
+		f.Type = store.FactType(factType)
+		f.TemporalStatus = store.TemporalStatus(temporalStatus)
+		f.Significance = store.Significance(significance)
+		f.CreatedAt = createdAt.Time
+		f.UpdatedAt = updatedAt.Time
+		if refTime.Valid {
+			f.ReferenceTime = &refTime.Time
+		}
+		if expiresAt.Valid {
+			f.ExpiresAt = &expiresAt.Time
+		}
+		if reinforcedAt.Valid {
+			f.ReinforcedAt = &reinforcedAt.Time
+		}
+		if lastRecalledAt.Valid {
+			f.LastRecalledAt = &lastRecalledAt.Time
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// rewritePlaceholders converts ? placeholders to $N for postgres dialects.
+// It checks whether the dialect uses $1-style params by inspecting FactInsert.
+func (r *Repository) rewritePlaceholders(query string) string {
+	if len(r.q.FactInsert) == 0 || !containsDollarParam(r.q.FactInsert) {
+		return query // MySQL and SQLite use ? natively
+	}
+	var b strings.Builder
+	n := 1
+	for i := 0; i < len(query); i++ {
+		if query[i] == '?' {
+			b.WriteString(fmt.Sprintf("$%d", n))
+			n++
+		} else {
+			b.WriteByte(query[i])
+		}
+	}
+	return b.String()
+}
+
+func containsDollarParam(s string) bool {
+	return strings.Contains(s, "$1")
+}
+
+func joinStrings(parts []string, sep string) string {
+	return strings.Join(parts, sep)
+}
+
+// scanFacts reads fact rows including all lifecycle columns.
+func scanFacts(rows *sql.Rows) ([]*store.Fact, error) {
+	var out []*store.Fact
+	for rows.Next() {
+		f := &store.Fact{}
+		var raw []byte
+		var factType, temporalStatus string
+		var significance int
+		var createdAt, updatedAt flexTime
+		var refTime, expiresAt, reinforcedAt flexTime
+		var lastRecalledAt flexTime
+		if err := rows.Scan(
+			&f.UUID, &f.Content, &raw, &createdAt, &updatedAt,
+			&factType, &temporalStatus, &significance,
+			&f.ContentKey, &refTime, &expiresAt,
+			&reinforcedAt, &f.ReinforcedCount, &f.Tag,
+			&f.Slot, &f.Confidence, &f.EmbeddingModel, &f.SourceRole,
+			&f.RecallCount, &lastRecalledAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan fact: %w", err)
+		}
+		f.Embedding = decodeEmbedding(raw)
+		f.Type = store.FactType(factType)
+		f.TemporalStatus = store.TemporalStatus(temporalStatus)
+		f.Significance = store.Significance(significance)
+		f.CreatedAt = createdAt.Time
+		f.UpdatedAt = updatedAt.Time
+		if refTime.Valid {
+			f.ReferenceTime = &refTime.Time
+		}
+		if expiresAt.Valid {
+			f.ExpiresAt = &expiresAt.Time
+		}
+		if reinforcedAt.Valid {
+			f.ReinforcedAt = &reinforcedAt.Time
+		}
+		if lastRecalledAt.Valid {
+			f.LastRecalledAt = &lastRecalledAt.Time
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// nullTime converts a *time.Time to a value suitable for a nullable SQL column.
+func nullTime(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return *t
+}
+
+// ---- ConversationWriter ----
+
+func (r *Repository) StartConversation(ctx context.Context, sessionUUID, entityUUID string) (string, error) {
+	id := uuid.New().String()
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, r.q.ConvInsert, id, sessionUUID, entityUUID, now, now)
+	if err != nil {
+		return "", fmt.Errorf("start conversation: %w", err)
+	}
+	return id, nil
+}
+
+// ---- ConversationReader ----
+
+func (r *Repository) FindConversation(ctx context.Context, id string) (*store.Conversation, error) {
+	c := &store.Conversation{}
+	err := r.db.QueryRowContext(ctx, r.q.ConvSelect, id).Scan(
+		&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &c.CreatedAt, &c.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find conversation: %w", err)
+	}
+	return c, nil
+}
+
+func (r *Repository) ActiveConversation(ctx context.Context, sessionUUID string) (*store.Conversation, error) {
+	c := &store.Conversation{}
+	err := r.db.QueryRowContext(ctx, r.q.ConvSelectActive, sessionUUID).Scan(
+		&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &c.CreatedAt, &c.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("active conversation: %w", err)
+	}
+	return c, nil
+}
+
+func (r *Repository) UpdateConversationSummary(ctx context.Context, conversationUUID, summary string, embedding []float32) error {
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, r.q.ConvUpdateSummary, summary, encodeEmbedding(embedding), now, conversationUUID)
+	if err != nil {
+		return fmt.Errorf("update conversation summary: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) ListConversationSummaries(ctx context.Context, entityUUID string, limit int) ([]*store.Conversation, error) {
+	query := `SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at
+		FROM mg_conversation
+		WHERE entity_id = ? AND summary != '' AND summary_embedding IS NOT NULL`
+	args := []any{entityUUID}
+	if limit > 0 {
+		query += " ORDER BY created_at DESC LIMIT ?"
+		args = append(args, limit)
+	}
+	query = r.rewritePlaceholders(query)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list conversation summaries: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*store.Conversation
+	for rows.Next() {
+		c := &store.Conversation{}
+		var raw []byte
+		if err := rows.Scan(&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &raw, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan conversation summary: %w", err)
+		}
+		c.SummaryEmbedding = decodeEmbedding(raw)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) FindUnsummarizedConversation(ctx context.Context, entityUUID, excludeSessionUUID string) (*store.Conversation, error) {
+	c := &store.Conversation{}
+	err := r.db.QueryRowContext(ctx, r.q.ConvSelectUnsummarized, entityUUID, excludeSessionUUID).Scan(
+		&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &c.CreatedAt, &c.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find unsummarized conversation: %w", err)
+	}
+	return c, nil
+}
+
+// ---- ConversationPruner ----
+
+func (r *Repository) PruneStaleSummaries(ctx context.Context, olderThan time.Time) (int64, error) {
+	now := time.Now().UTC()
+	res, err := r.db.ExecContext(ctx, r.q.ConvPruneSummaries, now, olderThan)
+	if err != nil {
+		return 0, fmt.Errorf("prune stale summaries: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// ---- MessageWriter ----
+
+func (r *Repository) AppendMessage(ctx context.Context, conversationUUID string, msg *store.Message) error {
+	msg.UUID = uuid.New().String()
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, r.q.MsgInsert,
+		msg.UUID, conversationUUID, msg.Role, msg.Content, msg.Kind, now,
+	)
+	if err != nil {
+		return fmt.Errorf("append message: %w", err)
+	}
+	return nil
+}
+
+// ---- MessageReader ----
+
+func (r *Repository) ReadMessages(ctx context.Context, conversationUUID string) ([]*store.Message, error) {
+	rows, err := r.db.QueryContext(ctx, r.q.MsgSelect, conversationUUID)
+	if err != nil {
+		return nil, fmt.Errorf("read messages: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*store.Message
+	for rows.Next() {
+		m := &store.Message{}
+		if err := rows.Scan(&m.UUID, &m.ConversationID, &m.Role, &m.Content, &m.Kind, &m.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan message: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) ReadRecentMessages(ctx context.Context, conversationUUID string, limit int) ([]*store.Message, error) {
+	rows, err := r.db.QueryContext(ctx, r.q.MsgSelectRecent, conversationUUID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("read recent messages: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*store.Message
+	for rows.Next() {
+		m := &store.Message{}
+		if err := rows.Scan(&m.UUID, &m.ConversationID, &m.Role, &m.Content, &m.Kind, &m.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan message: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Reverse to get chronological order.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
+// ---- SessionWriter ----
+
+func (r *Repository) EnsureSession(ctx context.Context, entityUUID, processUUID string, timeout time.Duration) (*store.Session, bool, error) {
+	now := time.Now().UTC()
+
+	// Check for an active (non-expired) session.
+	s := &store.Session{}
+	err := r.db.QueryRowContext(ctx, r.q.SessionSelect, entityUUID, processUUID, now).Scan(
+		&s.UUID, &s.EntityID, &s.ProcessID, &s.CreatedAt, &s.ExpiresAt,
+	)
+	if err == nil {
+		// Slide the expiry forward.
+		newExpiry := now.Add(timeout)
+		if _, slideErr := r.db.ExecContext(ctx, r.q.SessionSlide, newExpiry, s.UUID); slideErr != nil {
+			return nil, false, fmt.Errorf("slide session expiry: %w", slideErr)
+		}
+		s.ExpiresAt = newExpiry
+		return s, false, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, false, fmt.Errorf("check active session: %w", err)
+	}
+
+	// No active session; create one.
+	id := uuid.New().String()
+	expires := now.Add(timeout)
+	if _, err := r.db.ExecContext(ctx, r.q.SessionInsert, id, entityUUID, processUUID, now, expires); err != nil {
+		return nil, false, fmt.Errorf("create session: %w", err)
+	}
+	return &store.Session{
+		UUID: id, EntityID: entityUUID, ProcessID: processUUID,
+		CreatedAt: now, ExpiresAt: expires,
+	}, true, nil
+}
+
+// ---- ProcessWriter ----
+
+func (r *Repository) UpsertProcess(ctx context.Context, externalID string) (string, error) {
+	id := uuid.New().String()
+	if _, err := r.db.ExecContext(ctx, r.q.ProcessInsert, id, externalID); err != nil {
+		return "", fmt.Errorf("upsert process: %w", err)
+	}
+	var resultID string
+	if err := r.db.QueryRowContext(ctx, r.q.ProcessSelectID, externalID).Scan(&resultID); err != nil {
+		return "", fmt.Errorf("read process uuid: %w", err)
+	}
+	return resultID, nil
+}
+
+// ---- ProcessAttributeWriter ----
+
+func (r *Repository) InsertProcessAttribute(ctx context.Context, processUUID string, attr *store.Attribute) error {
+	attr.UUID = uuid.New().String()
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, r.q.AttrInsert,
+		attr.UUID, processUUID, attr.Key, attr.Value, now,
+	)
+	if err != nil {
+		return fmt.Errorf("insert attribute: %w", err)
+	}
+	return nil
+}
+
+// ---- io.Closer ----
+
+func (r *Repository) Close() error {
+	return r.db.Close()
+}
