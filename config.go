@@ -77,6 +77,9 @@ type Config struct {
 	// SummaryTokenBudget is the max tokens for summary text in context.
 	SummaryTokenBudget int
 
+	// ConsciousCacheTTL controls how long conscious facts are cached before refresh.
+	ConsciousCacheTTL time.Duration
+
 	// Debug enables verbose logging when true.
 	Debug bool
 }
@@ -97,6 +100,7 @@ func DefaultConfig() *Config {
 		MaxRecallCandidates:   10000,
 		ConsciousMode:         true,
 		ConsciousLimit:        10,
+		ConsciousCacheTTL:     30 * time.Second,
 		WorkingMemoryTurns:    20,
 		MemoryTokenBudget:     4000,
 		SummaryTokenBudget:    1000,
@@ -144,6 +148,11 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("MEMG_SUMMARY_TOKEN_BUDGET"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			c.SummaryTokenBudget = n
+		}
+	}
+	if v := os.Getenv("MEMG_CONSCIOUS_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.ConsciousCacheTTL = d
 		}
 	}
 	if v := os.Getenv("MEMG_DEBUG"); v == "1" || v == "true" {

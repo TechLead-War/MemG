@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"memg/embed"
 	"memg/llm"
@@ -58,7 +57,9 @@ type MemG struct {
 	processUUID string
 	sessionUUID string
 
-	closed bool
+	baseCtx    context.Context
+	cancelBase context.CancelFunc
+	closed     bool
 }
 
 // New creates a MemG instance connected to the given repository.
@@ -71,11 +72,14 @@ func New(repo store.Repository, opts ...Option) (*MemG, error) {
 		o(cfg)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	g := &MemG{
-		cfg:      cfg,
-		repo:     repo,
-		engine:   search.NewHybrid(),
-		pipeline: augment.NewPipeline(repo),
+		cfg:        cfg,
+		repo:       repo,
+		engine:     search.NewHybrid(),
+		pipeline:   augment.NewPipeline(repo),
+		baseCtx:    ctx,
+		cancelBase: cancel,
 	}
 
 	if cfg.LLMProvider != "" {
@@ -100,7 +104,7 @@ func New(repo store.Repository, opts ...Option) (*MemG, error) {
 	pruner.Start()
 	g.pruner = pruner
 
-	g.consciousCache = memory.NewConsciousCache(30 * time.Second)
+	g.consciousCache = memory.NewConsciousCache(cfg.ConsciousCacheTTL)
 	g.pipeline.OnFactInserted = func(entityUUID string, fact *store.Fact) {
 		g.consciousCache.Invalidate(entityUUID)
 	}
@@ -463,6 +467,7 @@ func (g *MemG) Close() error {
 		return ErrAlreadyClosed
 	}
 	g.closed = true
+	g.cancelBase()
 	g.pruner.Stop()
 	g.pipeline.Shutdown()
 	return g.repo.Close()
@@ -493,14 +498,14 @@ func (g *MemG) resolveIdentities(ctx context.Context) error {
 	if g.cfg.EntityID != "" && g.entityUUID == "" {
 		id, err := g.repo.UpsertEntity(ctx, g.cfg.EntityID)
 		if err != nil {
-			return err
+			return fmt.Errorf("resolve identities: upsert entity: %w", err)
 		}
 		g.entityUUID = id
 	}
 	if g.cfg.ProcessID != "" && g.processUUID == "" {
 		id, err := g.repo.UpsertProcess(ctx, g.cfg.ProcessID)
 		if err != nil {
-			return err
+			return fmt.Errorf("resolve identities: upsert process: %w", err)
 		}
 		g.processUUID = id
 	}
@@ -508,7 +513,7 @@ func (g *MemG) resolveIdentities(ctx context.Context) error {
 		oldSessionUUID := g.sessionUUID
 		sess, isNew, err := g.repo.EnsureSession(ctx, g.entityUUID, g.processUUID, g.cfg.SessionTimeout)
 		if err != nil {
-			return err
+			return fmt.Errorf("resolve identities: ensure session: %w", err)
 		}
 		if isNew && oldSessionUUID != "" && sess.UUID != oldSessionUUID {
 			go g.summarizeClosedSession(g.entityUUID, sess.UUID)
@@ -521,7 +526,7 @@ func (g *MemG) resolveIdentities(ctx context.Context) error {
 // summarizeClosedSession finds the most recent unsummarized conversation for an
 // entity that is not part of the current active session and summarizes it.
 func (g *MemG) summarizeClosedSession(entityUUID, currentSessionUUID string) {
-	ctx := context.Background()
+	ctx := g.baseCtx
 
 	g.mu.RLock()
 	prov := g.provider
@@ -541,13 +546,21 @@ func (g *MemG) summarizeClosedSession(entityUUID, currentSessionUUID string) {
 		return
 	}
 
-	_ = memory.GenerateAndStoreSummary(ctx, prov, emb, g.repo, conv.UUID)
+	if err := memory.GenerateAndStoreSummary(ctx, prov, emb, g.repo, conv.UUID); err != nil {
+		if g.cfg.Debug {
+			fmt.Printf("memg: generate summary: %v\n", err)
+		}
+	}
 }
 
 func (g *MemG) afterResponseForEntity(entityUUID, sessionUUID string, input []*llm.Message, resp *llm.Response) {
-	ctx := context.Background()
+	ctx := g.baseCtx
 	if sessionUUID != "" {
-		_ = memory.SaveExchange(ctx, g.repo, sessionUUID, entityUUID, input, resp)
+		if err := memory.SaveExchange(ctx, g.repo, sessionUUID, entityUUID, input, resp); err != nil {
+			if g.cfg.Debug {
+				fmt.Printf("memg: save exchange: %v\n", err)
+			}
+		}
 	}
 	if entityUUID != "" || g.processUUID != "" {
 		all := memory.NormalizeConversationMessages(input)
@@ -574,7 +587,7 @@ func (g *MemG) trackRecallUsage(facts []*memory.RecalledFact) {
 	for i, f := range facts {
 		ids[i] = f.ID
 	}
-	ctx := context.Background()
+	ctx := g.baseCtx
 	if err := g.repo.UpdateRecallUsage(ctx, ids); err != nil {
 		if g.cfg.Debug {
 			fmt.Printf("memg: update recall usage: %v\n", err)

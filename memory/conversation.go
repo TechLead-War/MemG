@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"memg/llm"
@@ -24,7 +25,7 @@ func SaveExchange(
 
 	conv, err := repo.ActiveConversation(ctx, sessionUUID)
 	if err != nil {
-		return err
+		return fmt.Errorf("save exchange: active conversation: %w", err)
 	}
 
 	convID := ""
@@ -33,7 +34,7 @@ func SaveExchange(
 	} else {
 		convID, err = repo.StartConversation(ctx, sessionUUID, entityUUID)
 		if err != nil {
-			return err
+			return fmt.Errorf("save exchange: start conversation: %w", err)
 		}
 	}
 
@@ -41,7 +42,7 @@ func SaveExchange(
 	if convID != "" && len(input) > 0 {
 		input, err = DiffIncomingMessages(ctx, repo, convID, input)
 		if err != nil {
-			return err
+			return fmt.Errorf("save exchange: diff messages: %w", err)
 		}
 	}
 
@@ -51,7 +52,7 @@ func SaveExchange(
 			Content: m.Content,
 			Kind:    "text",
 		}); err != nil {
-			return err
+			return fmt.Errorf("save exchange: append user message: %w", err)
 		}
 	}
 
@@ -61,7 +62,7 @@ func SaveExchange(
 			Content: strings.TrimSpace(resp.Content),
 			Kind:    "text",
 		}); err != nil {
-			return err
+			return fmt.Errorf("save exchange: append assistant message: %w", err)
 		}
 	}
 	return nil

@@ -198,7 +198,10 @@ func (f *OpenAIFormat) InjectContext(body []byte, contextText string) ([]byte, e
 			_ = json.Unmarshal(contentRaw, &existingContent)
 		}
 		newContent := contextText + "\n\n" + existingContent
-		contentBytes, _ := json.Marshal(newContent)
+		contentBytes, err := json.Marshal(newContent)
+		if err != nil {
+			return nil, fmt.Errorf("openai: inject context: marshal content: %w", err)
+		}
 		msgMap["content"] = contentBytes
 		updatedMsg, err := json.Marshal(msgMap)
 		if err != nil {

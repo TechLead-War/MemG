@@ -22,14 +22,19 @@ type Config struct {
 	Embedder       embed.Embedder    // text embedding service
 	Provider       llm.Provider      // LLM provider for extraction calls
 	Pipeline       *augment.Pipeline // asynchronous knowledge extraction
-	DefaultEntity      string            // entity ID for single-entity mode
-	SessionTimeout     time.Duration     // sliding session expiry
-	WorkingMemoryTurns int               // max recent turns for working memory
-	MemoryTokenBudget  int               // max token budget for merged context
-	SummaryTokenBudget int               // max tokens for summary text in context
-	ConsciousMode      bool              // inject top facts by significance on every request
-	ConsciousLimit     int               // max facts for conscious mode (default 10)
-	Debug              bool              // enable verbose logging
+	DefaultEntity        string        // entity ID for single-entity mode
+	SessionTimeout       time.Duration // sliding session expiry
+	WorkingMemoryTurns   int           // max recent turns for working memory
+	MemoryTokenBudget    int           // max token budget for merged context
+	SummaryTokenBudget   int           // max tokens for summary text in context
+	ConsciousMode        bool          // inject top facts by significance on every request
+	ConsciousLimit       int           // max facts for conscious mode (default 10)
+	RecallFactsLimit     int           // max facts per recall query (default 20)
+	RecallSummaryLimit   int           // max summaries per recall query (default 5)
+	RecallFactThreshold  float64       // min score for fact recall (default 0.3)
+	RecallSummaryThreshold float64     // min score for summary recall (default 0.3)
+	ConsciousCacheTTL    time.Duration // conscious cache entry lifetime (default 30s)
+	Debug                bool          // enable verbose logging
 }
 
 // Server is a transparent reverse proxy that intercepts LLM API traffic,
@@ -41,15 +46,24 @@ type Server struct {
 	entities       *entityCache
 	consciousCache *memory.ConsciousCache
 	http           *http.Server
+	baseCtx        context.Context
+	cancelBase     context.CancelFunc
 }
 
 // NewServer creates a proxy server with the given configuration.
 func NewServer(cfg Config) *Server {
+	ttl := cfg.ConsciousCacheTTL
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
 		cfg:            cfg,
 		engine:         search.NewHybrid(),
 		entities:       newEntityCache(cfg.Repo),
-		consciousCache: memory.NewConsciousCache(30 * time.Second),
+		consciousCache: memory.NewConsciousCache(ttl),
+		baseCtx:        ctx,
+		cancelBase:     cancel,
 	}
 }
 
@@ -66,6 +80,9 @@ func (s *Server) Start(addr string) error {
 
 // Shutdown gracefully stops the HTTP server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.cancelBase != nil {
+		defer s.cancelBase()
+	}
 	if s.http == nil {
 		return nil
 	}

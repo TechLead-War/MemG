@@ -140,7 +140,11 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request) {
 
 	copyResponseHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		if s.cfg.Debug {
+			fmt.Printf("memg proxy: copy response body: %v\n", err)
+		}
+	}
 }
 
 // forwardRaw sends the original request body to the upstream target and
@@ -155,7 +159,11 @@ func (s *Server) forwardRaw(w http.ResponseWriter, r *http.Request, body []byte)
 
 	copyResponseHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		if s.cfg.Debug {
+			fmt.Printf("memg proxy: copy response body: %v\n", err)
+		}
+	}
 }
 
 // forwardToUpstream constructs a new HTTP request to the upstream target,
@@ -187,12 +195,22 @@ func (s *Server) forwardToUpstream(r *http.Request, body []byte) (*http.Response
 // recall runs both fact and summary recall for the given entity and query,
 // then formats the results into a context string suitable for injection.
 func (s *Server) recall(ctx context.Context, entityUUID, queryText string) string {
-	const (
-		factLimit        = 20
-		summaryLimit     = 5
-		factThreshold    = 0.3
+	factLimit := s.cfg.RecallFactsLimit
+	if factLimit <= 0 {
+		factLimit = 20
+	}
+	summaryLimit := s.cfg.RecallSummaryLimit
+	if summaryLimit <= 0 {
+		summaryLimit = 5
+	}
+	factThreshold := s.cfg.RecallFactThreshold
+	if factThreshold <= 0 {
+		factThreshold = 0.3
+	}
+	summaryThreshold := s.cfg.RecallSummaryThreshold
+	if summaryThreshold <= 0 {
 		summaryThreshold = 0.3
-	)
+	}
 
 	var ctxInput memory.ContextInput
 	ctxInput.Budget = memory.ContextBudget{
@@ -265,7 +283,7 @@ func (s *Server) trackRecallUsage(facts []*memory.RecalledFact) {
 	for i, f := range facts {
 		ids[i] = f.ID
 	}
-	ctx := context.Background()
+	ctx := s.baseCtx
 	if err := s.cfg.Repo.UpdateRecallUsage(ctx, ids); err != nil {
 		if s.cfg.Debug {
 			fmt.Printf("memg proxy: update recall usage: %v\n", err)
@@ -284,7 +302,7 @@ func (s *Server) summarizeClosedSession(entityUUID, currentSessionUUID string) {
 		fmt.Printf("memg proxy: session rolled over for entity %s, new session %s\n", entityUUID, currentSessionUUID)
 	}
 
-	ctx := context.Background()
+	ctx := s.baseCtx
 	conv, err := s.cfg.Repo.FindUnsummarizedConversation(ctx, entityUUID, currentSessionUUID)
 	if err != nil || conv == nil {
 		return
@@ -294,14 +312,18 @@ func (s *Server) summarizeClosedSession(entityUUID, currentSessionUUID string) {
 		return
 	}
 
-	_ = memory.GenerateAndStoreSummary(ctx, s.cfg.Provider, s.cfg.Embedder, s.cfg.Repo, conv.UUID)
+	if err := memory.GenerateAndStoreSummary(ctx, s.cfg.Provider, s.cfg.Embedder, s.cfg.Repo, conv.UUID); err != nil {
+		if s.cfg.Debug {
+			fmt.Printf("memg proxy: generate summary: %v\n", err)
+		}
+	}
 }
 
 // afterResponse saves the exchange to the conversation log and enqueues a
 // pipeline job for background knowledge extraction. This runs asynchronously
 // and does not block the response to the client.
 func (s *Server) afterResponse(entityUUID, sessionUUID string, messages []*llm.Message, responseContent string) {
-	ctx := context.Background()
+	ctx := s.baseCtx
 
 	resp := &llm.Response{
 		Role:    llm.RoleAssistant,

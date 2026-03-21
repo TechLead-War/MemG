@@ -41,12 +41,8 @@ func New(cfg embed.ProviderConfig) (*Client, error) {
 		address = defaultAddress
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, address,
+	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("local: connect to %s: %w", address, err)
@@ -54,7 +50,9 @@ func New(cfg embed.ProviderConfig) (*Client, error) {
 
 	client := pb.NewEmbedderServiceClient(conn)
 
-	// Auto-detect model and dimension from the running service.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	info, err := client.Info(ctx, &pb.InfoRequest{})
 	if err != nil {
 		conn.Close()
