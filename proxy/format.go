@@ -34,5 +34,11 @@ func DetectFormat(path string) Format {
 	if strings.Contains(path, "/v1/messages") {
 		return &AnthropicFormat{}
 	}
+	if strings.Contains(path, ":streamGenerateContent") {
+		return &GeminiFormat{streaming: true}
+	}
+	if strings.Contains(path, ":generateContent") {
+		return &GeminiFormat{streaming: false}
+	}
 	return nil
 }

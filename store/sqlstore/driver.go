@@ -123,8 +123,9 @@ func (r *Repository) UpsertEntity(ctx context.Context, externalID string) (strin
 
 func (r *Repository) LookupEntity(ctx context.Context, externalID string) (*store.Entity, error) {
 	e := &store.Entity{}
+	var createdAt flexTime
 	err := r.db.QueryRowContext(ctx, r.q.EntitySelect, externalID).Scan(
-		&e.UUID, &e.ExternalID, &e.CreatedAt,
+		&e.UUID, &e.ExternalID, &createdAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -132,6 +133,7 @@ func (r *Repository) LookupEntity(ctx context.Context, externalID string) (*stor
 	if err != nil {
 		return nil, fmt.Errorf("lookup entity: %w", err)
 	}
+	e.CreatedAt = createdAt.Time
 	return e, nil
 }
 
@@ -785,8 +787,9 @@ func (r *Repository) StartConversation(ctx context.Context, sessionUUID, entityU
 
 func (r *Repository) FindConversation(ctx context.Context, id string) (*store.Conversation, error) {
 	c := &store.Conversation{}
+	var createdAt, updatedAt flexTime
 	err := r.db.QueryRowContext(ctx, r.q.ConvSelect, id).Scan(
-		&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &c.CreatedAt, &c.UpdatedAt,
+		&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &createdAt, &updatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -794,13 +797,16 @@ func (r *Repository) FindConversation(ctx context.Context, id string) (*store.Co
 	if err != nil {
 		return nil, fmt.Errorf("find conversation: %w", err)
 	}
+	c.CreatedAt = createdAt.Time
+	c.UpdatedAt = updatedAt.Time
 	return c, nil
 }
 
 func (r *Repository) ActiveConversation(ctx context.Context, sessionUUID string) (*store.Conversation, error) {
 	c := &store.Conversation{}
+	var createdAt, updatedAt flexTime
 	err := r.db.QueryRowContext(ctx, r.q.ConvSelectActive, sessionUUID).Scan(
-		&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &c.CreatedAt, &c.UpdatedAt,
+		&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &createdAt, &updatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -808,6 +814,8 @@ func (r *Repository) ActiveConversation(ctx context.Context, sessionUUID string)
 	if err != nil {
 		return nil, fmt.Errorf("active conversation: %w", err)
 	}
+	c.CreatedAt = createdAt.Time
+	c.UpdatedAt = updatedAt.Time
 	return c, nil
 }
 
@@ -841,9 +849,12 @@ func (r *Repository) ListConversationSummaries(ctx context.Context, entityUUID s
 	for rows.Next() {
 		c := &store.Conversation{}
 		var raw []byte
-		if err := rows.Scan(&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &raw, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		var createdAt, updatedAt flexTime
+		if err := rows.Scan(&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &raw, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan conversation summary: %w", err)
 		}
+		c.CreatedAt = createdAt.Time
+		c.UpdatedAt = updatedAt.Time
 		c.SummaryEmbedding = decodeEmbedding(raw)
 		out = append(out, c)
 	}
@@ -852,8 +863,9 @@ func (r *Repository) ListConversationSummaries(ctx context.Context, entityUUID s
 
 func (r *Repository) FindUnsummarizedConversation(ctx context.Context, entityUUID, excludeSessionUUID string) (*store.Conversation, error) {
 	c := &store.Conversation{}
+	var createdAt, updatedAt flexTime
 	err := r.db.QueryRowContext(ctx, r.q.ConvSelectUnsummarized, entityUUID, excludeSessionUUID).Scan(
-		&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &c.CreatedAt, &c.UpdatedAt,
+		&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &createdAt, &updatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -861,6 +873,8 @@ func (r *Repository) FindUnsummarizedConversation(ctx context.Context, entityUUI
 	if err != nil {
 		return nil, fmt.Errorf("find unsummarized conversation: %w", err)
 	}
+	c.CreatedAt = createdAt.Time
+	c.UpdatedAt = updatedAt.Time
 	return c, nil
 }
 
@@ -901,9 +915,11 @@ func (r *Repository) ReadMessages(ctx context.Context, conversationUUID string) 
 	var out []*store.Message
 	for rows.Next() {
 		m := &store.Message{}
-		if err := rows.Scan(&m.UUID, &m.ConversationID, &m.Role, &m.Content, &m.Kind, &m.CreatedAt); err != nil {
+		var createdAt flexTime
+		if err := rows.Scan(&m.UUID, &m.ConversationID, &m.Role, &m.Content, &m.Kind, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
+		m.CreatedAt = createdAt.Time
 		out = append(out, m)
 	}
 	return out, rows.Err()
@@ -919,9 +935,11 @@ func (r *Repository) ReadRecentMessages(ctx context.Context, conversationUUID st
 	var out []*store.Message
 	for rows.Next() {
 		m := &store.Message{}
-		if err := rows.Scan(&m.UUID, &m.ConversationID, &m.Role, &m.Content, &m.Kind, &m.CreatedAt); err != nil {
+		var createdAt flexTime
+		if err := rows.Scan(&m.UUID, &m.ConversationID, &m.Role, &m.Content, &m.Kind, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
+		m.CreatedAt = createdAt.Time
 		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -941,10 +959,13 @@ func (r *Repository) EnsureSession(ctx context.Context, entityUUID, processUUID 
 
 	// Check for an active (non-expired) session.
 	s := &store.Session{}
+	var createdAt, expiresAt flexTime
 	err := r.db.QueryRowContext(ctx, r.q.SessionSelect, entityUUID, processUUID, now).Scan(
-		&s.UUID, &s.EntityID, &s.ProcessID, &s.CreatedAt, &s.ExpiresAt,
+		&s.UUID, &s.EntityID, &s.ProcessID, &createdAt, &expiresAt,
 	)
 	if err == nil {
+		s.CreatedAt = createdAt.Time
+		s.ExpiresAt = expiresAt.Time
 		// Slide the expiry forward.
 		newExpiry := now.Add(timeout)
 		if _, slideErr := r.db.ExecContext(ctx, r.q.SessionSlide, newExpiry, s.UUID); slideErr != nil {

@@ -85,7 +85,7 @@ func (s *Server) handleStreaming(
 	if resp.StatusCode == http.StatusOK {
 		content := accumulated.String()
 		if content != "" {
-			go s.afterResponse(entityUUID, sessionUUID, messages, content)
+			s.goBackground(func() { s.afterResponse(entityUUID, sessionUUID, messages, content) })
 		}
 	}
 }

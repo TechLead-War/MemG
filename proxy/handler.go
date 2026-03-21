@@ -80,7 +80,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if sess != nil {
 		sessionUUID = sess.UUID
 		if isNew {
-			go s.summarizeClosedSession(entityUUID, sess.UUID)
+			s.goBackground(func() { s.summarizeClosedSession(entityUUID, sess.UUID) })
 		}
 	}
 
@@ -185,11 +185,7 @@ func (s *Server) forwardToUpstream(r *http.Request, body []byte) (*http.Response
 	}
 	upstream.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 
-	client := &http.Client{
-		// No timeout here — streaming responses can last a long time.
-		// The caller's context controls cancellation.
-	}
-	return client.Do(upstream)
+	return s.httpClient.Do(upstream)
 }
 
 // recall runs both fact and summary recall for the given entity and query,
@@ -246,9 +242,13 @@ func (s *Server) recall(ctx context.Context, entityUUID, queryText string) strin
 			queryVec := vectors[0]
 			queryModel := embed.ModelNameOf(s.cfg.Embedder)
 
+			maxCandidates := s.cfg.MaxRecallCandidates
+			if maxCandidates <= 0 {
+				maxCandidates = 10000
+			}
 			facts, err := memory.RecallWithVector(
 				ctx, s.engine, s.cfg.Repo,
-				queryVec, queryModel, queryText, entityUUID, factLimit, factThreshold,
+				queryVec, queryModel, queryText, entityUUID, factLimit, factThreshold, maxCandidates,
 			)
 			if err != nil {
 				fmt.Printf("memg proxy: fact recall failed: %v\n", err)
@@ -268,7 +268,7 @@ func (s *Server) recall(ctx context.Context, entityUUID, queryText string) strin
 
 	// Track recall usage for facts injected into the prompt.
 	if len(ctxInput.RecalledFacts) > 0 {
-		go s.trackRecallUsage(ctxInput.RecalledFacts)
+		s.goBackground(func() { s.trackRecallUsage(ctxInput.RecalledFacts) })
 	}
 
 	return memory.BuildContext(ctxInput)
@@ -352,6 +352,21 @@ func (s *Server) afterResponse(entityUUID, sessionUUID string, messages []*llm.M
 			EntityID: entityUUID,
 			Messages: allMessages,
 		})
+	}
+}
+
+// goBackground runs fn in a goroutine, bounded by the server's background
+// semaphore. If the semaphore is full, fn runs synchronously to prevent
+// unbounded goroutine growth.
+func (s *Server) goBackground(fn func()) {
+	select {
+	case s.bgSem <- struct{}{}:
+		go func() {
+			defer func() { <-s.bgSem }()
+			fn()
+		}()
+	default:
+		fn()
 	}
 }
 

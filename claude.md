@@ -1,274 +1,236 @@
 # CLAUDE.md
 
 ## Purpose
-This repository is MemG, a pluggable memory layer for LLM applications, written in Go.
-Primary goal: enable zero-code persistent memory for any LLM app via reverse proxy or MCP server, with hybrid recall, fact lifecycle management, and multi-provider support.
-But our good to have is also if we can just plug and play in any lang repo. Do not optimize for side quests or speculative improvements.
+This repository is **MemG**, a pluggable memory layer for LLM applications, written in Go.
 
-Critical workflows:
-1. **Proxy mode** — `memg proxy` intercepts OpenAI/Anthropic API calls, injects recalled facts, and asynchronously extracts knowledge from conversations.
-2. **Library mode** — `memg.New(repo, opts...)` gives Go developers direct programmatic access to `Chat()`, `Stream()`, and memory management.
-3. **MCP mode** — `memg mcp` exposes memory operations as JSON-RPC 2.0 tools for agent frameworks like Claude.
+Primary goal:
+- enable persistent memory for LLM apps via reverse proxy, Go library, and MCP server
+- support hybrid recall, fact lifecycle management, and multi-provider integrations
+- remain easy to plug into applications with minimal integration effort
 
 Non-goals:
-- Do not turn this into a general-purpose database or vector store.
-- Do not rewrite the provider registry pattern — it works and all 20 providers follow it.
-- Do not introduce frameworks, ORMs, or heavy abstractions over the existing clean interfaces.
+- do not turn this into a general-purpose database or vector store
+- do not rewrite the provider registry pattern
+- do not introduce frameworks, ORMs, or heavy abstractions over the existing interfaces
 
-## Architecture
+## Critical Workflows
+1. **Proxy mode** — `memg proxy` intercepts LLM API calls, injects recalled facts, and asynchronously extracts knowledge
+2. **Library mode** — `memg.New(repo, opts...)` provides programmatic APIs like `Chat()` and `Stream()`
+3. **MCP mode** — `memg mcp` exposes memory operations as JSON-RPC tools for agent frameworks
 
-### Core Interfaces
-Every major subsystem is behind an interface. Respect these boundaries:
-- **Repository** (`store/store.go`) — composite of 16+ sub-interfaces for all persistence ops.
-- **Provider** (`llm/provider.go`) — `Chat()` and `Stream()` for LLM calls.
-- **Embedder** (`embed/embedder.go`) — `Embed()` and `Dimension()` for vector generation.
-- **Engine** (`search/engine.go`) — `Rank()` for hybrid search scoring.
-- **Stage** (`memory/augment/stage.go`) — `Execute()` for fact extraction from messages.
+## Architecture Invariants
+Respect these boundaries:
+- **Repository** (`store/store.go`) — persistence contract
+- **Provider** (`llm/provider.go`) — LLM contract
+- **Embedder** (`embed/embedder.go`) — embedding contract
+- **Engine** (`search/engine.go`) — ranking contract
+- **Stage** (`memory/augment/stage.go`) — extraction pipeline contract
 
-### Key Patterns
-- **Provider Registry via `init()`** — every provider package self-registers. New providers must follow this pattern exactly: call `llm.RegisterProvider()` or `embed.RegisterEmbedder()` in `init()`.
-- **Option pattern** — instance-level config via `memg.With*()` funcs, per-call overrides via `memg.For*()` and `llm.With*()`.
-- **SQL dialect abstraction** — each storage backend defines its own `Queries` struct. Cross-DB time parsing handled by `flexTime` in `store/sqlstore/encoding.go`.
-- **Internal transport** — proxy marks its own API calls (for extraction/embedding) via `proxy.NewInternalHTTPClient()` to avoid self-interception loops.
+Do not break interface contracts in:
+- `store/store.go`
+- `llm/provider.go`
+- `embed/embedder.go`
+- `search/engine.go`
 
-### Package Layout
-```
-memg.go, config.go, option.go    → top-level MemG struct and config
-cmd/memg/                        → CLI (proxy, mcp subcommands)
-store/                           → Repository interface + sqlstore implementations
-llm/                             → LLM provider interface + 10 provider packages
-embed/                           → Embedder interface + 10 provider packages
-search/                          → Hybrid engine (cosine + BM25 + Kneedle cutoff)
-memory/                          → Recall, sessions, decay, consolidation, conscious loading
-memory/augment/                  → Extraction pipeline (stages, pool, conflict resolution)
-proxy/                           → Reverse proxy + request interception
-mcp/                             → MCP JSON-RPC server
-graph/                           → Knowledge graph triples
-local/embedder/                  → Python gRPC service for local sentence-transformers
-```
+## Core Patterns
+- provider and embedder packages self-register via `init()`
+- instance-level config uses `memg.With*()`
+- per-call overrides use `memg.For*()` and `llm.With*()`
+- SQL backends own their dialect-specific query implementations
+- proxy internal calls must avoid self-interception loops
+
+## Package Layout
+- `memg.go`, `config.go`, `option.go` — core MemG types and config
+- `cmd/memg/` — CLI entrypoints
+- `store/` — repository contract and store implementations
+- `llm/` — provider interface and provider packages
+- `embed/` — embedder interface and provider packages
+- `search/` — hybrid ranking logic
+- `memory/` — recall, sessions, decay, reinforcement, consolidation
+- `memory/augment/` — extraction pipeline
+- `proxy/` — reverse proxy
+- `mcp/` — MCP server
+- `graph/` — knowledge graph triples
+- `local/embedder/` — local embedding service
+
+## Source of Truth Order
+When facts conflict, trust sources in this order:
+1. current code
+2. current repo docs
+3. current config/defaults in repo
+4. user-provided repo context
+5. prior assumptions or generic patterns
+
+Never override repo evidence with intuition.
+
+## Fact Verification Rules
+Classify every factual claim as one of:
+- **repo fact**
+- **external current fact**
+- **stable general knowledge**
+
+For **repo facts**:
+- verify from code or repo docs before stating them
+- never guess defaults, timeouts, limits, field names, schema shape, API behavior, or file paths
+
+For **external current facts**:
+- verify from authoritative current sources before stating them
+- prefer vendor docs, official announcements, or official product pages
+- do not answer from memory
+- do not treat search snippets as proof; open the source and confirm the claim
+
+If the user challenges a factual claim:
+- treat the earlier answer as untrusted
+- re-verify from source
+- retract unsupported claims plainly
+- restart from verified facts only
+
+If verification is incomplete or conflicting:
+- say **unverified** or **conflicting**
+- do not guess
+
+In answers, separate:
+- **Verified**
+- **Inferred**
+- **Unknown**
+
+## Read Before Write
+Before proposing or making a change:
+1. read all directly relevant files
+2. read neighboring types, helpers, interfaces, and existing tests if present
+3. understand the full call path
+4. follow patterns already used in the repo
+5. do not patch from one isolated file without understanding surrounding flow
 
 ## Coding Rules
-- Do not write code unless explicitly told to. First propose a detailed plan — what files are involved, what changes go where, why this approach, what existing code gets reused, and any edge cases or risks. The plan should be complete enough that I do not need to ask follow-up questions to understand the full picture.
-- Understand direct or indirect things, without me correcting you, think in multiple aspect before answering to me.
-- There should not be any fact that you tell me and that is incorrect, you need to give me latest, and factually correct information.
-- Prefer small, direct changes over broad rewrites. Check what the system already has before building new.
-- Match the existing style of the file you are editing.
-- Follow standard design principles — SOLID, KISS, DRY, YAGNI, and any others that apply. Do not limit thinking to a checklist.
-- Keep functions focused and short. Prefer explicit names over clever names.
-- No comments unless the logic is non-obvious.
-- Preserve backward compatibility unless explicitly told otherwise.
-- Use Go standard library first. Only reach for third-party packages when the stdlib genuinely cannot do it.
-- Error returns over panics. Always. Wrap errors with `fmt.Errorf("context: %w", err)` to preserve sentinel errors from `errors.go`.
-- Always propagate `context.Context` — every function that does I/O, DB, or network calls must accept and pass `ctx`.
-- Do not write test files. Just verify things work.
+- do not write code unless explicitly asked; first provide a concrete plan
+- prefer small, direct changes over broad rewrites
+- match the style of the file being edited
+- keep functions focused and explicit
+- prefer Go standard library first
+- preserve backward compatibility unless explicitly told otherwise
+- use error returns, not panics
+- wrap errors with `fmt.Errorf("context: %w", err)` where useful
+- propagate `context.Context` through I/O, DB, and network paths
+- do not add comments unless the logic is genuinely non-obvious
+- do not create new abstractions unless required by the task
+- do not modify unrelated files
 
 ## Architecture Rules
-- Business logic must not live inside handlers/controllers. The proxy handler delegates to `memory/` and `memg.go`.
-- Database access must stay in `store/sqlstore/`. Nothing outside that package should write raw SQL.
-- Config must come from environment/config files/CLI flags, never hardcoded. Follow the three-level resolution hierarchy: CLI flags > config file > env vars.
-- Avoid tight coupling between modules. Each package should depend on interfaces, not concrete types.
-- Prefer composition over inheritance.
-- Avoid global mutable state (registries are the one exception — they are write-once-at-init).
-
-## Output Rules
-When making changes:
-1. Show me the things that we have done, not code wise, but logically what we have done.
-2. First understand the relevant files.
-3. Make the smallest correct change.
-4. Explain what changed and why.
-5. List risks or edge cases if any.
-6. Do not dump unrelated suggestions.
-7. Before completion, again go through the code and see if there is scope of some issues, knowledge gap.
-
-When answering:
-- Be precise.
-- Be concise.
-- Do not pretend certainty when unsure.
-- Say what you verified vs what you inferred.
-- Do not claim something works unless it was tested or clearly marked unverified.
-
-## Editing Rules
-- Before editing, inspect nearby code and follow local conventions.
-- Do not reformat unrelated files.
-- Do not modify `go.sum` unless dependency changes are required.
-- Do not touch migrations or schema changes unless the task requires it.
-- When adding a new provider, scaffold it by copying the closest existing provider package — do not invent a new structure.
+- business logic must not live in handlers/controllers
+- raw SQL must stay inside storage implementations
+- config must come from flags, config files, or env vars
+- respect config resolution order: CLI flags > config file > env vars
+- depend on interfaces, not concrete types
+- avoid global mutable state except write-once registries
 
 ## Debugging Rules
 When debugging:
-- Reproduce the issue first. Ask yourself why this might be coming if unsure ask some data that you think might help while debugging.
-- Identify whether it is input, state, network, DB, concurrency, or config related.
-- There can be the case where code itself is not the issue, infra, or something else is the issue, ensure we are not doing code changes unless we are the issue.
-- Prefer root-cause fixes over symptom patches.
-- Use `MEMG_DEBUG=1` to enable debug logging when needed.
-- Add temporary logs only if needed, and remove them before finalizing.
+1. reproduce or localize the issue first
+2. identify the source of truth: code, config, logs, DB, docs, or infra
+3. distinguish verified cause from hypothesis
+4. do not propose code changes until the likely root cause is evidenced
+5. if the issue may be outside code, say so before suggesting edits
+
+Use `MEMG_DEBUG=1` when debug logging is needed.
+Temporary logs must be removed before finalizing unless explicitly useful long-term.
+
+## Failure and Data Integrity Rules
+- protect writes above all else
+- partial writes are worse than failed writes
+- duplicate writes must be idempotent or deduplicated
+- preserve ordering invariants
+- do not leave the system in a half-written or unrecoverable state
+- prefer graceful degradation where appropriate
+- distinguish transient failures from permanent failures
+- destructive operations are high risk and must be called out explicitly
+
+## Concurrency Rules
+- do not assume goroutines are safe; verify shared-state access
+- every background goroutine must have a shutdown path or bounded lifecycle
+- understand backpressure before using channels in request paths
+- verify read-modify-write safety explicitly
+- call out lock ordering and deadlock risks when relevant
 
 ## Dependency Rules
-- Prefer existing libraries already used in the repo.
-- The repo intentionally has a small dependency surface. Do not bloat it.
-- If adding a dependency, explain why existing code or stdlib cannot solve it cleanly.
-- Pure Go implementations preferred (e.g., `modernc.org/sqlite` over CGo sqlite3).
+- prefer existing repo dependencies
+- keep dependency surface small
+- add new dependencies only when clearly necessary
+- explain why stdlib or existing code is insufficient
+- prefer pure Go solutions where practical
 
 ## Security Rules
-- Never expose secrets or tokens.
-- Never hardcode credentials. Use the existing `ProviderConfig.APIKey` → env var fallback chain.
-- Validate external input at proxy/MCP boundaries.
-- Treat user-generated content in messages as unsafe.
-- Avoid logging API keys, message content in production, or any PII.
+- never expose secrets or tokens
+- never hardcode credentials
+- validate external input at proxy and MCP boundaries
+- treat message content and user input as unsafe
+- avoid logging API keys, message content, or PII in production paths
 
 ## Performance Rules
-- Do not optimize blindly.
-- Call out N+1 queries, repeated I/O, excessive allocations, and unnecessary network calls.
-- Preserve readability unless performance is a real requirement.
-- The augmentation pipeline already uses a fixed 32-worker pool — do not add unbounded goroutines.
-- `MaxRecallCandidates` (default 10,000) is a safety cap. Respect it.
+- do not optimize blindly
+- call out repeated I/O, unnecessary allocations, excessive network calls, and N+1 patterns
+- preserve readability unless performance is a demonstrated requirement
+- do not introduce unbounded goroutines
+- respect existing safety caps
 
-## Git Rules
-- Keep diffs minimal and focused. Group related changes, avoid noisy refactors.
-- Do not add co-author tags to commits unless explicitly asked.
-- Commit message format: version tag only (`v1.xx`), nothing else in the subject line.
+## Documentation Rules
+If behavior, architecture, or configuration changes, update the relevant docs in the same change when applicable:
+- `README.md`
+- `MEMORY_ARCHITECTURE.md`
 
-## Decision Heuristics
-Use this order:
-1. Correctness
-2. Simplicity
-3. Consistency with repo
-4. Maintainability
-5. Performance
-
-## When to Ask
-Ask for clarification if you don't understand the task, you feel there is some knowledge gap, anything like some example but not limited to these:
-- Ambiguous business logic around memory lifecycle (decay, reinforcement, dedup).
-- Destructive changes to the store schema or provider interfaces.
-- Missing credentials/config.
-- Multiple valid directions with major tradeoffs.
-
-## What to Never Do
-- Do not fabricate behavior, test results, or file contents.
-- Do not claim production readiness without evidence.
-- Do not rewrite large portions of the codebase unless explicitly requested.
-- Do not break the interface contracts in `store/store.go`, `llm/provider.go`, `embed/embedder.go`, or `search/engine.go`.
-- Do not introduce a new storage backend without implementing the full `Repository` interface.
-- Do not add provider packages that skip the `init()` self-registration pattern.
-
-## Key Reference Documents
-- `MEMORY_ARCHITECTURE.md` — deep design doc covering semantic retrieval, session management, fact lifecycle, decay, reinforcement, consolidation, and all advanced subsystems.
-- `README.md` — quick start guides, provider tables, configuration reference.
-
-When a change affects behavior, architecture, or configuration documented in these files, update them as part of the same change — do not wait to be asked.
-
-## Truthfulness Rules
-- Never guess APIs, function names, file paths, schemas, or library behavior.
-- If something is not present in the repo or clearly provided, mark it as unknown, ask me for resolutions.
-- Do not invent code to "seem complete".
-- Separate:
-    - Verified from codebase
-    - Inferred from context
-- No Assumptions
-- If a task depends on an unknown, say so explicitly before coding.
-
-## Read Before Write
-Before changing code:
-1. Read all directly related files.
-2. Read neighboring types/interfaces/helpers/tests.
-3. Understand call flow end-to-end.
-4. Do not patch blindly from one file only.
-5. Do not write code until the existing pattern is understood.
+Do not leave docs stale when behavior changes.
 
 ## Completion Gate
-A task is not complete until:
-- Code is syntactically valid.
-- Imports resolve.
-- Types match.
-- Lint passes for changed files.
-- Relevant tests pass, or absence of tests is explicitly stated.
-- Edge cases were checked.
-- Output matches requested behavior.
-  Never claim "done" before these checks.
+A task is complete only when all applicable checks available in the environment are satisfied or explicitly marked unavailable:
+- code is syntactically valid
+- imports resolve
+- types match
+- changed paths are internally consistent
+- existing relevant tests were checked if available
+- edge cases were reviewed
+- all unverified parts were called out explicitly
 
-## Self-Review Checklist
-Before finalizing, check:
-- Will this compile/run?
-- Are names/types exact?
-- Any missing imports?
-- Any dead code?
-- Any race condition?
-- Any nil/null issue?
-- Any off-by-one?
-- Any incorrect error handling?
-- Any broken backward compatibility?
-- Any mismatch with business logic?
-- Did I solve root cause, not symptom?
+Do not create new test files unless explicitly asked.
+Use existing tests when available.
+If no relevant tests exist, state that verification is limited.
 
-## Logic Verification Rules
-- Do not stop at "code looks right".
-- Trace the business flow with 1 normal case, 1 edge case, 1 failure case.
-- Verify that state transitions are correct.
-- Verify that data written/read is consistent across layers.
-- Check for duplicate actions, partial writes, and rollback gaps.
+## Output Rules
+For repo-specific answers, always separate:
+1. **Verified**
+2. **Inferred**
+3. **Unknown**
 
-## Work Style
-- Prefer slower, verified work over fast speculative work.
-- Do not optimize for speed of response.
-- Do not produce code early just to be helpful.
-- First get the model of the system right, then write code.
+For implementation tasks, report:
+1. **Plan** — what will be built and in which parts of the system
+2. **Logic** — how the solution works end-to-end
+3. **Why this approach** — why this design is correct and preferred over obvious alternatives
+4. **Risks / Edge Cases** — what can break, fail, or behave unexpectedly
+5. **Verification Status** — what was verified by code inspection, tests, execution, or is still unverified
 
-## No-Assumption Coding
-- Do not assume input shape.
-- Do not assume DB schema.
-- Do not assume concurrency safety.
-- Do not assume nil/null cannot happen.
-- Do not assume external services always succeed.
-- Do not assume "similar code elsewhere" is correct.
+Do not focus on line-by-line code changes unless explicitly asked.
+Focus on system behavior, decision flow, invariants, and correctness.
+Be concise. Do not dump unrelated suggestions.
+Do not claim something works unless it was tested or clearly marked unverified.
 
-## System-Level Thinking
-- Every change has upstream and downstream effects. Before touching a function, understand who calls it, what it calls, and what state it mutates.
-- Trace the full request path — from entry point (proxy/MCP/library) through business logic to storage and back. A fix in one layer can break invariants in another.
-- Think about the system at 10x scale. Will this approach still work with 10x more facts, 10x more entities, 10x more concurrent requests?
-- Understand the deployment topology. Code that works in a single-process test may fail when the proxy, embedder, and LLM are separate services with network between them.
+## When to Ask
+Ask for clarification only when blocked by:
+- ambiguous business logic
+- destructive schema or contract changes
+- missing credentials or config
+- multiple valid directions with materially different tradeoffs
 
-## Failure Mode Discipline
-- For every code path, answer: what happens when this fails? Is the failure loud (error returned, logged) or silent (swallowed, ignored)?
-- Classify failures by blast radius: does a failure affect one request, one entity, or the entire system?
-- Prefer graceful degradation over hard failure. If recall fails, the LLM should still respond — just without memory context. If extraction fails, the conversation should still complete.
-- Distinguish transient failures (network timeout, rate limit) from permanent failures (bad schema, missing table). Only retry transient failures.
-- Never leave the system in a half-written state. If a multi-step operation fails partway, either complete it, roll it back, or make the partial state recoverable.
+Otherwise, make the best grounded call and label assumptions clearly.
 
-## API Contract Discipline
-- Interfaces in `store/store.go`, `llm/provider.go`, `embed/embedder.go`, and `search/engine.go` are contracts with 20+ implementations. Treat them as permanent.
-- Adding to an interface is a breaking change — every implementation must be updated. Prefer new interfaces over extending existing ones when the addition is optional.
-- Public function signatures are promises. Changing parameter order, return types, or semantics breaks every caller. When in doubt, add a new function.
-- Config struct fields are part of the public API. Adding is safe. Removing or renaming is breaking. Changing default behavior is breaking.
-- Error types and sentinel errors are contracts. Code downstream switches on them. Do not change error identity without understanding all callers.
+## What to Never Do
+- do not fabricate behavior, test results, file contents, or verification
+- do not guess repository facts
+- do not rewrite large parts of the system unless explicitly asked
+- do not break public or interface contracts casually
+- do not introduce a new storage backend without implementing the full repository contract
+- do not add provider packages that skip self-registration
+- do not present hypotheses as facts
 
-## Data Integrity First
-- Data outlives code. A bug in code gets fixed in minutes; corrupt data can take weeks to recover. Protect writes above all else.
-- Partial writes are worse than failed writes. If `SaveExchange` writes user messages but fails on the assistant message, the conversation log is inconsistent. Design for atomicity.
-- Duplicate writes must be idempotent. If a retry causes a fact to be extracted twice, dedup must catch it. If it doesn't, you have a data bug.
-- Ordering matters. Messages in a conversation have sequence. Facts have temporal relationships. Embeddings must match their source text. Verify ordering invariants.
-- Deletion is permanent. Decay, pruning, and consolidation remove data. Ensure the criteria are correct and the operation is logged. A bad pruning run is unrecoverable.
 
-## Observability
-- If you can't debug it in production with `MEMG_DEBUG=1`, it's not production-ready. Every significant operation (recall, extraction, session rollover, pruning) should have a debug trace.
-- Silent failures are the worst kind. A swallowed error in a background goroutine means the system looks healthy while losing data. At minimum, log at debug level.
-- Distinguish "nothing happened" from "something failed silently". If recall returns zero facts, is it because there are no facts, or because the embedder errored?
-- Include enough context in error messages to identify the operation, the entity, and the input that triggered the failure — without logging PII or API keys.
-
-## Concurrency Reasoning
-- Do not hope goroutines are safe — prove it. For every piece of shared state, identify which lock protects it and verify the lock is held at every access.
-- Document locking order. If `MemG.mu` is ever held while calling into `repo`, and `repo` has its own lock, that's a potential deadlock. Map the lock graph.
-- Background goroutines must have a shutdown path. Every `go func()` must either complete quickly or be cancellable via context. Orphaned goroutines are resource leaks.
-- The `sync.Map` in `entityCache` is safe for concurrent access but not for read-modify-write sequences. If you need compare-and-swap, use a mutex.
-- Channel sends can block forever. If a pipeline `Enqueue` blocks because the channel is full, the HTTP handler hangs. Understand backpressure in every async path.
-
-## Rollback Awareness
-- Every change should be reversible. If it's not (schema migration, data format change, deleted data), call that out explicitly before proceeding.
-- Config changes are instantly reversible — just change the value. Code changes require a redeploy. Schema changes may require a migration. Know which category your change falls in.
-- Feature additions are safer than behavior modifications. Adding a new config field with a zero-value default is backward compatible. Changing what an existing field means is not.
-- When modifying the extraction pipeline, consider: what happens to facts extracted by the old logic? Will the new logic conflict with them? Will consolidation handle the transition?
-
-## Incremental Delivery
-- Ship the smallest verifiable unit. A PR that does one thing well is better than a PR that does three things with unclear interactions.
-- Each step should leave the system in a valid state. Do not land half of a refactor that requires the second half to compile.
-- When a change spans multiple packages, order the work so each step is independently correct: interfaces first, then implementations, then callers.
-- Prefer additive changes (new function, new field, new package) over modificative changes (rename, restructure, change behavior). Additive changes are lower risk and easier to review.
+While any coding, or other task you have full access to do operations over DB, chatgpt, web or any other tool you use, just justify to yourself why you need.
+Before giving any number, fact, code logic, or anything upfront to me, and this is the most important above all that you need to verify that, you have 
+access to all the things, DB, search tools, or whatever you need but you cant give me false things, assumptions, or incorrect information.

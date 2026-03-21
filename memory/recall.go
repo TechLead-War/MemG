@@ -25,6 +25,7 @@ func RecallWithVector(
 	entityUUID string,
 	limit int,
 	threshold float64,
+	maxCandidates int,
 	filters ...store.FactFilter,
 ) ([]*RecalledFact, error) {
 	if len(queryVec) == 0 {
@@ -39,7 +40,10 @@ func RecallWithVector(
 		filter.ExcludeExpired = true
 	}
 
-	facts, err := listRecallFacts(ctx, repo, entityUUID, filter, 0)
+	if maxCandidates <= 0 {
+		maxCandidates = 10000
+	}
+	facts, err := listRecallFacts(ctx, repo, entityUUID, filter, maxCandidates)
 	if err != nil {
 		return nil, err
 	}
@@ -93,6 +97,7 @@ func Recall(
 	entityUUID string,
 	limit int,
 	threshold float64,
+	maxCandidates int,
 	filters ...store.FactFilter,
 ) ([]*RecalledFact, error) {
 	vectors, err := embedder.Embed(ctx, []string{query})
@@ -113,6 +118,7 @@ func Recall(
 		entityUUID,
 		limit,
 		threshold,
+		maxCandidates,
 		filters...,
 	)
 }

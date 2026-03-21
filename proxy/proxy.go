@@ -33,6 +33,7 @@ type Config struct {
 	RecallSummaryLimit   int           // max summaries per recall query (default 5)
 	RecallFactThreshold  float64       // min score for fact recall (default 0.3)
 	RecallSummaryThreshold float64     // min score for summary recall (default 0.3)
+	MaxRecallCandidates  int           // safety cap on facts loaded per recall pass (default 10000)
 	ConsciousCacheTTL    time.Duration // conscious cache entry lifetime (default 30s)
 	Debug                bool          // enable verbose logging
 }
@@ -45,7 +46,9 @@ type Server struct {
 	engine         search.Engine
 	entities       *entityCache
 	consciousCache *memory.ConsciousCache
-	http           *http.Server
+	httpServer     *http.Server
+	httpClient     *http.Client
+	bgSem          chan struct{}
 	baseCtx        context.Context
 	cancelBase     context.CancelFunc
 }
@@ -62,20 +65,24 @@ func NewServer(cfg Config) *Server {
 		engine:         search.NewHybrid(),
 		entities:       newEntityCache(cfg.Repo),
 		consciousCache: memory.NewConsciousCache(ttl),
-		baseCtx:        ctx,
-		cancelBase:     cancel,
+		httpClient: &http.Client{
+			Transport: http.DefaultTransport,
+		},
+		bgSem:      make(chan struct{}, 64),
+		baseCtx:    ctx,
+		cancelBase: cancel,
 	}
 }
 
 // Start binds the HTTP server to the given address and begins serving.
 // It blocks until the server is shut down or encounters a fatal error.
 func (s *Server) Start(addr string) error {
-	s.http = &http.Server{
+	s.httpServer = &http.Server{
 		Addr:    addr,
 		Handler: s,
 	}
 	fmt.Printf("memg proxy: listening on %s → %s\n", addr, s.cfg.Target.String())
-	return s.http.ListenAndServe()
+	return s.httpServer.ListenAndServe()
 }
 
 // Shutdown gracefully stops the HTTP server.
@@ -83,8 +90,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.cancelBase != nil {
 		defer s.cancelBase()
 	}
-	if s.http == nil {
+	if s.httpServer == nil {
 		return nil
 	}
-	return s.http.Shutdown(ctx)
+	return s.httpServer.Shutdown(ctx)
 }

@@ -15,14 +15,11 @@ from concurrent import futures
 import grpc
 from sentence_transformers import SentenceTransformer
 
-import embedder_pb2_grpc
-from service import EmbedderServicer
-
 
 def generate_stubs():
     """Generate proto stubs if they don't exist."""
     try:
-        import embedder_pb2
+        import embedder_pb2  # noqa: F401
     except ImportError:
         import subprocess
         import os
@@ -31,7 +28,7 @@ def generate_stubs():
             os.path.dirname(__file__), "..", "..", "proto", "embedder.proto"
         )
         proto_path = os.path.abspath(proto_path)
-        out_dir = os.path.dirname(__file__)
+        out_dir = os.path.dirname(__file__) or "."
 
         subprocess.run(
             [
@@ -77,6 +74,9 @@ def parse_args():
 
 def main():
     generate_stubs()
+
+    import embedder_pb2_grpc
+    from service import EmbedderServicer
 
     args = parse_args()
 

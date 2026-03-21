@@ -1153,3 +1153,57 @@ Both the synchronous and streaming response paths now share the same memory pipe
 #### Proxy Session Summarization
 
 When the proxy detects a session rollover, it locates the old session's conversation and generates a summary in the background. This ensures that proxy-originated sessions produce summaries available for future recall, closing the gap where proxy traffic previously never contributed to the summary layer.
+
+---
+
+### Subsystem 6: Concurrency And Resource Bounds
+
+#### The Problem
+
+Under concurrent load, several resource patterns can cause degradation: unbounded goroutine spawning per request, a fresh HTTP client per upstream call (no connection reuse), unbounded recall candidate loading into memory, per-slot embedding calls in the augmentation pipeline, and an unconfigured database connection pool.
+
+#### Bounded Background Goroutines
+
+Both `MemG` (library mode) and `Server` (proxy mode) now use a **semaphore-bounded goroutine pool** for background work (recall tracking, session summarization, post-response extraction). A buffered channel of capacity 64 acts as the semaphore:
+
+```
+Before: go s.afterResponse(...)   — unbounded, 1000 requests = 3000 goroutines
+After:  s.goBackground(func() { s.afterResponse(...) })  — capped at 64 concurrent
+```
+
+When the semaphore is full, `goBackground` runs the function **synchronously** in the calling goroutine rather than blocking or dropping the work. This ensures work is never lost while preventing goroutine pile-up. The worst case is a brief increase in request latency when all 64 slots are occupied — preferable to unbounded memory growth.
+
+#### HTTP Client Reuse In Proxy
+
+The proxy previously created a new `http.Client{}` for every upstream request. Each new client establishes a fresh TCP connection (10–50ms overhead), with no TLS session reuse or HTTP keep-alive.
+
+The proxy now creates a single `http.Client` with `http.DefaultTransport` at startup and reuses it for all upstream calls. `http.DefaultTransport` provides connection pooling, keep-alive, and TLS session caching out of the box. The client has no timeout — streaming responses can last arbitrarily long, and cancellation is controlled by the request's `context.Context`.
+
+#### Database Connection Pool Configuration
+
+The SQLite database connection now has explicit pool limits:
+
+```
+db.SetMaxOpenConns(4)       — prevents connection exhaustion
+db.SetMaxIdleConns(2)       — keeps warm connections ready
+db.SetConnMaxLifetime(30m)  — prevents stale connections
+```
+
+SQLite allows only one concurrent writer, so 4 open connections is sufficient — read queries can proceed in parallel while a single write holds the lock. Without these limits, Go's `sql.DB` grows the connection count unboundedly under concurrent load.
+
+#### Recall Candidate Cap
+
+`RecallWithVector` now accepts a `maxCandidates` parameter (default: 10,000) that is passed to the database query as a `LIMIT`. Previously, the function loaded **all** facts for an entity regardless of count — at 100,000 facts with 1536-dimension embeddings, this consumes ~600MB per query.
+
+The cap is configured via `MaxRecallCandidates` in both library mode (`Config`) and proxy mode (`proxy.Config`), and can be overridden via the `MEMG_MAX_RECALL_CANDIDATES` environment variable. Facts are loaded in significance order (via `ListFactsForRecall`), so the cap drops the least significant facts first.
+
+#### Batch Slot Normalization
+
+The augmentation pipeline previously embedded each fact's slot string individually — 10 facts with unique slots meant 10 separate embedding API calls. The pipeline now collects all unique uncached slots from the batch, embeds them in a **single API call**, and uses the results for canonical matching:
+
+```
+Before: for each fact → embed(slot) → compare → register    O(N) API calls
+After:  collect unique slots → embed([slot1, slot2, ...]) → compare all → register    O(1) API call
+```
+
+Cached slots (already in the canonical registry) skip the embedding call entirely. The batch optimization reduces embedding latency from O(unique_slots × embedding_latency) to O(1 × embedding_latency) per extraction job.

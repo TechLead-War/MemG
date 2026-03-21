@@ -117,9 +117,11 @@ func (p *Pipeline) persistFacts(ctx context.Context, entityUUID string, facts []
 	// Load existing facts once for dedup and conflict detection.
 	existingFacts := p.loadEntityFacts(ctx, entityUUID)
 
+	// Batch-normalize slots: embed all unique slots in a single call.
+	p.batchNormalizeSlots(ctx, facts)
+
 	for _, f := range facts {
 		applyDefaults(f)
-		f.Slot = p.normalizeSlot(ctx, f.Slot)
 
 		if f.ExpiresAt == nil && f.Significance < store.SignificanceHigh {
 			f.ExpiresAt = store.TTLForSignificance(f.Significance)
@@ -306,6 +308,131 @@ func safeCallback(fn func()) {
 		}
 	}()
 	fn()
+}
+
+// batchNormalizeSlots normalizes all slots in the fact batch using a single
+// embedding call instead of one call per fact. This reduces embedding API
+// round-trips from O(unique_slots) to O(1).
+func (p *Pipeline) batchNormalizeSlots(ctx context.Context, facts []*store.Fact) {
+	if p.Embedder == nil {
+		return
+	}
+	ss, ok := p.repo.(store.CanonicalSlotStore)
+	if !ok {
+		return
+	}
+
+	// Ensure the slot cache is loaded.
+	p.slotMu.RLock()
+	loaded := p.slotLoaded
+	p.slotMu.RUnlock()
+	if !loaded {
+		p.loadSlotCache(ctx, ss)
+	}
+
+	// Collect unique slots that need embedding (not empty, not already cached).
+	toEmbed := make(map[string]struct{})
+	for _, f := range facts {
+		if f.Slot == "" {
+			continue
+		}
+		p.slotMu.RLock()
+		_, cached := p.slotCache[f.Slot]
+		p.slotMu.RUnlock()
+		if !cached {
+			toEmbed[f.Slot] = struct{}{}
+		}
+	}
+
+	if len(toEmbed) == 0 {
+		// All slots are already cached or empty — apply cached values.
+		for _, f := range facts {
+			f.Slot = p.normalizeSlotCached(f.Slot)
+		}
+		return
+	}
+
+	// Embed all uncached slots in a single batch call.
+	slotNames := make([]string, 0, len(toEmbed))
+	for name := range toEmbed {
+		slotNames = append(slotNames, name)
+	}
+	vectors, err := p.Embedder.Embed(ctx, slotNames)
+	if err != nil || len(vectors) != len(slotNames) {
+		log.Printf("memg augment: batch embed slots: %v", err)
+		return
+	}
+
+	// Build a map of slot name → embedding for the batch.
+	slotVecs := make(map[string][]float32, len(slotNames))
+	for i, name := range slotNames {
+		slotVecs[name] = vectors[i]
+	}
+
+	// For each uncached slot, find the best canonical match or register new.
+	resolved := make(map[string]string, len(slotNames))
+	for _, name := range slotNames {
+		slotVec := slotVecs[name]
+
+		p.slotMu.RLock()
+		var bestName string
+		var bestScore float64
+		for _, entry := range p.slotCache {
+			score := search.CosineSimilarity(slotVec, entry.embedding)
+			if score > bestScore {
+				bestScore = score
+				bestName = entry.name
+			}
+		}
+		p.slotMu.RUnlock()
+
+		if bestScore >= slotNormThreshold {
+			resolved[name] = bestName
+			continue
+		}
+
+		// No match — register as a new canonical slot.
+		canonical := &store.CanonicalSlot{
+			Name:      name,
+			Embedding: slotVec,
+		}
+		if err := ss.InsertCanonicalSlot(ctx, canonical); err != nil {
+			if existing, fErr := ss.FindCanonicalSlotByName(ctx, name); fErr == nil && existing != nil {
+				canonical = existing
+			}
+		}
+
+		p.slotMu.Lock()
+		p.slotCache[name] = &slotCacheEntry{name: name, embedding: slotVec}
+		p.slotMu.Unlock()
+
+		resolved[name] = name
+	}
+
+	// Apply normalization to all facts.
+	for _, f := range facts {
+		if f.Slot == "" {
+			continue
+		}
+		if canonical, ok := resolved[f.Slot]; ok {
+			f.Slot = canonical
+		}
+		// Already-cached slots are unchanged (exact match).
+	}
+}
+
+// normalizeSlotCached returns the slot as-is if cached (exact match) or empty.
+func (p *Pipeline) normalizeSlotCached(slot string) string {
+	if slot == "" {
+		return ""
+	}
+	p.slotMu.RLock()
+	_, exists := p.slotCache[slot]
+	p.slotMu.RUnlock()
+	if exists {
+		return slot
+	}
+	return slot
 }
 
 // normalizeSlot maps a free-form slot string to a canonical slot using

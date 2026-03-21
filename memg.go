@@ -57,6 +57,10 @@ type MemG struct {
 	processUUID string
 	sessionUUID string
 
+	// bgSem bounds the number of concurrent background goroutines
+	// (recall tracking, session summarization, post-response work).
+	bgSem chan struct{}
+
 	baseCtx    context.Context
 	cancelBase context.CancelFunc
 	closed     bool
@@ -78,6 +82,7 @@ func New(repo store.Repository, opts ...Option) (*MemG, error) {
 		repo:       repo,
 		engine:     search.NewHybrid(),
 		pipeline:   augment.NewPipeline(repo),
+		bgSem:      make(chan struct{}, 64),
 		baseCtx:    ctx,
 		cancelBase: cancel,
 	}
@@ -201,7 +206,7 @@ func (g *MemG) Chat(ctx context.Context, messages []*llm.Message, opts ...any) (
 		if err == nil {
 			sessionUUID = sess.UUID
 			if isNew {
-				go g.summarizeClosedSession(entityUUID, sessionUUID)
+				g.goBackground(func() { g.summarizeClosedSession(entityUUID, sessionUUID) })
 			}
 		}
 	} else if cc.entityID == "" {
@@ -253,7 +258,7 @@ func (g *MemG) Chat(ctx context.Context, messages []*llm.Message, opts ...any) (
 				if cc.factFilter != nil {
 					recallFilters = append(recallFilters, *cc.factFilter)
 				}
-				facts, err := memory.RecallWithVector(ctx, g.engine, g.repo, queryVec, queryModel, q, entityUUID, g.cfg.RecallFactsLimit, g.cfg.RecallThreshold, recallFilters...)
+				facts, err := memory.RecallWithVector(ctx, g.engine, g.repo, queryVec, queryModel, q, entityUUID, g.cfg.RecallFactsLimit, g.cfg.RecallThreshold, g.cfg.MaxRecallCandidates, recallFilters...)
 				if err == nil {
 					ctxInput.RecalledFacts = facts
 				}
@@ -270,7 +275,7 @@ func (g *MemG) Chat(ctx context.Context, messages []*llm.Message, opts ...any) (
 			req.PrependSystem(contextText)
 		}
 		if len(ctxInput.RecalledFacts) > 0 {
-			go g.trackRecallUsage(ctxInput.RecalledFacts)
+			g.goBackground(func() { g.trackRecallUsage(ctxInput.RecalledFacts) })
 		}
 	}
 
@@ -279,7 +284,7 @@ func (g *MemG) Chat(ctx context.Context, messages []*llm.Message, opts ...any) (
 		return nil, fmt.Errorf("memg: provider error: %w", err)
 	}
 
-	go g.afterResponseForEntity(entityUUID, sessionUUID, messages, resp)
+	g.goBackground(func() { g.afterResponseForEntity(entityUUID, sessionUUID, messages, resp) })
 	return resp, nil
 }
 
@@ -330,7 +335,7 @@ func (g *MemG) Stream(ctx context.Context, messages []*llm.Message, opts ...any)
 		if err == nil {
 			sessionUUID = sess.UUID
 			if isNew {
-				go g.summarizeClosedSession(entityUUID, sessionUUID)
+				g.goBackground(func() { g.summarizeClosedSession(entityUUID, sessionUUID) })
 			}
 		}
 	} else if cc.entityID == "" {
@@ -382,7 +387,7 @@ func (g *MemG) Stream(ctx context.Context, messages []*llm.Message, opts ...any)
 				if cc.factFilter != nil {
 					recallFilters = append(recallFilters, *cc.factFilter)
 				}
-				facts, err := memory.RecallWithVector(ctx, g.engine, g.repo, queryVec, queryModel, q, entityUUID, g.cfg.RecallFactsLimit, g.cfg.RecallThreshold, recallFilters...)
+				facts, err := memory.RecallWithVector(ctx, g.engine, g.repo, queryVec, queryModel, q, entityUUID, g.cfg.RecallFactsLimit, g.cfg.RecallThreshold, g.cfg.MaxRecallCandidates, recallFilters...)
 				if err == nil {
 					ctxInput.RecalledFacts = facts
 				}
@@ -399,7 +404,7 @@ func (g *MemG) Stream(ctx context.Context, messages []*llm.Message, opts ...any)
 			req.PrependSystem(contextText)
 		}
 		if len(ctxInput.RecalledFacts) > 0 {
-			go g.trackRecallUsage(ctxInput.RecalledFacts)
+			g.goBackground(func() { g.trackRecallUsage(ctxInput.RecalledFacts) })
 		}
 	}
 
@@ -516,7 +521,7 @@ func (g *MemG) resolveIdentities(ctx context.Context) error {
 			return fmt.Errorf("resolve identities: ensure session: %w", err)
 		}
 		if isNew && oldSessionUUID != "" && sess.UUID != oldSessionUUID {
-			go g.summarizeClosedSession(g.entityUUID, sess.UUID)
+			g.goBackground(func() { g.summarizeClosedSession(g.entityUUID, sess.UUID) })
 		}
 		g.sessionUUID = sess.UUID
 	}
@@ -592,6 +597,21 @@ func (g *MemG) trackRecallUsage(facts []*memory.RecalledFact) {
 		if g.cfg.Debug {
 			fmt.Printf("memg: update recall usage: %v\n", err)
 		}
+	}
+}
+
+// goBackground runs fn in a goroutine, bounded by the background semaphore.
+// If the semaphore is full, fn runs synchronously to prevent unbounded
+// goroutine growth.
+func (g *MemG) goBackground(fn func()) {
+	select {
+	case g.bgSem <- struct{}{}:
+		go func() {
+			defer func() { <-g.bgSem }()
+			fn()
+		}()
+	default:
+		fn()
 	}
 }
 

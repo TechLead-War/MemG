@@ -43,7 +43,7 @@ func (s *Server) handleNonStreaming(
 			return
 		}
 		if content != "" {
-			go s.afterResponse(entityUUID, sessionUUID, messages, content)
+			s.goBackground(func() { s.afterResponse(entityUUID, sessionUUID, messages, content) })
 		}
 	}
 }

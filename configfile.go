@@ -20,17 +20,21 @@ type FileConfig struct {
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
 		APIKey   string `json:"api_key"`
+		BaseURL  string `json:"base_url"`
 	} `json:"llm"`
 
 	Embed struct {
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
 		APIKey   string `json:"api_key"`
+		BaseURL  string `json:"base_url"`
 	} `json:"embed"`
 
 	Recall struct {
-		Limit     int     `json:"limit"`
-		Threshold float64 `json:"threshold"`
+		Limit            int     `json:"limit"`
+		Threshold        float64 `json:"threshold"`
+		SummaryLimit     int     `json:"summary_limit"`
+		SummaryThreshold float64 `json:"summary_threshold"`
 	} `json:"recall"`
 
 	Session struct {
@@ -45,9 +49,11 @@ type FileConfig struct {
 		SummaryBudget int `json:"summary_budget"`
 	} `json:"memory"`
 
-	Conscious     *bool  `json:"conscious"`
-	PruneInterval string `json:"prune_interval"`
-	Debug         bool   `json:"debug"`
+	Conscious        *bool  `json:"conscious"`
+	ConsciousLimit   int    `json:"conscious_limit"`
+	ConsciousCacheTTL string `json:"conscious_cache_ttl"`
+	PruneInterval    string `json:"prune_interval"`
+	Debug            bool   `json:"debug"`
 }
 
 // DefaultConfigPaths returns the paths searched for a config file, in priority order.
@@ -153,6 +159,20 @@ func (fc *FileConfig) EmbedModelName(def string) string {
 	return def
 }
 
+func (fc *FileConfig) LLMBaseURL(def string) string {
+	if fc.LLM.BaseURL != "" {
+		return fc.LLM.BaseURL
+	}
+	return def
+}
+
+func (fc *FileConfig) EmbedBaseURL(def string) string {
+	if fc.Embed.BaseURL != "" {
+		return fc.Embed.BaseURL
+	}
+	return def
+}
+
 func (fc *FileConfig) RecallLimit(def int) int {
 	if fc.Recall.Limit > 0 {
 		return fc.Recall.Limit
@@ -163,6 +183,20 @@ func (fc *FileConfig) RecallLimit(def int) int {
 func (fc *FileConfig) RecallThresholdVal(def float64) float64 {
 	if fc.Recall.Threshold > 0 {
 		return fc.Recall.Threshold
+	}
+	return def
+}
+
+func (fc *FileConfig) RecallSummaryLimitVal(def int) int {
+	if fc.Recall.SummaryLimit > 0 {
+		return fc.Recall.SummaryLimit
+	}
+	return def
+}
+
+func (fc *FileConfig) RecallSummaryThresholdVal(def float64) float64 {
+	if fc.Recall.SummaryThreshold > 0 {
+		return fc.Recall.SummaryThreshold
 	}
 	return def
 }
@@ -188,6 +222,22 @@ func (fc *FileConfig) PruneIntervalDuration(def time.Duration) time.Duration {
 func (fc *FileConfig) ConsciousMode(def bool) bool {
 	if fc.Conscious != nil {
 		return *fc.Conscious
+	}
+	return def
+}
+
+func (fc *FileConfig) ConsciousLimitVal(def int) int {
+	if fc.ConsciousLimit > 0 {
+		return fc.ConsciousLimit
+	}
+	return def
+}
+
+func (fc *FileConfig) ConsciousCacheTTLDuration(def time.Duration) time.Duration {
+	if fc.ConsciousCacheTTL != "" {
+		if d, err := time.ParseDuration(fc.ConsciousCacheTTL); err == nil {
+			return d
+		}
 	}
 	return def
 }
