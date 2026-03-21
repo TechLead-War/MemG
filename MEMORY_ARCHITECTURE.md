@@ -398,15 +398,13 @@ When the user says "I live in Austin" and later "I live in Seattle", the system 
 
 MemG's approach is **reclassification**:
 
-- The existing fact "User lives in Austin" is reclassified from **current** to **historical**. Its content is updated to reflect its new status: "User previously lived in Austin."
+- The existing fact "User lives in Austin" is reclassified from **current** to **historical**. Its `TemporalStatus` is changed to `historical` — the content itself is not modified. When the fact is later injected into the LLM's prompt, the context builder prepends a `[historical]` annotation so the model knows it's past tense.
 - The new fact "User lives in Seattle" is stored as **current**.
-- Optionally, a transition event fact is created: "User moved from Austin to Seattle" with a timestamp marking when the change was detected.
 
 This preserves the full timeline. The system can now answer:
 
 - "Where do you live?" — Seattle (current identity fact).
-- "Have you ever lived in Austin?" — Yes, previously (historical identity fact).
-- "When did you move?" — The transition event provides the timestamp.
+- "Have you ever lived in Austin?" — Yes, previously (historical identity fact, annotated as such in the prompt).
 
 Evolution applies **only to identity facts**. Event facts never supersede each other — eating pasta on Monday does not invalidate eating pasta on Tuesday. Pattern facts evolve differently — they strengthen or weaken based on accumulated evidence, rather than being reclassified.
 
@@ -445,12 +443,11 @@ Human memory is not a uniform archive. Shocking or significant memories — a we
 
 Every fact gets a **significance level** assigned by the extraction stage at creation time. Significance determines the fact's initial **TTL (time to live)** — how long it survives before being eligible for removal.
 
-| Significance | Value | Example Facts | Typical TTL | Rationale |
+| Significance | Value | Example Facts | TTL | Rationale |
 |---|---|---|---|---|
-| Critical | `10` | "User is allergic to peanuts", "User's child was born" | Infinite (never expires) | Safety-critical or life-defining |
-| High | `7–9` | "User works at Google", "User lives in Seattle" | 1 year | Important but can change |
-| Medium | `5` | "User is reading Project Hail Mary" | 2–4 weeks | Relevant for a while, then stale |
-| Low | `1–3` | "User ate pasta for lunch", "User's meeting was moved to 3pm" | 3–7 days | Ephemeral, useful only short-term |
+| High | `10` (SignificanceHigh) | "User is allergic to peanuts", "User's child was born" | Infinite (never expires) | Safety-critical or life-defining |
+| Medium | `5` (SignificanceMedium) | "User is reading Project Hail Mary", "User works at Google" | 30 days | Relevant for a while, then stale |
+| Low | `1–4` | "User ate pasta for lunch", "User's meeting was moved to 3pm" | 7 days | Ephemeral, useful only short-term |
 
 A background pruner periodically scans for facts whose TTL has expired and removes them from the database. This keeps the fact store from growing without bound and naturally prioritizes durable knowledge over transient details.
 
@@ -490,6 +487,8 @@ Day 8 (mentioned again): TTL resets to 7 days from now, reinforcement_count = 3
 ```
 
 Without reinforcement, the fact would have expired on day 7. With reinforcement, it survives as long as the user keeps mentioning it.
+
+**Automatic promotion:** When a fact's reinforcement count reaches **5**, the pipeline automatically promotes it to `SignificanceHigh`. Its TTL is cleared — it never expires. The reasoning: a fact mentioned independently in 5 separate conversations is clearly central to the user's identity, regardless of what significance the extraction stage originally assigned. A lunch preference mentioned once gets significance 3 and expires in a week. The same preference mentioned in 5 different conversations gets promoted to significance 10 and persists indefinitely.
 
 This mechanism naturally solves **deduplication**. Instead of storing "User lives in Seattle" three times (once per conversation where the user mentioned it), the system stores it once and reinforces it twice. The reinforcement count also serves as a weak signal of importance — a fact mentioned in 15 separate conversations is probably more central to the user's identity than one mentioned once.
 
@@ -910,6 +909,24 @@ This ensures that single-valued attributes (location, job, name, email) replace 
 
 When a slot conflict is resolved, the in-memory fact slice is updated immediately (setting `TemporalStatus` to `historical` on the reclassified entry). This prevents a subsequent fact in the same extraction batch from re-finding the already-reclassified entry during semantic dedup, which could incorrectly reinforce a fact that was just superseded. The conscious context cache is also invalidated via the `OnFactStatusChanged` callback, so the user profile reflects the change within the next request rather than waiting for the 30-second cache TTL.
 
+#### Slot Normalization
+
+Slot-based conflict resolution depends on the LLM returning consistent slot names across conversations. If the LLM assigns `"partner"` in one conversation and `"relationship"` in another for the same semantic concept, the pipeline treats them as different slots — no conflict is detected, and both facts remain current.
+
+The pipeline normalizes slots before conflict resolution using **embedding-based similarity** against a shared registry of canonical slot names. The registry is stored in the `mg_slot_canonical` table (shared across all users) and cached in memory on the pipeline.
+
+**How it works:**
+
+1. A fact arrives with `slot: "spouse"`.
+2. The pipeline embeds the string `"spouse"` using the same embedding model used for facts.
+3. It compares the resulting vector against all cached canonical slot embeddings using cosine similarity.
+4. If a canonical slot scores **≥ 0.85** (e.g., `"partner"` at 0.91), the fact's slot is rewritten to `"partner"` before conflict resolution runs.
+5. If no match exceeds the threshold, `"spouse"` is registered as a new canonical slot — its name and embedding are persisted to the table and added to the in-memory cache.
+
+This ensures that `"partner"`, `"spouse"`, `"significant_other"`, and `"relationship"` all resolve to the same canonical slot, so conflict detection works correctly regardless of the LLM's word choice.
+
+The canonical table is small (a few hundred entries at most, since there are only so many meaningful single-valued attributes) and converges quickly — early users establish the canonical names, and later variations normalize to them. The in-memory cache is loaded lazily on first use and updated incrementally when new canonicals are created.
+
 #### Extraction Validation
 
 Before facts are persisted, a validation gate filters out:
@@ -982,7 +999,13 @@ This prevents "zero-similarity amnesia" where the system appears to have no memo
 
 #### Confidence-Weighted Ranking
 
-Fact confidence (0.0–1.0) now feeds into the hybrid ranking engine as a small penalty on low-confidence facts. After the significance tiebreaker, a fact with confidence `c` (where `0 < c < 1.0`) has its score scaled to `95%–100%` of the original — a maximum 5% penalty for the lowest-confidence facts. Facts without an explicit confidence (pre-existing facts, confidence = 0) default to 1.0 and receive no penalty. This ensures that high-confidence user-stated facts rank above uncertain inferences when scores are otherwise close, without distorting relevance for clearly relevant low-confidence facts.
+Fact confidence (0.0–1.0) now feeds into the hybrid ranking engine as a small penalty on low-confidence facts. After the significance tiebreaker, a fact with confidence `c` (where `0 < c < 1.0`) has its score scaled:
+
+```
+adjusted_score = score × (0.95 + 0.05 × confidence)
+```
+
+This produces a range of `95%–100%` of the original score — a maximum 5% penalty for the lowest-confidence facts. Facts without an explicit confidence (pre-existing facts, confidence = 0) default to 1.0 and receive no penalty. This ensures that high-confidence user-stated facts rank above uncertain inferences when scores are otherwise close, without distorting relevance for clearly relevant low-confidence facts.
 
 #### Re-Embedding Support
 
@@ -1011,9 +1034,11 @@ This eliminates the possibility of goroutine pile-up during extraction backlog. 
 
 #### Trivial-Turn Gate
 
-Before making an LLM extraction call, the `DefaultExtractionStage` checks whether all user messages are trivial — greetings ("hi", "hello"), acknowledgments ("ok", "thanks"), or single-word responses ("yes", "no", "cool"). If so, it returns immediately without calling the extraction LLM.
+Before making an LLM extraction call, the `DefaultExtractionStage` checks whether all user messages are trivial — greetings ("hi", "hello", "bye"), acknowledgments ("ok", "thanks", "got it", "sure"), or filler ("cool", "great", "awesome", "lol", "haha"). If so, it returns immediately without calling the extraction LLM.
 
-This saves one LLM call per trivial exchange. In typical usage, 30–50% of turns are trivial, so this cuts extraction costs by roughly a third.
+Notably, affirmative/negative responses ("yes", "no", "yep", "nope") are **not** treated as trivial. A user saying "yes" in response to "Do you have a dog?" carries knowledge — the trivial gate would lose that fact if it skipped the turn. The extraction LLM itself handles truly trivial "yes" responses by returning an empty array when there's nothing to extract.
+
+This saves one LLM call per trivial exchange while preserving knowledge-carrying short answers.
 
 #### Metadata-Only Reads
 
@@ -1088,6 +1113,8 @@ This means:
 - High-significance facts (≥10), events, and patterns are never penalized — they remain stable in conscious mode regardless of age.
 
 The "confirmed" timestamp uses the latest of `created_at`, `reinforced_at`, and `last_recalled_at`. A fact that was reinforced recently resets its staleness clock, and so does a fact that is actively being recalled — even if the user never restates it, frequent recall signals the fact is still relevant and should not be demoted.
+
+**What is exempt from demotion:** High-significance facts (≥ 10), event facts, and pattern facts are never penalized — they remain stable in conscious mode regardless of age. Only mutable identity facts below high significance are subject to staleness demotion, since these are the facts most likely to become outdated silently (e.g., a job title assigned significance 7 that was never corrected or reinforced).
 
 #### Background Consolidator
 

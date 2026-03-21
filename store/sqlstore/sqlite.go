@@ -81,11 +81,20 @@ func sqliteQueries() Queries {
 				created_at      TEXT NOT NULL
 			)`,
 			`CREATE INDEX IF NOT EXISTS idx_mg_msg_conv ON mg_message(conversation_id, created_at)`,
+			`CREATE TABLE IF NOT EXISTS mg_slot_canonical (
+				name       TEXT PRIMARY KEY,
+				embedding  BLOB NOT NULL,
+				created_at TEXT NOT NULL DEFAULT (datetime('now'))
+			)`,
 			`CREATE TABLE IF NOT EXISTS mg_schema_version (
 				id      INTEGER PRIMARY KEY DEFAULT 1,
 				version INTEGER NOT NULL DEFAULT 1
 			)`,
 		},
+
+		SlotCanonicalList:       `SELECT name, embedding, created_at FROM mg_slot_canonical`,
+		SlotCanonicalInsert:     `INSERT OR IGNORE INTO mg_slot_canonical (name, embedding, created_at) VALUES (?, ?, ?)`,
+		SlotCanonicalFindByName: `SELECT name, embedding, created_at FROM mg_slot_canonical WHERE name = ?`,
 
 		SchemaRead:  `SELECT version FROM mg_schema_version WHERE id = 1`,
 		SchemaWrite: `INSERT OR REPLACE INTO mg_schema_version (id, version) VALUES (1, ?)`,

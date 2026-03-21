@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"memg/embed"
 	"memg/search"
 	"memg/store"
 )
@@ -24,7 +25,17 @@ const (
 	// automatically promoted to SignificanceHigh (never expires, surfaces
 	// in conscious mode).
 	promotionThreshold = 5
+
+	// slotNormThreshold is the minimum cosine similarity between a slot
+	// string and an existing canonical slot for normalization to apply.
+	slotNormThreshold = 0.85
 )
+
+// slotCacheEntry holds a canonical slot name and its embedding vector.
+type slotCacheEntry struct {
+	name      string
+	embedding []float32
+}
 
 // Pipeline accepts jobs, processes them through registered stages, and
 // writes the resulting extractions to the backing store.
@@ -33,6 +44,14 @@ type Pipeline struct {
 	repo   store.Repository
 	stages []Stage
 	pool   *Pool
+
+	// Embedder is used for slot normalization. Injected by the caller.
+	Embedder embed.Embedder
+
+	// slotMu guards the in-memory canonical slot cache.
+	slotMu     sync.RWMutex
+	slotCache  map[string]*slotCacheEntry
+	slotLoaded bool
 
 	// OnFactInserted is called after a high-significance or identity fact is
 	// inserted or promoted. Can be used to invalidate caches.
@@ -100,6 +119,7 @@ func (p *Pipeline) persistFacts(ctx context.Context, entityUUID string, facts []
 
 	for _, f := range facts {
 		applyDefaults(f)
+		f.Slot = p.normalizeSlot(ctx, f.Slot)
 
 		if f.ExpiresAt == nil && f.Significance < store.SignificanceHigh {
 			f.ExpiresAt = store.TTLForSignificance(f.Significance)
@@ -286,6 +306,111 @@ func safeCallback(fn func()) {
 		}
 	}()
 	fn()
+}
+
+// normalizeSlot maps a free-form slot string to a canonical slot using
+// embedding-based similarity. If no canonical match is found above the
+// threshold, the slot is registered as a new canonical.
+func (p *Pipeline) normalizeSlot(ctx context.Context, slot string) string {
+	if slot == "" {
+		return ""
+	}
+	if p.Embedder == nil {
+		return slot
+	}
+	ss, ok := p.repo.(store.CanonicalSlotStore)
+	if !ok {
+		return slot
+	}
+
+	// Lazy-load the cache on first use.
+	p.slotMu.RLock()
+	loaded := p.slotLoaded
+	// Fast path: exact match in cache.
+	if loaded {
+		if _, exists := p.slotCache[slot]; exists {
+			p.slotMu.RUnlock()
+			return slot
+		}
+	}
+	p.slotMu.RUnlock()
+
+	if !loaded {
+		p.loadSlotCache(ctx, ss)
+		// Re-check exact match after load.
+		p.slotMu.RLock()
+		if _, exists := p.slotCache[slot]; exists {
+			p.slotMu.RUnlock()
+			return slot
+		}
+		p.slotMu.RUnlock()
+	}
+
+	// Embed the incoming slot string.
+	vectors, err := p.Embedder.Embed(ctx, []string{slot})
+	if err != nil || len(vectors) == 0 {
+		log.Printf("memg augment: embed slot %q: %v", slot, err)
+		return slot
+	}
+	slotVec := vectors[0]
+
+	// Compare against all cached canonical slots.
+	p.slotMu.RLock()
+	var bestName string
+	var bestScore float64
+	for _, entry := range p.slotCache {
+		score := search.CosineSimilarity(slotVec, entry.embedding)
+		if score > bestScore {
+			bestScore = score
+			bestName = entry.name
+		}
+	}
+	p.slotMu.RUnlock()
+
+	if bestScore >= slotNormThreshold {
+		return bestName
+	}
+
+	// No match — register as a new canonical slot.
+	canonical := &store.CanonicalSlot{
+		Name:      slot,
+		Embedding: slotVec,
+	}
+	if err := ss.InsertCanonicalSlot(ctx, canonical); err != nil {
+		log.Printf("memg augment: insert canonical slot %q: %v", slot, err)
+		// Race: another worker may have inserted it. Try to find it.
+		if existing, fErr := ss.FindCanonicalSlotByName(ctx, slot); fErr == nil && existing != nil {
+			canonical = existing
+		}
+	}
+
+	p.slotMu.Lock()
+	p.slotCache[slot] = &slotCacheEntry{name: slot, embedding: slotVec}
+	p.slotMu.Unlock()
+
+	return slot
+}
+
+// loadSlotCache populates the in-memory slot cache from the database.
+func (p *Pipeline) loadSlotCache(ctx context.Context, ss store.CanonicalSlotStore) {
+	p.slotMu.Lock()
+	defer p.slotMu.Unlock()
+
+	if p.slotLoaded {
+		return
+	}
+
+	p.slotCache = make(map[string]*slotCacheEntry)
+	slots, err := ss.ListCanonicalSlots(ctx)
+	if err != nil {
+		log.Printf("memg augment: load canonical slots: %v", err)
+		p.slotLoaded = true
+		return
+	}
+	for _, s := range slots {
+		p.slotCache[s.Name] = &slotCacheEntry{name: s.Name, embedding: s.Embedding}
+	}
+	p.slotLoaded = true
 }
 
 // Shutdown drains the worker pool and blocks until all in-flight jobs finish.

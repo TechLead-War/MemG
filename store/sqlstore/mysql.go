@@ -84,11 +84,20 @@ func mysqlQueries() Queries {
 				"FOREIGN KEY (conversation_id) REFERENCES mg_conversation(uuid)," +
 				"INDEX idx_mg_msg_conv (conversation_id, created_at)" +
 				")",
+			"CREATE TABLE IF NOT EXISTS mg_slot_canonical (" +
+				"name       VARCHAR(255) PRIMARY KEY," +
+				"embedding  LONGBLOB NOT NULL," +
+				"created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP" +
+				")",
 			"CREATE TABLE IF NOT EXISTS mg_schema_version (" +
 				"id      INTEGER PRIMARY KEY DEFAULT 1," +
 				"version INTEGER NOT NULL DEFAULT 1" +
 				")",
 		},
+
+		SlotCanonicalList:       `SELECT name, embedding, created_at FROM mg_slot_canonical`,
+		SlotCanonicalInsert:     `INSERT IGNORE INTO mg_slot_canonical (name, embedding, created_at) VALUES (?, ?, ?)`,
+		SlotCanonicalFindByName: `SELECT name, embedding, created_at FROM mg_slot_canonical WHERE name = ?`,
 
 		SchemaRead:  `SELECT version FROM mg_schema_version WHERE id = 1`,
 		SchemaWrite: `INSERT INTO mg_schema_version (id, version) VALUES (1, ?) ON DUPLICATE KEY UPDATE version = VALUES(version)`,

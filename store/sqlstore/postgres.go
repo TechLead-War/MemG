@@ -81,11 +81,20 @@ func postgresQueries() Queries {
 				created_at      TIMESTAMPTZ NOT NULL
 			)`,
 			`CREATE INDEX IF NOT EXISTS idx_mg_msg_conv ON mg_message(conversation_id, created_at)`,
+			`CREATE TABLE IF NOT EXISTS mg_slot_canonical (
+				name       TEXT PRIMARY KEY,
+				embedding  BYTEA NOT NULL,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			)`,
 			`CREATE TABLE IF NOT EXISTS mg_schema_version (
 				id      INTEGER PRIMARY KEY DEFAULT 1,
 				version INTEGER NOT NULL DEFAULT 1
 			)`,
 		},
+
+		SlotCanonicalList:       `SELECT name, embedding, created_at FROM mg_slot_canonical`,
+		SlotCanonicalInsert:     `INSERT INTO mg_slot_canonical (name, embedding, created_at) VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING`,
+		SlotCanonicalFindByName: `SELECT name, embedding, created_at FROM mg_slot_canonical WHERE name = $1`,
 
 		SchemaRead:  `SELECT version FROM mg_schema_version WHERE id = 1`,
 		SchemaWrite: `INSERT INTO mg_schema_version (id, version) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version`,

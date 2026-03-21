@@ -109,6 +109,15 @@ type RecallUsageTracker interface {
 	UpdateRecallUsage(ctx context.Context, factUUIDs []string) error
 }
 
+// CanonicalSlotStore manages the shared canonical slot registry for slot
+// normalization. This is an optional interface — repositories that do not
+// implement it will silently skip slot normalization in the pipeline.
+type CanonicalSlotStore interface {
+	ListCanonicalSlots(ctx context.Context) ([]*CanonicalSlot, error)
+	InsertCanonicalSlot(ctx context.Context, slot *CanonicalSlot) error
+	FindCanonicalSlotByName(ctx context.Context, name string) (*CanonicalSlot, error)
+}
+
 // ConversationWriter manages conversation records.
 type ConversationWriter interface {
 	StartConversation(ctx context.Context, sessionUUID, entityUUID string) (uuid string, err error)

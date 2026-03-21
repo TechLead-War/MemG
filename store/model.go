@@ -149,6 +149,14 @@ func DefaultContentKey(content string) string {
 	return fmt.Sprintf("%x", h[:8])
 }
 
+// CanonicalSlot is a globally shared slot name with its embedding vector,
+// used to normalize free-form slot strings from extraction stages.
+type CanonicalSlot struct {
+	Name      string
+	Embedding []float32
+	CreatedAt time.Time
+}
+
 // Conversation groups a sequence of messages within a session.
 type Conversation struct {
 	UUID             string

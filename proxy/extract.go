@@ -296,8 +296,8 @@ func isTrivialTurn(messages []*llm.Message) bool {
 	trivialPatterns := []string{
 		"thanks", "thank you", "ok", "okay", "got it", "sure",
 		"hello", "hi", "hey", "bye", "goodbye", "good morning",
-		"good night", "good evening", "good afternoon", "yes", "no",
-		"yep", "nope", "cool", "great", "awesome", "nice",
+		"good night", "good evening", "good afternoon",
+		"cool", "great", "awesome", "nice",
 		"understood", "roger", "ack", "k", "kk", "lol", "haha",
 	}
 

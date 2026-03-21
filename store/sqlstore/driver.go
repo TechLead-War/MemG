@@ -64,6 +64,11 @@ type Queries struct {
 	// Attribute
 	AttrInsert string // INSERT (uuid, process_id, key, value, created_at)
 
+	// Canonical slots
+	SlotCanonicalList       string // SELECT name, embedding, created_at FROM mg_slot_canonical
+	SlotCanonicalInsert     string // INSERT INTO mg_slot_canonical (name, embedding, created_at)
+	SlotCanonicalFindByName string // SELECT ... WHERE name = ?
+
 	// Schema versioning
 	SchemaRead  string
 	SchemaWrite string
@@ -990,6 +995,59 @@ func (r *Repository) InsertProcessAttribute(ctx context.Context, processUUID str
 		return fmt.Errorf("insert attribute: %w", err)
 	}
 	return nil
+}
+
+// ---- CanonicalSlotStore ----
+
+func (r *Repository) ListCanonicalSlots(ctx context.Context) ([]*store.CanonicalSlot, error) {
+	rows, err := r.db.QueryContext(ctx, r.q.SlotCanonicalList)
+	if err != nil {
+		return nil, fmt.Errorf("list canonical slots: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*store.CanonicalSlot
+	for rows.Next() {
+		s := &store.CanonicalSlot{}
+		var raw []byte
+		var createdAt flexTime
+		if err := rows.Scan(&s.Name, &raw, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan canonical slot: %w", err)
+		}
+		s.Embedding = decodeEmbedding(raw)
+		if createdAt.Valid {
+			s.CreatedAt = createdAt.Time
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) InsertCanonicalSlot(ctx context.Context, slot *store.CanonicalSlot) error {
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, r.q.SlotCanonicalInsert, slot.Name, encodeEmbedding(slot.Embedding), now)
+	if err != nil {
+		return fmt.Errorf("insert canonical slot: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) FindCanonicalSlotByName(ctx context.Context, name string) (*store.CanonicalSlot, error) {
+	s := &store.CanonicalSlot{}
+	var raw []byte
+	var createdAt flexTime
+	err := r.db.QueryRowContext(ctx, r.q.SlotCanonicalFindByName, name).Scan(&s.Name, &raw, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find canonical slot: %w", err)
+	}
+	s.Embedding = decodeEmbedding(raw)
+	if createdAt.Valid {
+		s.CreatedAt = createdAt.Time
+	}
+	return s, nil
 }
 
 // ---- io.Closer ----

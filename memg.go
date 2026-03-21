@@ -93,6 +93,7 @@ func New(repo store.Repository, opts ...Option) (*MemG, error) {
 		}
 		g.embedder = emb
 		g.cfg.EmbedDimension = emb.Dimension()
+		g.pipeline.Embedder = emb
 	}
 
 	pruner := memory.NewPruner(repo, cfg.PruneInterval)
@@ -128,6 +129,7 @@ func (g *MemG) SetEmbedder(e embed.Embedder) {
 	defer g.mu.Unlock()
 	g.embedder = e
 	g.cfg.EmbedDimension = e.Dimension()
+	g.pipeline.Embedder = e
 }
 
 // AddStage registers a custom augmentation stage.
