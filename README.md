@@ -8,7 +8,7 @@ MemG intercepts LLM calls to automatically inject relevant recalled facts from s
 
 - **Zero-code memory proxy** — add persistent memory to any LLM app in any language by changing one env var
 - **10 LLM providers** — OpenAI, Anthropic, Gemini, Ollama, Azure OpenAI, AWS Bedrock, DeepSeek, Groq, Together AI, xAI
-- **10 embedding providers** — OpenAI, Gemini, Ollama, HuggingFace, Azure OpenAI, AWS Bedrock, Together AI, Cohere, VoyageAI, plus a local sentence-transformers service
+- **11 embedding providers** — OpenAI, Gemini, Ollama, HuggingFace, Azure OpenAI, AWS Bedrock, Together AI, Cohere, VoyageAI, in-process ONNX Runtime, plus a local sentence-transformers gRPC service
 - **Plug-and-play storage** — PostgreSQL, SQLite, MySQL out of the box
 - **Hybrid recall** — cosine similarity + BM25 lexical scoring with Kneedle dynamic cutoff
 - **Memory lifecycle** — fact types (identity/event/pattern), temporal status (current/historical), significance-based decay, reinforcement, and automatic deduplication
@@ -20,7 +20,7 @@ MemG intercepts LLM calls to automatically inject relevant recalled facts from s
 - **Query transformation** — optional hook rewrites follow-up queries before embedding for better retrieval
 - **Re-embedding** — migrate facts to a new embedding model without data loss
 - **Consolidation** — background worker clusters old events into pattern facts
-- **Local embeddings** — bundled Python gRPC service for running sentence-transformers locally with zero API keys
+- **Local embeddings** — in-process ONNX Runtime (no Python, no external services) or legacy Python gRPC service, both with zero API keys
 - **API key management** — per-provider config with env var fallback
 
 ## Quick Start (Proxy — Any Language, Zero Code Changes)
@@ -177,6 +177,54 @@ func main() {
 }
 ```
 
+## Quick Start (Python SDK)
+
+```bash
+pip install memg-sdk
+```
+
+```python
+from memg import MemG
+import openai
+
+# One line — wraps your existing client with memory
+client = MemG.wrap(openai.OpenAI(), entity="user-123")
+
+# Everything else stays the same
+resp = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "What do you remember about me?"}],
+)
+```
+
+Also supports Anthropic (`MemG.wrap(anthropic.Anthropic(), ...)`), Gemini (`MemG.wrap(model, entity="user-123")`), custom stores (`MemG(store=my_store)`), client mode (`mode="client"`), and direct memory operations (`MemG().add(...)`, `MemG().search(...)`).
+
+See [`sdk/python/`](sdk/python/) for full documentation.
+
+## Quick Start (TypeScript SDK)
+
+```bash
+npm install memg-core-js
+```
+
+```typescript
+import { MemG } from 'memg';
+import OpenAI from 'openai';
+
+// One line — wraps your existing client with memory
+const client = MemG.wrap(new OpenAI(), { entity: 'user-123' });
+
+// Everything else stays the same
+const resp = await client.chat.completions.create({
+  model: 'gpt-4o',
+  messages: [{ role: 'user', content: 'What do you remember about me?' }],
+});
+```
+
+Also supports Anthropic (`MemG.wrap(new Anthropic(), ...)`), Gemini (`MemG.wrap(geminiModel, { entity: 'user-123' })`), custom stores (`new MemG({ store: myStore })`), client mode (`mode: 'client'`), and direct memory operations (`new MemG().add(...)`, `new MemG().search(...)`).
+
+See [`sdk/typescript/`](sdk/typescript/) for full documentation.
+
 ## LLM Providers
 
 Select a provider by name with `WithLLMProvider`. Import the provider package to register it.
@@ -185,7 +233,7 @@ Select a provider by name with `WithLLMProvider`. Import the provider package to
 |---|---|---|---|---|
 | OpenAI | `openai` | gpt-4o | `OPENAI_API_KEY` | `_ "memg/llm/openai"` |
 | Anthropic | `anthropic` | claude-sonnet-4-20250514 | `ANTHROPIC_API_KEY` | `_ "memg/llm/anthropic"` |
-| Google Gemini | `gemini` | gemini-2.0-flash | `GEMINI_API_KEY` | `_ "memg/llm/gemini"` |
+| Google Gemini | `gemini` | gemini-2.5-flash | `GEMINI_API_KEY` | `_ "memg/llm/gemini"` |
 | Ollama (local) | `ollama` | (user specified) | none | `_ "memg/llm/ollama"` |
 | Azure OpenAI | `azureopenai` | (user specified) | `AZURE_OPENAI_API_KEY` | `_ "memg/llm/azureopenai"` |
 | AWS Bedrock | `bedrock` | claude-sonnet on Bedrock | `AWS_ACCESS_KEY_ID` | `_ "memg/llm/bedrock"` |
@@ -209,6 +257,7 @@ API keys are resolved in order: explicit `ProviderConfig.APIKey` field, then the
 | Together AI | `togetherai` | m2-bert-80M-8k-retrieval | 768 | `TOGETHER_API_KEY` | `_ "memg/embed/togetherai"` |
 | Cohere | `cohere` | embed-english-v3.0 | 1024 | `COHERE_API_KEY` | `_ "memg/embed/cohere"` |
 | VoyageAI | `voyageai` | voyage-3 | 1024 | `VOYAGE_API_KEY` | `_ "memg/embed/voyageai"` |
+| ONNX Runtime | `onnx` | all-MiniLM-L6-v2 | 384 | none | `_ "memg/embed/onnx"` |
 | Local (gRPC) | `local` | all-MiniLM-L6-v2 | auto-detected | none | `_ "memg/embed/local"` |
 
 ## Embedding Modes
@@ -219,7 +268,15 @@ API keys are resolved in order: explicit `ProviderConfig.APIKey` field, then the
 memg proxy   # uses OpenAI for embeddings (same API key as your LLM calls)
 ```
 
-**Local embeddings require 2 services** — the Go proxy + a Python embedding service. This is only needed if you want zero API keys and no data leaving your machine:
+**Local embeddings (recommended: ONNX)** — in-process, no Python, no external services, no API keys:
+
+```bash
+memg proxy --embed-provider onnx
+```
+
+This runs the embedding model directly inside the Go process using ONNX Runtime. See [ONNX Local Embeddings](#onnx-local-embeddings-recommended) below.
+
+**Local embeddings (legacy: gRPC)** — the Go proxy + a separate Python embedding service:
 
 ```bash
 # Terminal 1: Python embedding service
@@ -229,11 +286,73 @@ cd local/embedder && python server.py
 memg proxy --embed-provider local
 ```
 
-The Python service exists because Go can't run PyTorch/sentence-transformers natively. If you use any cloud embedding provider, Python is completely out of the picture.
+The gRPC approach requires Python and a separate process. It remains available for users who need PyTorch-specific features or custom models not exported to ONNX.
 
-## Local Embeddings Setup
+## ONNX Local Embeddings (Recommended)
 
-MemG includes a Python gRPC service that runs sentence-transformers models locally. No API keys, no data leaves your machine.
+Run embedding models directly inside the Go process using ONNX Runtime. No Python, no external services, no API keys, no data leaves your machine.
+
+### Prerequisites
+
+**1. Install ONNX Runtime:**
+
+```bash
+# macOS (Apple Silicon)
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-osx-arm64-1.24.4.tgz
+tar xzf onnxruntime-osx-arm64-1.24.4.tgz
+cp onnxruntime-osx-arm64-1.24.4/lib/libonnxruntime.dylib /opt/homebrew/lib/
+
+# Linux (x86_64)
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-1.24.4.tgz
+tar xzf onnxruntime-linux-x64-1.24.4.tgz
+sudo cp onnxruntime-linux-x64-1.24.4/lib/libonnxruntime.so /usr/local/lib/
+
+# Or set ONNX_RUNTIME_LIB to point to the library directly
+export ONNX_RUNTIME_LIB=/path/to/libonnxruntime.dylib
+```
+
+**2. Download model files:**
+
+```bash
+mkdir -p ~/.memg/models/all-MiniLM-L6-v2
+# Download model.onnx and vocab.txt for all-MiniLM-L6-v2
+# from HuggingFace: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
+```
+
+### Use
+
+```bash
+# Proxy mode
+memg proxy --embed-provider onnx
+
+# With custom model directory
+memg proxy --embed-provider onnx --embed-base-url /path/to/model/dir
+```
+
+### Use from Go
+
+```go
+import _ "memg/embed/onnx"
+
+g, _ := memg.New(repo,
+    memg.WithEmbedProvider("onnx", embed.ProviderConfig{}), // defaults to ~/.memg/models/all-MiniLM-L6-v2
+)
+
+// Or with a custom model directory:
+g, _ := memg.New(repo,
+    memg.WithEmbedProvider("onnx", embed.ProviderConfig{
+        BaseURL: "/path/to/my/model/dir",  // must contain model.onnx + vocab.txt
+    }),
+)
+```
+
+### How It Works
+
+The ONNX provider loads the model and vocabulary into the Go process at startup. Each `Embed()` call runs inference in-process via ONNX Runtime — no network calls, no Python, no gRPC. Embeddings are mean-pooled and L2-normalized, matching the output of the Python sentence-transformers service.
+
+## Local Embeddings via gRPC (Legacy)
+
+MemG also includes a Python gRPC service that runs sentence-transformers models. This is the legacy approach — use the ONNX provider above unless you need PyTorch-specific features.
 
 ### Setup
 
@@ -472,7 +591,7 @@ Any app (Python, Node.js, Go, curl, ...)
 
 Provider Layer:
   LLM:   OpenAI │ Anthropic │ Gemini │ Ollama │ Azure │ Bedrock │ DeepSeek │ Groq │ Together │ xAI
-  Embed: OpenAI │ Gemini │ Ollama │ HuggingFace │ Azure │ Bedrock │ Together │ Cohere │ Voyage │ Local(gRPC)
+  Embed: OpenAI │ Gemini │ Ollama │ HuggingFace │ Azure │ Bedrock │ Together │ Cohere │ Voyage │ ONNX(local) │ gRPC(legacy)
 ```
 
 ## Direct Provider Construction

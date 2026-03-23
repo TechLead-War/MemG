@@ -21,7 +21,9 @@ import (
 	"memg/store/sqlstore"
 
 	// Register default providers — import for side effects.
+	_ "memg/embed/gemini"
 	_ "memg/embed/local"
+	_ "memg/embed/onnx"
 	_ "memg/embed/openai"
 	_ "memg/llm/anthropic"
 	_ "memg/llm/gemini"

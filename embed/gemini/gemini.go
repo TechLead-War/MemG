@@ -18,6 +18,7 @@ const (
 	defaultDimension = 768
 	envVar           = "GEMINI_API_KEY"
 	providerName     = "gemini"
+	maxBatchSize     = 100
 )
 
 func init() {
@@ -72,55 +73,80 @@ func New(cfg embed.ProviderConfig) (*Client, error) {
 // ModelName returns the configured embedding model identifier.
 func (c *Client) ModelName() string { return c.model }
 
-// geminiRequest is the JSON body sent to the Gemini embedding API.
-type geminiRequest struct {
-	Content geminiContent `json:"content"`
+// ---------- wire types ----------
+
+type geminiPart struct {
+	Text string `json:"text"`
 }
 
 type geminiContent struct {
 	Parts []geminiPart `json:"parts"`
 }
 
-type geminiPart struct {
-	Text string `json:"text"`
+// batchEmbedRequest is the JSON body sent to the batchEmbedContents endpoint.
+type batchEmbedRequest struct {
+	Requests []embedContentRequest `json:"requests"`
 }
 
-// geminiResponse is the JSON response from the Gemini embedding API.
-type geminiResponse struct {
-	Embedding struct {
+type embedContentRequest struct {
+	Model   string        `json:"model"`
+	Content geminiContent `json:"content"`
+}
+
+// batchEmbedResponse is the JSON response from the batchEmbedContents endpoint.
+type batchEmbedResponse struct {
+	Embeddings []struct {
 		Values []float32 `json:"values"`
-	} `json:"embedding"`
+	} `json:"embeddings"`
 }
 
-// Embed produces one embedding vector per input text. Gemini embeds one text
-// per API call, so this method loops over all inputs sequentially.
+// Embed produces one embedding vector per input text using the Gemini
+// batchEmbedContents endpoint, batching up to 100 texts per API call.
 func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
 
 	results := make([][]float32, len(texts))
-	for i, text := range texts {
-		vec, err := c.embedSingle(ctx, text)
+
+	for start := 0; start < len(texts); start += maxBatchSize {
+		end := start + maxBatchSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+		batch := texts[start:end]
+
+		vecs, err := c.embedBatch(ctx, batch)
 		if err != nil {
 			return nil, err
 		}
-		results[i] = vec
+		for i, v := range vecs {
+			results[start+i] = v
+		}
 	}
+
 	return results, nil
 }
 
-func (c *Client) embedSingle(ctx context.Context, text string) ([]float32, error) {
-	body, err := json.Marshal(geminiRequest{
-		Content: geminiContent{
-			Parts: []geminiPart{{Text: text}},
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("gemini: marshal request: %w", err)
+func (c *Client) embedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	modelRef := fmt.Sprintf("models/%s", c.model)
+
+	requests := make([]embedContentRequest, len(texts))
+	for i, text := range texts {
+		requests[i] = embedContentRequest{
+			Model: modelRef,
+			Content: geminiContent{
+				Parts: []geminiPart{{Text: text}},
+			},
+		}
 	}
 
-	url := fmt.Sprintf("%s/v1beta/models/%s:embedContent?key=%s", c.baseURL, c.model, c.apiKey)
+	body, err := json.Marshal(batchEmbedRequest{Requests: requests})
+	if err != nil {
+		return nil, fmt.Errorf("gemini: marshal batch request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/v1beta/%s:batchEmbedContents?key=%s", c.baseURL, modelRef, c.apiKey)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("gemini: build request: %w", err)
@@ -138,11 +164,20 @@ func (c *Client) embedSingle(ctx context.Context, text string) ([]float32, error
 		return nil, fmt.Errorf("gemini: status %d: %s", resp.StatusCode, raw)
 	}
 
-	var result geminiResponse
+	var result batchEmbedResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("gemini: decode response: %w", err)
+		return nil, fmt.Errorf("gemini: decode batch response: %w", err)
 	}
-	return result.Embedding.Values, nil
+
+	if len(result.Embeddings) != len(texts) {
+		return nil, fmt.Errorf("gemini: expected %d embeddings, got %d", len(texts), len(result.Embeddings))
+	}
+
+	vecs := make([][]float32, len(texts))
+	for i, emb := range result.Embeddings {
+		vecs[i] = emb.Values
+	}
+	return vecs, nil
 }
 
 // Dimension returns the configured vector length.
