@@ -44,6 +44,7 @@ type MemG struct {
 	repo             store.Repository
 	provider         llm.Provider
 	embedder         embed.Embedder
+	embedderReady    bool
 	engine           search.Engine
 	pipeline         *augment.Pipeline
 	pruner           *memory.Pruner
@@ -109,17 +110,11 @@ func New(repo store.Repository, opts ...Option) (*MemG, error) {
 		g.cfg.EmbedDimension = emb.Dimension()
 		g.pipeline.Embedder = emb
 	}
-	if g.embedder == nil {
-		return nil, ErrNoEmbedder
-	}
-	probeTimeout := cfg.RequestTimeout
-	if probeTimeout < 15*time.Second {
-		probeTimeout = 15 * time.Second
-	}
-	probeCtx, cancelProbe := context.WithTimeout(ctx, probeTimeout)
-	defer cancelProbe()
-	if err := embed.Probe(probeCtx, g.embedder); err != nil {
-		return nil, fmt.Errorf("memg: embedder health check failed: %w", err)
+	if g.embedder != nil {
+		if err := g.probeEmbedder(ctx, g.embedder); err != nil {
+			return nil, err
+		}
+		g.embedderReady = true
 	}
 
 	pruner := memory.NewPruner(repo, cfg.PruneInterval)
@@ -154,10 +149,54 @@ func (g *MemG) SetEmbedder(e embed.Embedder) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.embedder = e
+	g.embedderReady = false
 	g.pipeline.Embedder = e
 	if e != nil {
 		g.cfg.EmbedDimension = e.Dimension()
 	}
+}
+
+func (g *MemG) probeEmbedder(ctx context.Context, emb embed.Embedder) error {
+	if emb == nil {
+		return ErrNoEmbedder
+	}
+	probeTimeout := g.cfg.RequestTimeout
+	if probeTimeout < 15*time.Second {
+		probeTimeout = 15 * time.Second
+	}
+	probeCtx, cancelProbe := context.WithTimeout(ctx, probeTimeout)
+	defer cancelProbe()
+	if err := embed.Probe(probeCtx, emb); err != nil {
+		return fmt.Errorf("memg: embedder health check failed: %w", err)
+	}
+	return nil
+}
+
+func (g *MemG) ensureEmbedderReady(ctx context.Context) (embed.Embedder, error) {
+	g.mu.RLock()
+	emb := g.embedder
+	ready := g.embedderReady
+	g.mu.RUnlock()
+
+	if emb == nil {
+		return nil, ErrNoEmbedder
+	}
+	if ready {
+		return emb, nil
+	}
+	if err := g.probeEmbedder(ctx, emb); err != nil {
+		return nil, err
+	}
+
+	g.mu.Lock()
+	if g.embedder == emb {
+		g.embedderReady = true
+		g.cfg.EmbedDimension = emb.Dimension()
+		g.pipeline.Embedder = emb
+	}
+	g.mu.Unlock()
+
+	return emb, nil
 }
 
 // AddStage registers a custom augmentation stage.
@@ -187,14 +226,14 @@ func (g *MemG) SetQueryTransformer(qt memory.QueryTransformer) {
 func (g *MemG) Chat(ctx context.Context, messages []*llm.Message, opts ...any) (*llm.Response, error) {
 	g.mu.RLock()
 	prov := g.provider
-	emb := g.embedder
 	g.mu.RUnlock()
 
 	if prov == nil {
 		return nil, ErrNoProvider
 	}
-	if emb == nil {
-		return nil, ErrNoEmbedder
+	emb, err := g.ensureEmbedderReady(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	var cc chatConfig
@@ -329,14 +368,14 @@ func (g *MemG) Chat(ctx context.Context, messages []*llm.Message, opts ...any) (
 func (g *MemG) Stream(ctx context.Context, messages []*llm.Message, opts ...any) (*llm.StreamReader, error) {
 	g.mu.RLock()
 	prov := g.provider
-	emb := g.embedder
 	g.mu.RUnlock()
 
 	if prov == nil {
 		return nil, ErrNoProvider
 	}
-	if emb == nil {
-		return nil, ErrNoEmbedder
+	emb, err := g.ensureEmbedderReady(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	var cc chatConfig
@@ -489,11 +528,9 @@ func (g *MemG) Stream(ctx context.Context, messages []*llm.Message, opts ...any)
 // ReEmbedFacts re-embeds all facts for the given entity using the current
 // embedding model. Use this after changing the embedding provider.
 func (g *MemG) ReEmbedFacts(ctx context.Context, entityID string) (int, error) {
-	g.mu.RLock()
-	emb := g.embedder
-	g.mu.RUnlock()
-	if emb == nil {
-		return 0, ErrNoEmbedder
+	emb, err := g.ensureEmbedderReady(ctx)
+	if err != nil {
+		return 0, err
 	}
 
 	entityUUID, err := g.resolveEntityUUID(ctx, entityID)

@@ -1,5 +1,4 @@
 # Binaries
-memg
 *.exe
 *.dll
 *.so
@@ -29,8 +28,8 @@ Thumbs.db
 .env
 
 # Local config (may contain API keys)
-memg.json
-memg.config.json
+/memg.json
+/memg.config.json
 
 # SQLite databases
 *.db
