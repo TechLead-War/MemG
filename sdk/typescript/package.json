@@ -1,6 +1,6 @@
 {
   "name": "memg-core-js",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Memory layer for LLM applications — native in-process engine with SQLite, hybrid search, and extraction pipeline",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
