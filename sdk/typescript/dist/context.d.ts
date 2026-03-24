@@ -2,7 +2,7 @@
  * Context builder: merges conscious facts, recalled facts, and summaries
  * into a single context string under a token budget. Matches Go's BuildContext.
  */
-import type { ConsciousFact, RecalledFact, RecalledSummary } from './types';
+import type { ConsciousFact, RecalledFact, RecalledSummary } from './types.js';
 export interface ContextBudget {
     totalTokens: number;
     summaryTokens: number;

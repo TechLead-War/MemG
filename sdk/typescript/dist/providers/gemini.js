@@ -7,10 +7,44 @@
  * - **client**: Intercepts calls locally, querying MCP for memory context.
  * - **proxy**: Not supported for Gemini (Gemini SDK does not use OpenAI-compatible endpoints).
  */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.wrap = wrap;
-const client_1 = require("../client");
-const intercept_1 = require("../intercept");
+const client_js_1 = require("../client.js");
+const intercept_js_1 = require("../intercept.js");
+const session_helpers_js_1 = require("./session_helpers.js");
 /**
  * Wrap a Gemini GenerativeModel with MemG memory capabilities.
  */
@@ -19,8 +53,8 @@ function wrap(client, opts) {
         return wrapGeminiNative(client, opts);
     }
     if (opts.mode === 'client') {
-        const mcp = new client_1.MemGClient(opts.mcpUrl);
-        return (0, intercept_1.wrapGeminiClient)(client, mcp, opts.entity, opts.extract ?? true);
+        const mcp = new client_js_1.MemGClient(opts.mcpUrl);
+        return (0, intercept_js_1.wrapGeminiClient)(client, mcp, opts.entity, opts.extract ?? true);
     }
     // Proxy mode: Gemini SDK doesn't route through OpenAI-compatible proxy.
     // Fall through to native mode as the best alternative.
@@ -28,12 +62,16 @@ function wrap(client, opts) {
     return wrapGeminiNative(client, opts);
 }
 function wrapGeminiNative(client, opts) {
-    const { MemG } = require('../index');
-    const memg = new MemG(opts.nativeConfig);
+    let memg = null;
     let initPromise = null;
     async function ensureInit() {
         if (!initPromise) {
-            initPromise = memg.init();
+            initPromise = (async () => {
+                const { MemG } = await Promise.resolve().then(() => __importStar(require('../index.js')));
+                memg = new MemG(opts.nativeConfig);
+                client._memg = memg;
+                await memg.init();
+            })();
         }
         await initPromise;
         return memg;
@@ -46,18 +84,13 @@ function wrapGeminiNative(client, opts) {
         let augmentedParams = typeof params === 'string'
             ? { contents: [{ role: 'user', parts: [{ text: params }] }] }
             : { ...params };
-        // Step 1: Build memory context and inject into systemInstruction.
-        try {
-            const userText = extractLastGeminiUserMessage(augmentedParams);
-            if (userText) {
-                const context = await m.buildMemoryContext(entityId, userText);
-                if (context) {
-                    augmentedParams = injectGeminiContext(augmentedParams, context);
-                }
+        const userText = extractLastGeminiUserMessage(augmentedParams);
+        if (userText) {
+            const queryText = await (0, session_helpers_js_1.buildRecallQuery)(m, entityId, userText);
+            const context = await m.buildMemoryContext(entityId, queryText);
+            if (context) {
+                augmentedParams = injectGeminiContext(augmentedParams, context);
             }
-        }
-        catch (err) {
-            console.warn('[memg] Failed to build memory context, proceeding without:', err);
         }
         // Step 2: Call the original generateContent.
         const response = await originalGenerate(augmentedParams);
@@ -76,6 +109,7 @@ function wrapGeminiNative(client, opts) {
                 if (assistantText) {
                     messages.push({ role: 'assistant', content: assistantText });
                 }
+                (0, session_helpers_js_1.saveExchangeToSession)(m, entityId, messages).catch(() => { });
                 m.extractFromMessages(entityId, messages).catch(() => { });
             }
             catch {
@@ -85,8 +119,9 @@ function wrapGeminiNative(client, opts) {
         return response;
     };
     // Attach close method so users can clean up.
-    client._memg = memg;
-    client._memgClose = () => memg.close();
+    client._memg = null;
+    client._memgClose = () => { if (memg)
+        memg.close(); };
     return client;
 }
 function extractLastGeminiUserMessage(params) {

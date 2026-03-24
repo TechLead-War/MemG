@@ -17,25 +17,25 @@ import (
 
 // Config holds everything the proxy server needs to operate.
 type Config struct {
-	Target         *url.URL          // upstream LLM API base URL
-	Repo           store.Repository  // persistence layer
-	Embedder       embed.Embedder    // text embedding service
-	Provider       llm.Provider      // LLM provider for extraction calls
-	Pipeline       *augment.Pipeline // asynchronous knowledge extraction
-	DefaultEntity        string        // entity ID for single-entity mode
-	SessionTimeout       time.Duration // sliding session expiry
-	WorkingMemoryTurns   int           // max recent turns for working memory
-	MemoryTokenBudget    int           // max token budget for merged context
-	SummaryTokenBudget   int           // max tokens for summary text in context
-	ConsciousMode        bool          // inject top facts by significance on every request
-	ConsciousLimit       int           // max facts for conscious mode (default 10)
-	RecallFactsLimit     int           // max facts per recall query (default 20)
-	RecallSummaryLimit   int           // max summaries per recall query (default 5)
-	RecallFactThreshold  float64       // min score for fact recall (default 0.3)
-	RecallSummaryThreshold float64     // min score for summary recall (default 0.3)
-	MaxRecallCandidates  int           // safety cap on facts loaded per recall pass (default 10000)
-	ConsciousCacheTTL    time.Duration // conscious cache entry lifetime (default 30s)
-	Debug                bool          // enable verbose logging
+	Target                 *url.URL          // upstream LLM API base URL
+	Repo                   store.Repository  // persistence layer
+	Embedder               embed.Embedder    // text embedding service
+	Provider               llm.Provider      // LLM provider for extraction calls
+	Pipeline               *augment.Pipeline // asynchronous knowledge extraction
+	DefaultEntity          string            // entity ID for single-entity mode
+	SessionTimeout         time.Duration     // sliding session expiry
+	WorkingMemoryTurns     int               // max recent turns for working memory
+	MemoryTokenBudget      int               // max token budget for merged context
+	SummaryTokenBudget     int               // max tokens for summary text in context
+	ConsciousMode          bool              // inject top facts by significance on every request
+	ConsciousLimit         int               // max facts for conscious mode (default 10)
+	RecallFactsLimit       int               // max facts per recall query (default 20)
+	RecallSummaryLimit     int               // max summaries per recall query (default 5)
+	RecallFactThreshold    float64           // min score for fact recall (default 0.3)
+	RecallSummaryThreshold float64           // min score for summary recall (default 0.3)
+	MaxRecallCandidates    int               // safety cap on facts loaded per recall pass (default 10000)
+	ConsciousCacheTTL      time.Duration     // conscious cache entry lifetime (default 30s)
+	Debug                  bool              // enable verbose logging
 }
 
 // Server is a transparent reverse proxy that intercepts LLM API traffic,
@@ -77,6 +77,15 @@ func NewServer(cfg Config) *Server {
 // Start binds the HTTP server to the given address and begins serving.
 // It blocks until the server is shut down or encounters a fatal error.
 func (s *Server) Start(addr string) error {
+	if s.cfg.Repo == nil {
+		return fmt.Errorf("memg proxy: repository is required")
+	}
+	if s.cfg.Embedder == nil {
+		return fmt.Errorf("memg proxy: embedder is required")
+	}
+	if s.cfg.Provider == nil {
+		return fmt.Errorf("memg proxy: provider is required")
+	}
 	s.httpServer = &http.Server{
 		Addr:    addr,
 		Handler: s,

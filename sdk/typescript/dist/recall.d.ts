@@ -2,10 +2,10 @@
  * Recall: retrieve relevant facts and summaries using hybrid search.
  * Matches the Go memory.Recall and memory.RecallSummaries logic.
  */
-import type { Embedder } from './embedder';
-import { HybridEngine } from './search';
-import type { Store } from './store';
-import type { FactFilter, RecalledFact, RecalledSummary } from './types';
+import type { Embedder } from './embedder.js';
+import { HybridEngine } from './search.js';
+import type { Store } from './store.js';
+import type { FactFilter, RecalledFact, RecalledSummary } from './types.js';
 /**
  * Recall facts for an entity using hybrid search.
  */

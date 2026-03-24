@@ -72,6 +72,29 @@ await m.delete('user-123', 'memory-uuid');
 await m.deleteAll('user-123');
 ```
 
+### Chat (Session-Aware)
+
+`chat()` manages the full memory loop: sessions, history injection, recall, LLM call, exchange persistence, and extraction.
+
+```typescript
+import { MemG } from 'memg';
+
+const m = new MemG({ openaiApiKey: process.env.OPENAI_API_KEY, embedProvider: 'openai' });
+await m.init();
+
+const res = await m.chat(
+  [{ role: 'user', content: 'I just moved to Seattle' }],
+  'user-123'
+);
+console.log(res.content);
+
+// Follow-ups are history-aware — the session tracks prior turns.
+const res2 = await m.chat(
+  [{ role: 'user', content: 'What city did I mention?' }],
+  'user-123'
+);
+```
+
 ### Low-Level MCP Client
 
 ```typescript
@@ -112,7 +135,7 @@ class MyPostgresStore implements Store {
 const m = new MemG({ store: new MyPostgresStore(connectionString) });
 ```
 
-See `Store` in `store.ts` for the full interface contract (30 methods).
+See `Store` in `store.ts` for the full interface contract (28 methods).
 
 ## Supported Providers
 

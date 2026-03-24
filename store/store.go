@@ -47,6 +47,7 @@ type FactFilter struct {
 	Slots              []string         // nil = all slots
 	MinConfidence      float64          // 0 = no minimum
 	SourceRoles        []string         // nil = all roles; e.g. ["user"]
+	UnembeddedOnly     bool             // true = only facts with NULL embedding
 }
 
 // FactManager provides lifecycle operations for facts beyond simple CRUD.

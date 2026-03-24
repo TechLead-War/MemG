@@ -7,11 +7,45 @@
  * - **proxy**: Redirects traffic through the MemG reverse proxy.
  * - **client**: Intercepts calls locally, querying MCP for memory context.
  */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.wrap = wrap;
-const client_1 = require("../client");
-const intercept_1 = require("../intercept");
-const proxy_1 = require("../proxy");
+const client_js_1 = require("../client.js");
+const intercept_js_1 = require("../intercept.js");
+const proxy_js_1 = require("../proxy.js");
+const session_helpers_js_1 = require("./session_helpers.js");
 /**
  * Wrap an Anthropic client with MemG memory capabilities.
  */
@@ -20,18 +54,22 @@ function wrap(client, opts) {
         return wrapAnthropicNative(client, opts);
     }
     if (opts.mode === 'client') {
-        const mcp = new client_1.MemGClient(opts.mcpUrl);
-        return (0, intercept_1.wrapAnthropicClient)(client, mcp, opts.entity, opts.extract ?? true);
+        const mcp = new client_js_1.MemGClient(opts.mcpUrl);
+        return (0, intercept_js_1.wrapAnthropicClient)(client, mcp, opts.entity, opts.extract ?? true);
     }
-    return (0, proxy_1.wrapAnthropicProxy)(client, opts.entity, opts.proxyUrl);
+    return (0, proxy_js_1.wrapAnthropicProxy)(client, opts.entity, opts.proxyUrl);
 }
 function wrapAnthropicNative(client, opts) {
-    const { MemG } = require('../index');
-    const memg = new MemG(opts.nativeConfig);
+    let memg = null;
     let initPromise = null;
     async function ensureInit() {
         if (!initPromise) {
-            initPromise = memg.init();
+            initPromise = (async () => {
+                const { MemG } = await Promise.resolve().then(() => __importStar(require('../index.js')));
+                memg = new MemG(opts.nativeConfig);
+                client._memg = memg;
+                await memg.init();
+            })();
         }
         await initPromise;
         return memg;
@@ -41,18 +79,13 @@ function wrapAnthropicNative(client, opts) {
         const m = await ensureInit();
         const entityId = opts.entity || 'default';
         let augmentedParams = params;
-        // Step 1: Build memory context and inject into system parameter.
-        try {
-            const userMessage = extractLastUserMessage(params.messages || []);
-            if (userMessage) {
-                const context = await m.buildMemoryContext(entityId, userMessage);
-                if (context) {
-                    augmentedParams = injectAnthropicContext(params, context);
-                }
+        const userMessage = extractLastUserMessage(params.messages || []);
+        if (userMessage) {
+            const queryText = await (0, session_helpers_js_1.buildRecallQuery)(m, entityId, userMessage);
+            const context = await m.buildMemoryContext(entityId, queryText);
+            if (context) {
+                augmentedParams = injectAnthropicContext(params, context);
             }
-        }
-        catch (err) {
-            console.warn('[memg] Failed to build memory context, proceeding without:', err);
         }
         // Step 2: Call the original create.
         const response = await originalCreate(augmentedParams, requestOptions);
@@ -83,6 +116,7 @@ function wrapAnthropicNative(client, opts) {
                         messages.push({ role: 'assistant', content: textContent });
                     }
                 }
+                (0, session_helpers_js_1.saveExchangeToSession)(m, entityId, messages).catch(() => { });
                 m.extractFromMessages(entityId, messages).catch(() => { });
             }
             catch {
@@ -92,8 +126,9 @@ function wrapAnthropicNative(client, opts) {
         return response;
     };
     // Attach close method so users can clean up.
-    client._memg = memg;
-    client._memgClose = () => memg.close();
+    client._memg = null;
+    client._memgClose = () => { if (memg)
+        memg.close(); };
     return client;
 }
 function wrapAnthropicStreamNative(stream, memg, entityId, messages) {

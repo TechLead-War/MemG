@@ -11,8 +11,8 @@ import type {
   FactFilter,
   FactMessage,
   FactSession,
-} from './types';
-import type { Store } from './store';
+} from './types.js';
+import type { Store } from './store.js';
 
 // pg is an optional peer dependency — use `any` to avoid compile-time requirement.
 type Pool = any;
@@ -183,14 +183,17 @@ export class PostgresStore implements Store {
   private pool: Pool;
   private initialized: Promise<void>;
 
-  constructor(connectionString: string) {
-    const { Pool: PgPool } = require('pg');
-    this.pool = new PgPool({ connectionString });
+  private constructor(pool: Pool) {
+    this.pool = pool;
     this.initialized = this.createSchema();
   }
 
   static async create(connectionString: string): Promise<PostgresStore> {
-    const store = new PostgresStore(connectionString);
+    const mod = 'pg';
+    const pgModule = await import(mod);
+    const pg = pgModule.default ?? pgModule;
+    const pool = new pg.Pool({ connectionString });
+    const store = new PostgresStore(pool);
     await store.ready();
     return store;
   }
@@ -656,6 +659,38 @@ export class PostgresStore implements Store {
   }
 
   // ---- Lifecycle ----
+
+  async findUnsummarizedConversation(entityUuid: string, excludeSessionUuid: string): Promise<FactConversation | null> {
+    await this.ready();
+    const res = await this.pool.query(
+      `SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at
+       FROM mg_conversation
+       WHERE entity_id = $1 AND session_id != $2 AND (summary IS NULL OR summary = '')
+       ORDER BY created_at DESC LIMIT 1`,
+      [entityUuid, excludeSessionUuid]
+    );
+    if (res.rows.length === 0) return null;
+    return rowToConversation(res.rows[0]);
+  }
+
+  async listUnembeddedFacts(entityUuid: string, limit: number): Promise<Fact[]> {
+    await this.ready();
+    const effectiveLimit = limit > 0 ? limit : 50;
+    const res = await this.pool.query(
+      `SELECT ${FACT_COLUMNS} FROM mg_entity_fact WHERE entity_id = $1 AND embedding IS NULL ORDER BY created_at DESC LIMIT $2`,
+      [entityUuid, effectiveLimit]
+    );
+    return res.rows.map(rowToFact);
+  }
+
+  async updateFactEmbedding(factUuid: string, embedding: number[], model: string): Promise<void> {
+    await this.ready();
+    const buf = encodeEmbedding(embedding);
+    await this.pool.query(
+      `UPDATE mg_entity_fact SET embedding = $1, embedding_model = $2, updated_at = $3 WHERE uuid = $4`,
+      [buf, model, nowISO(), factUuid]
+    );
+  }
 
   async close(): Promise<void> {
     await this.pool.end();

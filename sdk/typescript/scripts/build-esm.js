@@ -1,51 +1,51 @@
 /**
- * Generates a thin ESM wrapper over the CJS build.
- *
- * This avoids recompiling the source (which uses require() for lazy loading)
- * while giving ESM consumers proper import/export support.
+ * Builds a true ESM output from the TypeScript source using tsconfig.esm.json,
+ * then renames .js files to .mjs for Node ESM resolution.
  */
 
+const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
 const esmDir = path.join(__dirname, '..', 'dist', 'esm');
-fs.mkdirSync(esmDir, { recursive: true });
 
-// ESM wrapper — uses createRequire to load the CJS build and re-exports.
-const wrapper = `import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const memg = require('../index.js');
+// Clean previous ESM output.
+fs.rmSync(esmDir, { recursive: true, force: true });
 
-// Classes
-export const MemG = memg.MemG;
-export const MemGClient = memg.MemGClient;
-export const MemGStore = memg.MemGStore;
-export const HybridEngine = memg.HybridEngine;
-export const TransformersEmbedder = memg.TransformersEmbedder;
-export const OpenAIEmbedder = memg.OpenAIEmbedder;
-export const GeminiEmbedder = memg.GeminiEmbedder;
-export const PostgresStore = memg.PostgresStore;
-export const MySQLStore = memg.MySQLStore;
+// Compile ESM build via the dedicated tsconfig.
+execSync('npx tsc -p tsconfig.esm.json', {
+  cwd: path.join(__dirname, '..'),
+  stdio: 'inherit',
+});
 
-// Functions
-export const wrapOpenAIProxy = memg.wrapOpenAIProxy;
-export const wrapAnthropicProxy = memg.wrapAnthropicProxy;
-export const wrapOpenAIClient = memg.wrapOpenAIClient;
-export const wrapAnthropicClient = memg.wrapAnthropicClient;
-export const wrapGeminiClient = memg.wrapGeminiClient;
-export const detectProvider = memg.detectProvider;
-export const defaultContentKey = memg.defaultContentKey;
-export const cosineSimilarity = memg.cosineSimilarity;
-export const dimensionMatch = memg.dimensionMatch;
-export const buildContext = memg.buildContext;
-export const estimateTokens = memg.estimateTokens;
-export const runExtraction = memg.runExtraction;
-export const isTrivialTurn = memg.isTrivialTurn;
-export const recallFacts = memg.recallFacts;
-export const recallSummaries = memg.recallSummaries;
+// Rename .js → .mjs and rewrite import specifiers (.js → .mjs) in emitted files.
+function rewriteDir(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      rewriteDir(fullPath);
+      continue;
+    }
+    if (!entry.name.endsWith('.js')) continue;
 
-export default memg;
-`;
+    let content = fs.readFileSync(fullPath, 'utf8');
 
-fs.writeFileSync(path.join(esmDir, 'index.mjs'), wrapper);
-console.log('ESM wrapper generated at dist/esm/index.mjs');
+    // Rewrite relative import/export specifiers: './foo.js' → './foo.mjs'
+    content = content.replace(
+      /(from\s+['"])(\.\.?\/[^'"]+)(\.js)(['"])/g,
+      '$1$2.mjs$4'
+    );
+    // Rewrite dynamic import() specifiers: import('./foo.js') → import('./foo.mjs')
+    content = content.replace(
+      /(import\s*\(\s*['"])(\.\.?\/[^'"]+)(\.js)(['"]\s*\))/g,
+      '$1$2.mjs$4'
+    );
+
+    const mjsPath = fullPath.replace(/\.js$/, '.mjs');
+    fs.writeFileSync(mjsPath, content);
+    fs.unlinkSync(fullPath);
+  }
+}
+
+rewriteDir(esmDir);
+console.log('ESM build compiled at dist/esm/ (.mjs files)');

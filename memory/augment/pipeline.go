@@ -2,6 +2,7 @@ package augment
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -538,6 +539,37 @@ func (p *Pipeline) loadSlotCache(ctx context.Context, ss store.CanonicalSlotStor
 		p.slotCache[s.Name] = &slotCacheEntry{name: s.Name, embedding: s.Embedding}
 	}
 	p.slotLoaded = true
+}
+
+// ProcessSync runs the given job through all registered stages synchronously,
+// persisting extracted facts to the store. Unlike Enqueue, this blocks until
+// processing is complete and returns the total number of facts extracted.
+// This is used by the MCP server's extract_from_messages tool.
+func (p *Pipeline) ProcessSync(ctx context.Context, job *Job) (int, error) {
+	p.mu.RLock()
+	stages := make([]Stage, len(p.stages))
+	copy(stages, p.stages)
+	p.mu.RUnlock()
+
+	if len(stages) == 0 || job == nil {
+		return 0, nil
+	}
+
+	var totalFacts int
+	for _, s := range stages {
+		ext, err := s.Execute(ctx, job)
+		if err != nil {
+			return totalFacts, fmt.Errorf("stage %q: %w", s.Name(), err)
+		}
+		if ext == nil {
+			continue
+		}
+		if len(ext.Facts) > 0 && job.EntityID != "" {
+			p.persistFacts(ctx, job.EntityID, ext.Facts, s)
+			totalFacts += len(ext.Facts)
+		}
+	}
+	return totalFacts, nil
 }
 
 // Shutdown drains the worker pool and blocks until all in-flight jobs finish.

@@ -32,15 +32,22 @@
  * ```
  */
 
-import { MemGClient } from './client';
-import { resolveConfig, DEFAULT_CONFIG } from './config';
-import { buildContext, type ContextInput } from './context';
-import type { Embedder } from './embedder';
-import { runExtraction, type ExtractionMessage } from './extract';
-import { detectProvider } from './providers';
-import { recallFacts, recallSummaries } from './recall';
-import { HybridEngine } from './search';
-import { MemGStore, defaultContentKey, type Store } from './store';
+import { MemGClient } from './client.js';
+import { resolveConfig, DEFAULT_CONFIG } from './config.js';
+import { buildContext, type ContextInput } from './context.js';
+import type { Embedder } from './embedder.js';
+import { runExtraction, type ExtractionMessage } from './extract.js';
+import { detectProvider } from './providers/index.js';
+import { recallFacts, recallSummaries } from './recall.js';
+import { HybridEngine } from './search.js';
+import {
+  ensureSession,
+  ensureConversation,
+  saveUserMessage,
+  saveAssistantMessage,
+  loadRecentHistory,
+} from './session.js';
+import { MemGStore, defaultContentKey, type Store } from './store.js';
 import type {
   AddResult,
   ConsciousFact,
@@ -53,21 +60,24 @@ import type {
   RecalledSummary,
   SearchResult,
   WrapOptions,
-} from './types';
+} from './types.js';
+import { wrap as wrapOpenAIProvider } from './providers/openai.js';
+import { wrap as wrapAnthropicProvider } from './providers/anthropic.js';
+import { wrap as wrapGeminiProvider } from './providers/gemini.js';
 
-export { MemGClient } from './client';
-export { wrapOpenAIProxy, wrapAnthropicProxy } from './proxy';
-export { wrapOpenAIClient, wrapAnthropicClient, wrapGeminiClient } from './intercept';
-export { detectProvider } from './providers';
-export { MemGStore, defaultContentKey, type Store } from './store';
-export { PostgresStore } from './postgres_store';
-export { MySQLStore } from './mysql_store';
-export { HybridEngine, cosineSimilarity, dimensionMatch } from './search';
-export { buildContext, estimateTokens } from './context';
-export { runExtraction, isTrivialTurn } from './extract';
-export { recallFacts, recallSummaries } from './recall';
-export { TransformersEmbedder, OpenAIEmbedder, GeminiEmbedder } from './embedder';
-export type { Embedder } from './embedder';
+export { MemGClient } from './client.js';
+export { wrapOpenAIProxy, wrapAnthropicProxy } from './proxy.js';
+export { wrapOpenAIClient, wrapAnthropicClient, wrapGeminiClient } from './intercept.js';
+export { detectProvider } from './providers/index.js';
+export { MemGStore, defaultContentKey, type Store } from './store.js';
+export { PostgresStore } from './postgres_store.js';
+export { MySQLStore } from './mysql_store.js';
+export { HybridEngine, cosineSimilarity, dimensionMatch } from './search.js';
+export { buildContext, estimateTokens } from './context.js';
+export { runExtraction, isTrivialTurn } from './extract.js';
+export { recallFacts, recallSummaries } from './recall.js';
+export { TransformersEmbedder, OpenAIEmbedder, GeminiEmbedder } from './embedder.js';
+export type { Embedder } from './embedder.js';
 export type {
   Memory,
   MemoryInput,
@@ -85,7 +95,9 @@ export type {
   RecalledFact,
   RecalledSummary,
   ConsciousFact,
-} from './types';
+} from './types.js';
+
+const EMBEDDER_PROBE_TIMEOUT_MS = 15_000;
 
 /**
  * Main MemG class providing memory operations and client wrapping.
@@ -99,6 +111,8 @@ export class MemG {
   private _mcpClient: MemGClient | null = null;
   private _proxyUrl: string;
   private _initialized = false;
+  private _consciousCache = new Map<string, { facts: ConsciousFact[]; expiresAt: number }>();
+  private _lastPruneAt = 0;
 
   constructor(opts?: NativeConfig & MemGOptions) {
     this.config = resolveConfig(opts);
@@ -117,42 +131,50 @@ export class MemG {
       this.store = this.config.store;
     } else if (this.config.storeProvider === 'postgres') {
       if (!this.config.storeUrl) throw new Error('storeUrl required for postgres');
-      const { PostgresStore } = require('./postgres_store');
+      const { PostgresStore } = await import('./postgres_store.js');
       this.store = await PostgresStore.create(this.config.storeUrl);
     } else if (this.config.storeProvider === 'mysql') {
       if (!this.config.storeUrl) throw new Error('storeUrl required for mysql');
-      const { MySQLStore } = require('./mysql_store');
+      const { MySQLStore } = await import('./mysql_store.js');
       this.store = await MySQLStore.create(this.config.storeUrl);
     } else {
       this.store = new MemGStore(this.config.dbPath);
     }
 
-    if (this.config.embedProvider === 'gemini' && this.config.geminiApiKey) {
-      const { GeminiEmbedder } = require('./embedder') as typeof import('./embedder');
+    if (this.config.embedProvider === 'gemini') {
+      if (!this.config.geminiApiKey) {
+        throw new Error('MemG native mode requires geminiApiKey when embedProvider="gemini".');
+      }
+      const { GeminiEmbedder } = await import('./embedder.js');
       this.embedder = new GeminiEmbedder(
         this.config.geminiApiKey,
         this.config.embedModel || 'text-embedding-004',
         this.config.embedDimension || 768
       );
-    } else if (this.config.embedProvider === 'openai' && this.config.openaiApiKey) {
-      const { OpenAIEmbedder } = require('./embedder') as typeof import('./embedder');
+    } else if (this.config.embedProvider === 'openai') {
+      if (!this.config.openaiApiKey) {
+        throw new Error('MemG native mode requires openaiApiKey when embedProvider="openai".');
+      }
+      const { OpenAIEmbedder } = await import('./embedder.js');
       this.embedder = new OpenAIEmbedder(
         this.config.openaiApiKey,
         this.config.embedModel || 'text-embedding-3-small',
         this.config.embedDimension || 1536
       );
     } else if (this.config.embedProvider === 'sentence-transformers') {
-      try {
-        const { TransformersEmbedder } = require('./embedder') as typeof import('./embedder');
-        this.embedder = await TransformersEmbedder.create(
-          this.config.embedModel || 'Xenova/all-MiniLM-L6-v2'
-        );
-      } catch (err) {
-        console.warn(
-          '[memg] @huggingface/transformers not available, recall will use lexical-only search. Install it: npm i @huggingface/transformers'
-        );
-      }
+      const { TransformersEmbedder } = await import('./embedder.js');
+      this.embedder = await TransformersEmbedder.create(
+        this.config.embedModel || 'Xenova/all-MiniLM-L6-v2'
+      );
+    } else {
+      throw new Error(`Unsupported embedProvider "${this.config.embedProvider}".`);
     }
+
+    if (!this.embedder) {
+      throw new Error('MemG native mode requires a working embedder.');
+    }
+    await this.probeEmbedder(this.embedder);
+    this.config.embedDimension = this.embedder.dimension();
 
     this._initialized = true;
   }
@@ -176,18 +198,15 @@ export class MemG {
     };
 
     if (provider === 'openai') {
-      const { wrap } = require('./providers/openai');
-      return wrap(client, mergedOpts) as T;
+      return wrapOpenAIProvider(client, mergedOpts) as T;
     }
 
     if (provider === 'anthropic') {
-      const { wrap } = require('./providers/anthropic');
-      return wrap(client, mergedOpts) as T;
+      return wrapAnthropicProvider(client, mergedOpts) as T;
     }
 
     if (provider === 'gemini') {
-      const { wrap } = require('./providers/gemini');
-      return wrap(client, mergedOpts) as T;
+      return wrapGeminiProvider(client, mergedOpts) as T;
     }
 
     throw new Error(
@@ -283,19 +302,15 @@ export class MemG {
    */
   async search(entityId: string, query: string, limit?: number): Promise<SearchResult> {
     this.ensureInitialized();
+    const embedder = this.requireEmbedder();
 
     const entity = await this.store!.lookupEntity(entityId);
     if (!entity) return { memories: [], count: 0 };
 
-    if (!this.embedder) {
-      console.warn('[memg] no embedder available, search requires embeddings');
-      return { memories: [], count: 0 };
-    }
-
     const recalled = await recallFacts(
       this.store!,
       this.engine,
-      this.embedder,
+      embedder,
       query,
       entity.uuid,
       limit ?? this.config.recallLimit,
@@ -404,11 +419,44 @@ export class MemG {
     const model = opts?.model ?? this.config.llmModel;
     const maxTokens = opts?.maxTokens ?? 4096;
 
-    // Build memory context.
-    const memoryContext = await this.buildMemoryContext(entityId, extractLastUser(messages) ?? '');
+    const entityUuid = await this.store!.upsertEntity(entityId);
 
-    // Inject context into messages.
+    let sessionUuid = '';
+    let conversationUuid = '';
+    if (this.config.sessionTimeout > 0) {
+      try {
+        const { session, isNew } = await ensureSession(
+          this.store!, entityUuid, 'default', this.config.sessionTimeout
+        );
+        sessionUuid = session.uuid;
+        conversationUuid = await ensureConversation(this.store!, sessionUuid, entityUuid);
+        if (isNew) {
+          this.summarizeClosedConversation(entityUuid, sessionUuid).catch(() => {});
+        }
+      } catch {
+      }
+    }
+
+    let retrievalMessages = [...messages];
+    if (sessionUuid) {
+      try {
+        const history = await loadRecentHistory(this.store!, sessionUuid, this.config.workingMemoryTurns);
+        if (history.length > 0) {
+          const historyMsgs = history.map((h) => ({ role: h.role, content: h.content }));
+          retrievalMessages = [...historyMsgs, ...messages];
+        }
+      } catch {
+      }
+    }
+
+    const queryText = extractLastUser(retrievalMessages) ?? '';
+    const memoryContext = await this.buildMemoryContext(entityId, queryText);
+
     let augmented = [...messages];
+    if (sessionUuid && retrievalMessages.length > messages.length) {
+      const historyOnly = retrievalMessages.slice(0, retrievalMessages.length - messages.length);
+      augmented = [...historyOnly, ...messages];
+    }
     if (memoryContext) {
       const sysIdx = augmented.findIndex((m) => m.role === 'system');
       if (sysIdx >= 0) {
@@ -425,8 +473,17 @@ export class MemG {
     }
     const content = await chatCallLLM(apiKey, model, augmented, provider, maxTokens);
 
-    // Background extraction (fire-and-forget).
-    const extractMessages = messages
+    if (conversationUuid) {
+      const userText = extractLastUser(messages) ?? '';
+      Promise.resolve().then(async () => {
+        try {
+          if (userText) await saveUserMessage(this.store!, conversationUuid, userText);
+          if (content) await saveAssistantMessage(this.store!, conversationUuid, content);
+        } catch { /* never block on save failure */ }
+      });
+    }
+
+    const extractMessages = retrievalMessages
       .filter((m) => m.role === 'user' || m.role === 'assistant')
       .map((m) => ({ role: m.role, content: m.content }));
     if (content) {
@@ -479,52 +536,50 @@ export class MemG {
     queryText: string
   ): Promise<string> {
     this.ensureInitialized();
+    const embedder = this.requireEmbedder();
 
     const entity = await this.store!.lookupEntity(entityId);
     if (!entity) return '';
+
+    this.backfillMissingEmbeddings(entity.uuid).catch(() => {});
+    this.pruneIfDue(entity.uuid);
 
     let consciousFacts: ConsciousFact[] = [];
     let recalledFactsList: RecalledFact[] = [];
     let summaries: RecalledSummary[] = [];
 
-    // Load conscious facts if enabled.
     if (this.config.consciousMode) {
-      consciousFacts = await this.loadConsciousFacts(entity.uuid, this.config.consciousLimit);
+      consciousFacts = await this.loadConsciousFactsCached(entity.uuid, this.config.consciousLimit);
     }
 
-    // Recall facts and summaries if embedder is available.
-    if (this.embedder && queryText) {
-      try {
-        const [recalled, recalledSums] = await Promise.all([
-          recallFacts(
-            this.store!,
-            this.engine,
-            this.embedder,
-            queryText,
-            entity.uuid,
-            this.config.recallLimit,
-            this.config.recallThreshold,
-            this.config.maxRecallCandidates
-          ),
-          recallSummaries(
-            this.store!,
-            this.engine,
-            this.embedder,
-            queryText,
-            entity.uuid,
-            10,
-            this.config.recallThreshold
-          ),
-        ]);
-        recalledFactsList = recalled;
-        summaries = recalledSums;
+    if (queryText) {
+      const [recalled, recalledSums] = await Promise.all([
+        recallFacts(
+          this.store!,
+          this.engine,
+          embedder,
+          queryText,
+          entity.uuid,
+          this.config.recallLimit,
+          this.config.recallThreshold,
+          this.config.maxRecallCandidates
+        ),
+        recallSummaries(
+          this.store!,
+          this.engine,
+          embedder,
+          queryText,
+          entity.uuid,
+          10,
+          this.config.recallThreshold
+        ),
+      ]);
+      recalledFactsList = recalled;
+      summaries = recalledSums;
 
-        // Track recall usage.
-        if (recalled.length > 0) {
-          await this.store!.updateRecallUsage(recalled.map((r) => r.id));
-        }
-      } catch (err) {
-        console.warn('[memg] recall failed:', err);
+      // Track recall usage.
+      if (recalled.length > 0) {
+        await this.store!.updateRecallUsage(recalled.map((r) => r.id));
       }
     }
 
@@ -647,9 +702,140 @@ export class MemG {
     }));
   }
 
+  /**
+   * Backfill embeddings for facts that were stored without them (e.g., embedder was down).
+   * Runs in the background — does not block recall.
+   */
+  private async backfillMissingEmbeddings(entityUuid: string): Promise<void> {
+    const unembedded = await this.store!.listUnembeddedFacts(entityUuid, 50);
+    if (unembedded.length === 0) return;
+
+    const contents = unembedded.map((f) => f.content);
+    let embeddings: number[][];
+    try {
+      embeddings = await this.embedder!.embed(contents);
+    } catch {
+      return;
+    }
+
+    const model = this.embedder!.modelName();
+    for (let i = 0; i < embeddings.length && i < unembedded.length; i++) {
+      try {
+        await this.store!.updateFactEmbedding(unembedded[i].uuid, embeddings[i], model);
+      } catch {
+      }
+    }
+  }
+
+  /**
+   * Summarize the most recent unsummarized conversation when a new session starts.
+   * Matches Go's summarizeClosedSession behavior.
+   */
+  private async summarizeClosedConversation(entityUuid: string, currentSessionUuid: string): Promise<void> {
+    const apiKey = this.resolveExtractionApiKey();
+    if (!apiKey) return;
+
+    const conv = await this.store!.findUnsummarizedConversation(entityUuid, currentSessionUuid);
+    if (!conv || conv.summary) return;
+
+    await this.generateAndStoreSummary(conv.uuid, apiKey);
+  }
+
+  /**
+   * Generate a summary for a conversation and store it with its embedding.
+   */
+  private async generateAndStoreSummary(conversationUuid: string, apiKey: string): Promise<void> {
+    const messages = await this.store!.readMessages(conversationUuid);
+    if (messages.length === 0) return;
+
+    const transcript = messages.map((m) => `${m.role}: ${m.content}`).join('\n');
+
+    const summaryPrompt = `Summarize this conversation. Focus on:
+- What was discussed
+- What decisions were made
+- What is still pending or unresolved
+- Any new information learned about the user
+
+Be concise — 2-5 sentences. Only include what is meaningful and worth remembering.
+If the conversation contains no meaningful content worth remembering (e.g. just greetings or trivial exchanges), respond with exactly: NONE`;
+
+    const { callLLM } = await import('./extract.js');
+    let summary: string;
+    try {
+      summary = await callLLM(apiKey, this.config.llmModel, summaryPrompt, transcript, this.config.llmProvider);
+    } catch {
+      return;
+    }
+
+    summary = summary.trim();
+    if (!summary || summary.toUpperCase() === 'NONE') return;
+
+    let embedding: number[] = [];
+    if (this.embedder) {
+      try {
+        const [vec] = await this.embedder.embed([summary]);
+        embedding = vec;
+      } catch {
+      }
+    }
+
+    await this.store!.updateConversationSummary(conversationUuid, summary, embedding);
+  }
+
+  private async loadConsciousFactsCached(entityUuid: string, limit: number): Promise<ConsciousFact[]> {
+    const now = Date.now();
+    const cached = this._consciousCache.get(entityUuid);
+    if (cached && cached.expiresAt > now) return cached.facts;
+
+    const facts = await this.loadConsciousFacts(entityUuid, limit);
+    this._consciousCache.set(entityUuid, { facts, expiresAt: now + 30_000 });
+    return facts;
+  }
+
+  private pruneIfDue(entityUuid: string): void {
+    const now = Date.now();
+    if (now - this._lastPruneAt < 300_000) return; // 5 min interval
+    this._lastPruneAt = now;
+    const nowISO = new Date().toISOString();
+    Promise.resolve(this.store!.pruneExpiredFacts(entityUuid, nowISO)).catch(() => {});
+  }
+
   private ensureInitialized(): void {
     if (!this._initialized || !this.store) {
       throw new Error('MemG not initialized. Call await memg.init() first.');
+    }
+  }
+
+  private requireEmbedder(): Embedder {
+    if (!this.embedder) {
+      throw new Error('MemG native mode requires a healthy embedder for memory recall.');
+    }
+    return this.embedder;
+  }
+
+  private async probeEmbedder(embedder: Embedder): Promise<void> {
+    const timeout = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('embedder health check timed out')), EMBEDDER_PROBE_TIMEOUT_MS);
+    });
+    const vectors = await Promise.race([
+      embedder.embed(['memg-healthcheck']),
+      timeout,
+    ]);
+    if (!Array.isArray(vectors) || vectors.length !== 1) {
+      throw new Error(`embedder health check returned ${Array.isArray(vectors) ? vectors.length : 0} vectors`);
+    }
+    const vector = vectors[0];
+    if (!Array.isArray(vector) || vector.length === 0) {
+      throw new Error('embedder health check returned an empty vector');
+    }
+    const expectedDim = embedder.dimension();
+    if (expectedDim > 0 && vector.length !== expectedDim) {
+      throw new Error(`embedder health check dimension mismatch: got ${vector.length}, want ${expectedDim}`);
+    }
+    for (let i = 0; i < vector.length; i++) {
+      if (!Number.isFinite(vector[i])) {
+        throw new Error(`embedder health check returned invalid value at index ${i}`);
+      }
     }
   }
 }

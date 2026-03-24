@@ -7,10 +7,11 @@
  * - **client**: Intercepts calls locally, querying MCP for memory context.
  */
 
-import { MemGClient } from '../client';
-import { wrapOpenAIClient } from '../intercept';
-import { wrapOpenAIProxy } from '../proxy';
-import type { WrapOptions } from '../types';
+import { MemGClient } from '../client.js';
+import { wrapOpenAIClient } from '../intercept.js';
+import { wrapOpenAIProxy } from '../proxy.js';
+import type { WrapOptions } from '../types.js';
+import { buildRecallQuery, saveExchangeToSession } from './session_helpers.js';
 
 /**
  * Wrap an OpenAI client with MemG memory capabilities.
@@ -27,14 +28,17 @@ export function wrap(client: any, opts: WrapOptions): any {
 }
 
 function wrapOpenAINative(client: any, opts: WrapOptions): any {
-  const { MemG } = require('../index') as typeof import('../index');
-
-  const memg = new MemG(opts.nativeConfig);
+  let memg: any = null;
   let initPromise: Promise<void> | null = null;
 
-  async function ensureInit(): Promise<typeof memg> {
+  async function ensureInit(): Promise<any> {
     if (!initPromise) {
-      initPromise = memg.init();
+      initPromise = (async () => {
+        const { MemG } = await import('../index.js');
+        memg = new MemG(opts.nativeConfig);
+        client._memg = memg;
+        await memg.init();
+      })();
     }
     await initPromise;
     return memg;
@@ -50,23 +54,18 @@ function wrapOpenAINative(client: any, opts: WrapOptions): any {
     const entityId = opts.entity || 'default';
     let augmentedParams = params;
 
-    // Step 1: Build memory context and inject into messages.
-    try {
-      const userMessage = extractLastUserMessage(params.messages || []);
-      if (userMessage) {
-        const context = await m.buildMemoryContext(entityId, userMessage);
-        if (context) {
-          augmentedParams = injectOpenAIContext(params, context);
-        }
+    const userMessage = extractLastUserMessage(params.messages || []);
+    if (userMessage) {
+      const queryText = await buildRecallQuery(m, entityId, userMessage);
+      const context = await m.buildMemoryContext(entityId, queryText);
+      if (context) {
+        augmentedParams = injectOpenAIContext(params, context);
       }
-    } catch (err) {
-      console.warn('[memg] Failed to build memory context, proceeding without:', err);
     }
 
     // Step 2: Call the original create.
     const response = await originalCreate(augmentedParams, requestOptions);
 
-    // Step 3: Extract knowledge from the exchange (fire-and-forget).
     if (opts.extract !== false) {
       try {
         const messages = (params.messages || [])
@@ -89,6 +88,7 @@ function wrapOpenAINative(client: any, opts: WrapOptions): any {
           messages.push({ role: 'assistant', content: assistantContent });
         }
 
+        saveExchangeToSession(m, entityId, messages).catch(() => {});
         m.extractFromMessages(entityId, messages).catch(() => {});
       } catch {
         // Never let extraction errors affect the response.
@@ -99,8 +99,8 @@ function wrapOpenAINative(client: any, opts: WrapOptions): any {
   };
 
   // Attach close method so users can clean up.
-  client._memg = memg;
-  client._memgClose = () => memg.close();
+  client._memg = null;
+  client._memgClose = () => { if (memg) memg.close(); };
 
   return client;
 }

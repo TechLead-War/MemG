@@ -4,12 +4,12 @@
  * Patches the LLM client's create method to:
  * 1. Query MCP for relevant memories before each call
  * 2. Inject memory context into the request
- * 3. Optionally extract and store knowledge from responses
+ * 3. Extract and store structured knowledge from responses via the server pipeline
  *
  * This mode does not require the MemG proxy to be running.
  */
 
-import { MemGClient } from './client';
+import { MemGClient } from './client.js';
 
 /**
  * Format retrieved memories into a context block for injection.
@@ -41,14 +41,71 @@ function extractLastUserMessage(messages: any[]): string | null {
 }
 
 /**
+ * Build a role/content message array from the request messages and assistant response.
+ * This is the full exchange that gets sent to the server's extraction pipeline.
+ */
+function buildExchangeMessages(
+  requestMessages: any[],
+  assistantContent: string
+): Array<{ role: string; content: string }> {
+  const exchange: Array<{ role: string; content: string }> = [];
+
+  for (const msg of requestMessages) {
+    if (msg.role === 'user' || msg.role === 'assistant') {
+      const content =
+        typeof msg.content === 'string'
+          ? msg.content
+          : Array.isArray(msg.content)
+            ? msg.content
+                .filter((p: any) => p.type === 'text')
+                .map((p: any) => p.text)
+                .join(' ')
+            : '';
+      if (content) {
+        exchange.push({ role: msg.role, content });
+      }
+    }
+  }
+
+  if (assistantContent) {
+    exchange.push({ role: 'assistant', content: assistantContent });
+  }
+
+  return exchange;
+}
+
+/**
+ * Fire extraction in the background, falling back to raw add if the server
+ * doesn't support extract_from_messages.
+ */
+function fireExtraction(
+  mcp: MemGClient,
+  entityId: string,
+  messages: any[],
+  assistantContent: string
+): void {
+  const exchange = buildExchangeMessages(messages, assistantContent);
+  if (exchange.length === 0) return;
+
+  mcp.extractFromMessages(entityId, exchange).catch(() => {
+    // Fallback: server may not have extraction pipeline configured.
+    // Send the user messages as raw snippets (better than nothing).
+    const userMessage = extractLastUserMessage(messages);
+    if (userMessage) {
+      mcp.add(entityId, [{ content: userMessage }]).catch(() => {});
+    }
+  });
+}
+
+/**
  * Wrap an OpenAI client in client mode.
  *
  * Patches `client.chat.completions.create` to inject memory context and
- * optionally extract knowledge from responses.
+ * extract knowledge from responses via the server's extraction pipeline.
  *
  * @param client - An OpenAI SDK client instance (mutated in place).
  * @param mcp - MemGClient for memory operations.
- * @param entity - Optional entity identifier.
+ * @param entity - Optional entity identifier (defaults to "default").
  * @param extract - Whether to extract knowledge from responses (default: true).
  * @returns The patched client.
  */
@@ -59,47 +116,36 @@ export function wrapOpenAIClient(
   extract: boolean = true
 ): any {
   const originalCreate = client.chat.completions.create.bind(client.chat.completions);
+  const entityId = entity || 'default';
 
   client.chat.completions.create = async function patchedCreate(
     params: any,
     requestOptions?: any
   ): Promise<any> {
-    const entityId = entity || 'default';
     let augmentedParams = params;
 
     // Step 1: Search for relevant memories.
-    try {
-      const userMessage = extractLastUserMessage(params.messages || []);
-      if (userMessage) {
-        const searchResult = await mcp.search(entityId, userMessage, 10);
-        if (searchResult.memories.length > 0) {
-          const context = formatMemoryContext(searchResult.memories);
-          augmentedParams = injectOpenAIContext(params, context);
-        }
+    const userMessage = extractLastUserMessage(params.messages || []);
+    if (userMessage) {
+      const searchResult = await mcp.search(entityId, userMessage, 10);
+      if (searchResult.memories.length > 0) {
+        const context = formatMemoryContext(searchResult.memories);
+        augmentedParams = injectOpenAIContext(params, context);
       }
-    } catch (err) {
-      console.warn('[memg] Failed to retrieve memories, proceeding without context:', err);
     }
 
     // Step 2: Call the original create.
     const response = await originalCreate(augmentedParams, requestOptions);
 
-    // Step 3: Extract knowledge from response if enabled.
-    if (extract && entity) {
+    // Step 3: Extract knowledge from the full exchange.
+    if (extract) {
       try {
         if (params.stream) {
-          // For streaming responses, return a wrapper that accumulates and extracts on completion.
-          return wrapOpenAIStream(response, mcp, entityId);
+          return wrapOpenAIStream(response, mcp, entityId, params.messages || []);
         }
-        // Non-streaming: extract from the completed response.
         const assistantContent = response?.choices?.[0]?.message?.content;
-        if (assistantContent && typeof assistantContent === 'string') {
-          const userMessage = extractLastUserMessage(params.messages || []);
-          if (userMessage) {
-            mcp
-              .add(entityId, [{ content: userMessage }])
-              .catch(() => {});
-          }
+        if (typeof assistantContent === 'string' && assistantContent) {
+          fireExtraction(mcp, entityId, params.messages || [], assistantContent);
         }
       } catch {
         // Fire-and-forget: never let extraction errors affect the response.
@@ -115,8 +161,7 @@ export function wrapOpenAIClient(
 /**
  * Wrap an OpenAI streaming response to accumulate content and extract on completion.
  */
-function wrapOpenAIStream(stream: any, mcp: MemGClient, entityId: string): any {
-  // If the stream has a Symbol.asyncIterator, wrap it.
+function wrapOpenAIStream(stream: any, mcp: MemGClient, entityId: string, requestMessages: any[]): any {
   if (stream && typeof stream[Symbol.asyncIterator] === 'function') {
     const originalIterator = stream[Symbol.asyncIterator].bind(stream);
     let accumulated = '';
@@ -132,16 +177,15 @@ function wrapOpenAIStream(stream: any, mcp: MemGClient, entityId: string): any {
               accumulated += delta;
             }
           } else {
-            // Stream completed — extract in background.
             if (accumulated) {
-              mcp.add(entityId, [{ content: accumulated }]).catch(() => {});
+              fireExtraction(mcp, entityId, requestMessages, accumulated);
             }
           }
           return result;
         },
         async return(value?: any): Promise<IteratorResult<any>> {
           if (accumulated) {
-            mcp.add(entityId, [{ content: accumulated }]).catch(() => {});
+            fireExtraction(mcp, entityId, requestMessages, accumulated);
           }
           if (iterator.return) return iterator.return(value);
           return { done: true, value };
@@ -157,13 +201,11 @@ function wrapOpenAIStream(stream: any, mcp: MemGClient, entityId: string): any {
  * Wrap an Anthropic client in client mode.
  *
  * Patches `client.messages.create` to inject memory context into the
- * `system` parameter and optionally extract knowledge from responses.
- *
- * Note: Anthropic uses `system` as a top-level parameter, not a message role.
+ * `system` parameter and extract knowledge from responses via the server pipeline.
  *
  * @param client - An Anthropic SDK client instance (mutated in place).
  * @param mcp - MemGClient for memory operations.
- * @param entity - Optional entity identifier.
+ * @param entity - Optional entity identifier (defaults to "default").
  * @param extract - Whether to extract knowledge from responses (default: true).
  * @returns The patched client.
  */
@@ -174,41 +216,40 @@ export function wrapAnthropicClient(
   extract: boolean = true
 ): any {
   const originalCreate = client.messages.create.bind(client.messages);
+  const entityId = entity || 'default';
 
   client.messages.create = async function patchedCreate(
     params: any,
     requestOptions?: any
   ): Promise<any> {
-    const entityId = entity || 'default';
     let augmentedParams = params;
 
     // Step 1: Search for relevant memories.
-    try {
-      const userMessage = extractLastUserMessage(params.messages || []);
-      if (userMessage) {
-        const searchResult = await mcp.search(entityId, userMessage, 10);
-        if (searchResult.memories.length > 0) {
-          const context = formatMemoryContext(searchResult.memories);
-          augmentedParams = injectAnthropicContext(params, context);
-        }
+    const userMessage = extractLastUserMessage(params.messages || []);
+    if (userMessage) {
+      const searchResult = await mcp.search(entityId, userMessage, 10);
+      if (searchResult.memories.length > 0) {
+        const context = formatMemoryContext(searchResult.memories);
+        augmentedParams = injectAnthropicContext(params, context);
       }
-    } catch (err) {
-      console.warn('[memg] Failed to retrieve memories, proceeding without context:', err);
     }
 
     // Step 2: Call the original create.
     const response = await originalCreate(augmentedParams, requestOptions);
 
-    // Step 3: Extract knowledge from response if enabled.
-    if (extract && entity) {
+    // Step 3: Extract knowledge from the full exchange.
+    if (extract) {
       try {
         if (params.stream) {
-          return wrapAnthropicStream(response, mcp, entityId);
+          return wrapAnthropicStream(response, mcp, entityId, params.messages || []);
         }
-        // Non-streaming: extract user input as memory.
-        const userMessage = extractLastUserMessage(params.messages || []);
-        if (userMessage) {
-          mcp.add(entityId, [{ content: userMessage }]).catch(() => {});
+        // Non-streaming: extract the assistant response text.
+        const blocks = response?.content;
+        if (Array.isArray(blocks)) {
+          const textBlock = blocks.find((b: any) => b.type === 'text');
+          if (textBlock?.text) {
+            fireExtraction(mcp, entityId, params.messages || [], textBlock.text);
+          }
         }
       } catch {
         // Fire-and-forget.
@@ -225,11 +266,11 @@ export function wrapAnthropicClient(
  * Wrap a Gemini client (GenerativeModel) in client mode.
  *
  * Patches `model.generateContent` to inject memory context into the
- * systemInstruction and optionally extract knowledge from responses.
+ * systemInstruction and extract knowledge from responses via the server pipeline.
  *
  * @param client - A Gemini GenerativeModel instance (mutated in place).
  * @param mcp - MemGClient for memory operations.
- * @param entity - Optional entity identifier.
+ * @param entity - Optional entity identifier (defaults to "default").
  * @param extract - Whether to extract knowledge from responses (default: true).
  * @returns The patched client.
  */
@@ -240,37 +281,35 @@ export function wrapGeminiClient(
   extract: boolean = true
 ): any {
   const originalGenerate = client.generateContent.bind(client);
+  const entityId = entity || 'default';
 
   client.generateContent = async function patchedGenerate(
     params: any
   ): Promise<any> {
-    const entityId = entity || 'default';
     let augmentedParams = typeof params === 'string' ? { contents: [{ role: 'user', parts: [{ text: params }] }] } : params;
 
     // Step 1: Search for relevant memories.
-    try {
-      const userText = extractLastGeminiUserMessage(augmentedParams);
-      if (userText) {
-        const searchResult = await mcp.search(entityId, userText, 10);
-        if (searchResult.memories.length > 0) {
-          const context = formatMemoryContext(searchResult.memories);
-          augmentedParams = injectGeminiContext(augmentedParams, context);
-        }
+    const userText = extractLastGeminiUserMessage(augmentedParams);
+    if (userText) {
+      const searchResult = await mcp.search(entityId, userText, 10);
+      if (searchResult.memories.length > 0) {
+        const context = formatMemoryContext(searchResult.memories);
+        augmentedParams = injectGeminiContext(augmentedParams, context);
       }
-    } catch (err) {
-      console.warn('[memg] Failed to retrieve memories, proceeding without context:', err);
     }
 
     // Step 2: Call the original generateContent.
     const response = await originalGenerate(augmentedParams);
 
-    // Step 3: Extract knowledge from response if enabled.
-    if (extract && entity) {
+    // Step 3: Extract knowledge from the full exchange.
+    if (extract) {
       try {
         const text = response?.response?.candidates?.[0]?.content?.parts?.[0]?.text
           ?? response?.response?.text?.();
         if (text) {
-          mcp.add(entityId, [{ content: text }]).catch(() => {});
+          // Build exchange from Gemini's contents format.
+          const requestMessages = geminiContentsToMessages(augmentedParams);
+          fireExtraction(mcp, entityId, requestMessages, text);
         }
       } catch {
         // Fire-and-forget.
@@ -281,6 +320,24 @@ export function wrapGeminiClient(
   };
 
   return client;
+}
+
+/**
+ * Convert Gemini contents array to a simple role/content messages array
+ * for the extraction pipeline.
+ */
+function geminiContentsToMessages(params: any): Array<{ role: string; content: string }> {
+  const contents = params?.contents;
+  if (!Array.isArray(contents)) return [];
+  const messages: Array<{ role: string; content: string }> = [];
+  for (const c of contents) {
+    const role = c.role === 'model' ? 'assistant' : c.role;
+    const text = c.parts?.map((p: any) => p.text).filter(Boolean).join(' ');
+    if (role && text) {
+      messages.push({ role, content: text });
+    }
+  }
+  return messages;
 }
 
 function extractLastGeminiUserMessage(params: any): string | null {
@@ -353,7 +410,7 @@ function injectAnthropicContext(params: any, contextText: string): any {
 /**
  * Wrap an Anthropic streaming response to accumulate content and extract on completion.
  */
-function wrapAnthropicStream(stream: any, mcp: MemGClient, entityId: string): any {
+function wrapAnthropicStream(stream: any, mcp: MemGClient, entityId: string, requestMessages: any[]): any {
   if (stream && typeof stream[Symbol.asyncIterator] === 'function') {
     const originalIterator = stream[Symbol.asyncIterator].bind(stream);
     let accumulated = '';
@@ -370,14 +427,14 @@ function wrapAnthropicStream(stream: any, mcp: MemGClient, entityId: string): an
             }
           } else {
             if (accumulated) {
-              mcp.add(entityId, [{ content: accumulated }]).catch(() => {});
+              fireExtraction(mcp, entityId, requestMessages, accumulated);
             }
           }
           return result;
         },
         async return(value?: any): Promise<IteratorResult<any>> {
           if (accumulated) {
-            mcp.add(entityId, [{ content: accumulated }]).catch(() => {});
+            fireExtraction(mcp, entityId, requestMessages, accumulated);
           }
           if (iterator.return) return iterator.return(value);
           return { done: true, value };

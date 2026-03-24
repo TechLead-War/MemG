@@ -5,10 +5,11 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isTrivialTurn = isTrivialTurn;
+exports.callLLM = callLLM;
 exports.runExtraction = runExtraction;
 const crypto_1 = require("crypto");
-const search_1 = require("./search");
-const store_1 = require("./store");
+const search_js_1 = require("./search.js");
+const store_js_1 = require("./store.js");
 /** Trivial conversation patterns that should not trigger extraction. */
 const TRIVIAL_PATTERNS = new Set([
     'thanks', 'thank you', 'ok', 'okay', 'got it', 'sure',
@@ -306,7 +307,7 @@ function findSemanticMatch(embedding, existingFacts) {
     for (const f of existingFacts) {
         if (!f.embedding || f.embedding.length === 0)
             continue;
-        const score = (0, search_1.cosineSimilarity)(embedding, f.embedding);
+        const score = (0, search_js_1.cosineSimilarity)(embedding, f.embedding);
         if (score > bestScore) {
             bestScore = score;
             best = f;
@@ -380,7 +381,7 @@ async function runExtraction(store, embedder, messages, entityUuid, apiKey, llmM
             factType,
             temporalStatus: 'current',
             significance,
-            contentKey: (0, store_1.defaultContentKey)(ef.content),
+            contentKey: (0, store_js_1.defaultContentKey)(ef.content),
             tag: (ef.tag ?? '').toLowerCase().trim(),
             slot: (ef.slot ?? '').toLowerCase().trim(),
             confidence: confidenceValue(ef.confidence),

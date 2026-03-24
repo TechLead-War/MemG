@@ -3,6 +3,39 @@
  * MySQL-backed repository for the native MemG engine.
  * Uses the `mysql2/promise` npm package (async API) for networked persistence.
  */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MySQLStore = void 0;
 const crypto_1 = require("crypto");
@@ -166,13 +199,16 @@ const MYSQL_SCHEMA_DDL = [
   )`,
 ];
 class MySQLStore {
-    constructor(connectionString) {
-        const mysql = require('mysql2/promise');
-        this.pool = mysql.createPool(connectionString);
+    constructor(pool) {
+        this.pool = pool;
         this.initialized = this.createSchema();
     }
     static async create(connectionString) {
-        const store = new MySQLStore(connectionString);
+        const mod = 'mysql2/promise';
+        const mysqlModule = await Promise.resolve(`${mod}`).then(s => __importStar(require(s)));
+        const mysql = mysqlModule.default ?? mysqlModule;
+        const pool = mysql.createPool(connectionString);
+        const store = new MySQLStore(pool);
         await store.ready();
         return store;
     }
@@ -514,6 +550,28 @@ class MySQLStore {
         await this.pool.query(`UPDATE mg_conversation SET summary = ?, summary_embedding = ?, updated_at = ? WHERE uuid = ?`, [summary, embBuf, now, conversationUuid]);
     }
     // ---- Lifecycle ----
+    async findUnsummarizedConversation(entityUuid, excludeSessionUuid) {
+        await this.ready();
+        const [rows] = await this.pool.query(`SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at
+       FROM mg_conversation
+       WHERE entity_id = ? AND session_id != ? AND (summary IS NULL OR summary = '')
+       ORDER BY created_at DESC LIMIT 1`, [entityUuid, excludeSessionUuid]);
+        const arr = rows;
+        if (arr.length === 0)
+            return null;
+        return rowToConversation(arr[0]);
+    }
+    async listUnembeddedFacts(entityUuid, limit) {
+        await this.ready();
+        const effectiveLimit = limit > 0 ? limit : 50;
+        const [rows] = await this.pool.query(`SELECT ${FACT_COLUMNS} FROM mg_entity_fact WHERE entity_id = ? AND embedding IS NULL ORDER BY created_at DESC LIMIT ?`, [entityUuid, effectiveLimit]);
+        return rows.map(rowToFact);
+    }
+    async updateFactEmbedding(factUuid, embedding, model) {
+        await this.ready();
+        const buf = encodeEmbedding(embedding);
+        await this.pool.query(`UPDATE mg_entity_fact SET embedding = ?, embedding_model = ?, updated_at = ? WHERE uuid = ?`, [buf, model, nowISO(), factUuid]);
+    }
     async close() {
         await this.pool.end();
     }

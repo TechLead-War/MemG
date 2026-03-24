@@ -1,4 +1,4 @@
-import type { AddResult, Memory, MemoryInput, SearchResult } from './types';
+import type { AddResult, Memory, MemoryInput, SearchResult } from './types.js';
 
 /**
  * MCP JSON-RPC 2.0 client for communicating with the MemG server.
@@ -91,6 +91,28 @@ export class MemGClient {
       entity_id: entityId,
     });
     return result.deleted;
+  }
+
+  /**
+   * Extract structured memories from conversation messages using the server's
+   * LLM-powered extraction pipeline. Produces typed, tagged, and embedded facts
+   * with the same quality as proxy mode.
+   *
+   * Requires the MCP server to be started with --llm-provider.
+   *
+   * @param entityId - External entity identifier.
+   * @param messages - Conversation messages to extract knowledge from.
+   * @returns The number of facts extracted and stored.
+   */
+  async extractFromMessages(
+    entityId: string,
+    messages: Array<{ role: string; content: string }>
+  ): Promise<number> {
+    const result = await this._call<{ extracted: number }>('extract_from_messages', {
+      entity_id: entityId,
+      messages,
+    });
+    return result.extracted;
   }
 
   /**

@@ -3,7 +3,7 @@
  * into a single context string under a token budget. Matches Go's BuildContext.
  */
 
-import type { ConsciousFact, RecalledFact, RecalledSummary } from './types';
+import type { ConsciousFact, RecalledFact, RecalledSummary } from './types.js';
 
 export interface ContextBudget {
   totalTokens: number;

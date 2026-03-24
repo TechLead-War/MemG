@@ -3,7 +3,7 @@
  * Exact port of the Go search package.
  */
 
-import type { Fact, RecalledFact } from './types';
+import type { Fact, RecalledFact } from './types.js';
 
 /** A candidate for ranking. */
 export interface SearchCandidate {

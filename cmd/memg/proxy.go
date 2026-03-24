@@ -203,6 +203,11 @@ func startProxy(cfg proxyConfig) error {
 	if err != nil {
 		return fmt.Errorf("create embedder (%s): %w", cfg.EmbedProvider, err)
 	}
+	probeCtx, cancelProbe := context.WithTimeout(ctx, 15*time.Second)
+	defer cancelProbe()
+	if err := embed.Probe(probeCtx, emb); err != nil {
+		return fmt.Errorf("embedder health check failed: %w", err)
+	}
 
 	// Create LLM provider for extraction calls.
 	provider, err := llm.NewProvider(cfg.LLMProvider, llm.ProviderConfig{

@@ -11,8 +11,8 @@ import type {
   FactFilter,
   FactMessage,
   FactSession,
-} from './types';
-import type { Store } from './store';
+} from './types.js';
+import type { Store } from './store.js';
 
 // mysql2 is an optional peer dependency — use `any` to avoid compile-time requirement.
 type Pool = any;
@@ -186,14 +186,17 @@ export class MySQLStore implements Store {
   private pool: Pool;
   private initialized: Promise<void>;
 
-  constructor(connectionString: string) {
-    const mysql = require('mysql2/promise');
-    this.pool = mysql.createPool(connectionString);
+  private constructor(pool: Pool) {
+    this.pool = pool;
     this.initialized = this.createSchema();
   }
 
   static async create(connectionString: string): Promise<MySQLStore> {
-    const store = new MySQLStore(connectionString);
+    const mod = 'mysql2/promise';
+    const mysqlModule = await import(mod);
+    const mysql = mysqlModule.default ?? mysqlModule;
+    const pool = mysql.createPool(connectionString);
+    const store = new MySQLStore(pool);
     await store.ready();
     return store;
   }
@@ -642,6 +645,39 @@ export class MySQLStore implements Store {
   }
 
   // ---- Lifecycle ----
+
+  async findUnsummarizedConversation(entityUuid: string, excludeSessionUuid: string): Promise<FactConversation | null> {
+    await this.ready();
+    const [rows] = await this.pool.query(
+      `SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at
+       FROM mg_conversation
+       WHERE entity_id = ? AND session_id != ? AND (summary IS NULL OR summary = '')
+       ORDER BY created_at DESC LIMIT 1`,
+      [entityUuid, excludeSessionUuid]
+    );
+    const arr = rows as any[];
+    if (arr.length === 0) return null;
+    return rowToConversation(arr[0]);
+  }
+
+  async listUnembeddedFacts(entityUuid: string, limit: number): Promise<Fact[]> {
+    await this.ready();
+    const effectiveLimit = limit > 0 ? limit : 50;
+    const [rows] = await this.pool.query(
+      `SELECT ${FACT_COLUMNS} FROM mg_entity_fact WHERE entity_id = ? AND embedding IS NULL ORDER BY created_at DESC LIMIT ?`,
+      [entityUuid, effectiveLimit]
+    );
+    return (rows as any[]).map(rowToFact);
+  }
+
+  async updateFactEmbedding(factUuid: string, embedding: number[], model: string): Promise<void> {
+    await this.ready();
+    const buf = encodeEmbedding(embedding);
+    await this.pool.query(
+      `UPDATE mg_entity_fact SET embedding = ?, embedding_model = ?, updated_at = ? WHERE uuid = ?`,
+      [buf, model, nowISO(), factUuid]
+    );
+  }
 
   async close(): Promise<void> {
     await this.pool.end();

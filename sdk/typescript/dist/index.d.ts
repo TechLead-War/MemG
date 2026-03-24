@@ -31,25 +31,25 @@
  * m.close();
  * ```
  */
-import type { Embedder } from './embedder';
-import { type ExtractionMessage } from './extract';
-import { HybridEngine } from './search';
-import { type Store } from './store';
-import type { AddResult, MemGOptions, Memory, MemoryInput, NativeConfig, SearchResult, WrapOptions } from './types';
-export { MemGClient } from './client';
-export { wrapOpenAIProxy, wrapAnthropicProxy } from './proxy';
-export { wrapOpenAIClient, wrapAnthropicClient, wrapGeminiClient } from './intercept';
-export { detectProvider } from './providers';
-export { MemGStore, defaultContentKey, type Store } from './store';
-export { PostgresStore } from './postgres_store';
-export { MySQLStore } from './mysql_store';
-export { HybridEngine, cosineSimilarity, dimensionMatch } from './search';
-export { buildContext, estimateTokens } from './context';
-export { runExtraction, isTrivialTurn } from './extract';
-export { recallFacts, recallSummaries } from './recall';
-export { TransformersEmbedder, OpenAIEmbedder, GeminiEmbedder } from './embedder';
-export type { Embedder } from './embedder';
-export type { Memory, MemoryInput, AddResult, SearchResult, WrapOptions, MemGOptions, NativeConfig, Fact, FactEntity, FactSession, FactConversation, FactMessage, FactFilter, RecalledFact, RecalledSummary, ConsciousFact, } from './types';
+import type { Embedder } from './embedder.js';
+import { type ExtractionMessage } from './extract.js';
+import { HybridEngine } from './search.js';
+import { type Store } from './store.js';
+import type { AddResult, MemGOptions, Memory, MemoryInput, NativeConfig, SearchResult, WrapOptions } from './types.js';
+export { MemGClient } from './client.js';
+export { wrapOpenAIProxy, wrapAnthropicProxy } from './proxy.js';
+export { wrapOpenAIClient, wrapAnthropicClient, wrapGeminiClient } from './intercept.js';
+export { detectProvider } from './providers/index.js';
+export { MemGStore, defaultContentKey, type Store } from './store.js';
+export { PostgresStore } from './postgres_store.js';
+export { MySQLStore } from './mysql_store.js';
+export { HybridEngine, cosineSimilarity, dimensionMatch } from './search.js';
+export { buildContext, estimateTokens } from './context.js';
+export { runExtraction, isTrivialTurn } from './extract.js';
+export { recallFacts, recallSummaries } from './recall.js';
+export { TransformersEmbedder, OpenAIEmbedder, GeminiEmbedder } from './embedder.js';
+export type { Embedder } from './embedder.js';
+export type { Memory, MemoryInput, AddResult, SearchResult, WrapOptions, MemGOptions, NativeConfig, Fact, FactEntity, FactSession, FactConversation, FactMessage, FactFilter, RecalledFact, RecalledSummary, ConsciousFact, } from './types.js';
 /**
  * Main MemG class providing memory operations and client wrapping.
  * Supports native in-process engine, proxy mode, and MCP client mode.
@@ -62,6 +62,8 @@ export declare class MemG {
     private _mcpClient;
     private _proxyUrl;
     private _initialized;
+    private _consciousCache;
+    private _lastPruneAt;
     constructor(opts?: NativeConfig & MemGOptions);
     /**
      * Initialize the native engine. Must be called before using native operations.
@@ -166,5 +168,23 @@ export declare class MemG {
      * Matches Go LoadConsciousContext.
      */
     private loadConsciousFacts;
+    /**
+     * Backfill embeddings for facts that were stored without them (e.g., embedder was down).
+     * Runs in the background — does not block recall.
+     */
+    private backfillMissingEmbeddings;
+    /**
+     * Summarize the most recent unsummarized conversation when a new session starts.
+     * Matches Go's summarizeClosedSession behavior.
+     */
+    private summarizeClosedConversation;
+    /**
+     * Generate a summary for a conversation and store it with its embedding.
+     */
+    private generateAndStoreSummary;
+    private loadConsciousFactsCached;
+    private pruneIfDue;
     private ensureInitialized;
+    private requireEmbedder;
+    private probeEmbedder;
 }

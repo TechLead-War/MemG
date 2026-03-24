@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"memg/embed"
 	"memg/llm"
@@ -95,7 +96,11 @@ func New(repo store.Repository, opts ...Option) (*MemG, error) {
 		g.provider = prov
 	}
 
-	if cfg.EmbedProvider != "" {
+	if cfg.Embedder != nil {
+		g.embedder = cfg.Embedder
+		g.cfg.EmbedDimension = cfg.Embedder.Dimension()
+		g.pipeline.Embedder = cfg.Embedder
+	} else if cfg.EmbedProvider != "" {
 		emb, err := embed.NewEmbedder(cfg.EmbedProvider, cfg.EmbedConfig)
 		if err != nil {
 			return nil, fmt.Errorf("memg: embed provider %q: %w", cfg.EmbedProvider, err)
@@ -103,6 +108,18 @@ func New(repo store.Repository, opts ...Option) (*MemG, error) {
 		g.embedder = emb
 		g.cfg.EmbedDimension = emb.Dimension()
 		g.pipeline.Embedder = emb
+	}
+	if g.embedder == nil {
+		return nil, ErrNoEmbedder
+	}
+	probeTimeout := cfg.RequestTimeout
+	if probeTimeout < 15*time.Second {
+		probeTimeout = 15 * time.Second
+	}
+	probeCtx, cancelProbe := context.WithTimeout(ctx, probeTimeout)
+	defer cancelProbe()
+	if err := embed.Probe(probeCtx, g.embedder); err != nil {
+		return nil, fmt.Errorf("memg: embedder health check failed: %w", err)
 	}
 
 	pruner := memory.NewPruner(repo, cfg.PruneInterval)
@@ -137,8 +154,10 @@ func (g *MemG) SetEmbedder(e embed.Embedder) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.embedder = e
-	g.cfg.EmbedDimension = e.Dimension()
 	g.pipeline.Embedder = e
+	if e != nil {
+		g.cfg.EmbedDimension = e.Dimension()
+	}
 }
 
 // AddStage registers a custom augmentation stage.
@@ -174,6 +193,9 @@ func (g *MemG) Chat(ctx context.Context, messages []*llm.Message, opts ...any) (
 	if prov == nil {
 		return nil, ErrNoProvider
 	}
+	if emb == nil {
+		return nil, ErrNoEmbedder
+	}
 
 	var cc chatConfig
 	var llmOpts []llm.CallOption
@@ -223,7 +245,7 @@ func (g *MemG) Chat(ctx context.Context, messages []*llm.Message, opts ...any) (
 		}
 	}
 
-	if entityUUID != "" && emb != nil {
+	if entityUUID != "" {
 		ctxInput := memory.ContextInput{
 			Budget: memory.ContextBudget{
 				TotalTokens:   g.cfg.MemoryTokenBudget,
@@ -250,24 +272,30 @@ func (g *MemG) Chat(ctx context.Context, messages []*llm.Message, opts ...any) (
 			}
 
 			vectors, embedErr := emb.Embed(ctx, []string{q})
-			if embedErr == nil && len(vectors) > 0 {
-				queryVec := vectors[0]
-				queryModel := embed.ModelNameOf(emb)
-
-				var recallFilters []store.FactFilter
-				if cc.factFilter != nil {
-					recallFilters = append(recallFilters, *cc.factFilter)
-				}
-				facts, err := memory.RecallWithVector(ctx, g.engine, g.repo, queryVec, queryModel, q, entityUUID, g.cfg.RecallFactsLimit, g.cfg.RecallThreshold, g.cfg.MaxRecallCandidates, recallFilters...)
-				if err == nil {
-					ctxInput.RecalledFacts = facts
-				}
-
-				summaries, err := memory.RecallSummariesWithVector(ctx, g.engine, g.repo, queryVec, q, entityUUID, 5, g.cfg.RecallThreshold)
-				if err == nil {
-					ctxInput.Summaries = summaries
-				}
+			if embedErr != nil {
+				return nil, fmt.Errorf("memg: embed recall query: %w", embedErr)
 			}
+			if len(vectors) == 0 {
+				return nil, fmt.Errorf("memg: embed recall query: empty embedding result")
+			}
+			queryVec := vectors[0]
+			queryModel := embed.ModelNameOf(emb)
+
+			var recallFilters []store.FactFilter
+			if cc.factFilter != nil {
+				recallFilters = append(recallFilters, *cc.factFilter)
+			}
+			facts, err := memory.RecallWithVector(ctx, g.engine, g.repo, queryVec, queryModel, q, entityUUID, g.cfg.RecallFactsLimit, g.cfg.RecallThreshold, g.cfg.MaxRecallCandidates, recallFilters...)
+			if err != nil {
+				return nil, fmt.Errorf("memg: recall facts: %w", err)
+			}
+			ctxInput.RecalledFacts = facts
+
+			summaries, err := memory.RecallSummariesWithVector(ctx, g.engine, g.repo, queryVec, q, entityUUID, 5, g.cfg.RecallThreshold)
+			if err != nil {
+				return nil, fmt.Errorf("memg: recall summaries: %w", err)
+			}
+			ctxInput.Summaries = summaries
 		}
 
 		contextText := memory.BuildContext(ctxInput)
@@ -276,6 +304,10 @@ func (g *MemG) Chat(ctx context.Context, messages []*llm.Message, opts ...any) (
 		}
 		if len(ctxInput.RecalledFacts) > 0 {
 			g.goBackground(func() { g.trackRecallUsage(ctxInput.RecalledFacts) })
+		}
+		if emb != nil {
+			eu := entityUUID
+			g.goBackground(func() { memory.BackfillMissingEmbeddings(g.baseCtx, g.repo, emb, eu, 50) })
 		}
 	}
 
@@ -303,6 +335,9 @@ func (g *MemG) Stream(ctx context.Context, messages []*llm.Message, opts ...any)
 	if prov == nil {
 		return nil, ErrNoProvider
 	}
+	if emb == nil {
+		return nil, ErrNoEmbedder
+	}
 
 	var cc chatConfig
 	var llmOpts []llm.CallOption
@@ -352,7 +387,7 @@ func (g *MemG) Stream(ctx context.Context, messages []*llm.Message, opts ...any)
 		}
 	}
 
-	if entityUUID != "" && emb != nil {
+	if entityUUID != "" {
 		ctxInput := memory.ContextInput{
 			Budget: memory.ContextBudget{
 				TotalTokens:   g.cfg.MemoryTokenBudget,
@@ -379,24 +414,30 @@ func (g *MemG) Stream(ctx context.Context, messages []*llm.Message, opts ...any)
 			}
 
 			vectors, embedErr := emb.Embed(ctx, []string{q})
-			if embedErr == nil && len(vectors) > 0 {
-				queryVec := vectors[0]
-				queryModel := embed.ModelNameOf(emb)
-
-				var recallFilters []store.FactFilter
-				if cc.factFilter != nil {
-					recallFilters = append(recallFilters, *cc.factFilter)
-				}
-				facts, err := memory.RecallWithVector(ctx, g.engine, g.repo, queryVec, queryModel, q, entityUUID, g.cfg.RecallFactsLimit, g.cfg.RecallThreshold, g.cfg.MaxRecallCandidates, recallFilters...)
-				if err == nil {
-					ctxInput.RecalledFacts = facts
-				}
-
-				summaries, err := memory.RecallSummariesWithVector(ctx, g.engine, g.repo, queryVec, q, entityUUID, 5, g.cfg.RecallThreshold)
-				if err == nil {
-					ctxInput.Summaries = summaries
-				}
+			if embedErr != nil {
+				return nil, fmt.Errorf("memg: embed recall query: %w", embedErr)
 			}
+			if len(vectors) == 0 {
+				return nil, fmt.Errorf("memg: embed recall query: empty embedding result")
+			}
+			queryVec := vectors[0]
+			queryModel := embed.ModelNameOf(emb)
+
+			var recallFilters []store.FactFilter
+			if cc.factFilter != nil {
+				recallFilters = append(recallFilters, *cc.factFilter)
+			}
+			facts, err := memory.RecallWithVector(ctx, g.engine, g.repo, queryVec, queryModel, q, entityUUID, g.cfg.RecallFactsLimit, g.cfg.RecallThreshold, g.cfg.MaxRecallCandidates, recallFilters...)
+			if err != nil {
+				return nil, fmt.Errorf("memg: recall facts: %w", err)
+			}
+			ctxInput.RecalledFacts = facts
+
+			summaries, err := memory.RecallSummariesWithVector(ctx, g.engine, g.repo, queryVec, q, entityUUID, 5, g.cfg.RecallThreshold)
+			if err != nil {
+				return nil, fmt.Errorf("memg: recall summaries: %w", err)
+			}
+			ctxInput.Summaries = summaries
 		}
 
 		contextText := memory.BuildContext(ctxInput)
@@ -405,6 +446,10 @@ func (g *MemG) Stream(ctx context.Context, messages []*llm.Message, opts ...any)
 		}
 		if len(ctxInput.RecalledFacts) > 0 {
 			g.goBackground(func() { g.trackRecallUsage(ctxInput.RecalledFacts) })
+		}
+		if emb != nil {
+			eu := entityUUID
+			g.goBackground(func() { memory.BackfillMissingEmbeddings(g.baseCtx, g.repo, emb, eu, 50) })
 		}
 	}
 

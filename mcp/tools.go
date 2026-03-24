@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"time"
 
+	"memg/llm"
 	"memg/memory"
+	"memg/memory/augment"
 	"memg/store"
 )
 
@@ -136,6 +138,39 @@ func toolDefinitions() []toolDefinition {
 				"required": []string{"entity_id"},
 			},
 		},
+		{
+			Name:        "extract_from_messages",
+			Description: "Extract structured memories from conversation messages using LLM-powered analysis. Produces typed, tagged, and embedded facts with significance scoring, slot detection, and deduplication — the same quality as proxy mode.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"entity_id": map[string]any{
+						"type":        "string",
+						"description": "External identifier for the entity.",
+					},
+					"messages": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"role": map[string]any{
+									"type":        "string",
+									"enum":        []string{"user", "assistant", "system"},
+									"description": "The role of the message sender.",
+								},
+								"content": map[string]any{
+									"type":        "string",
+									"description": "The message content.",
+								},
+							},
+							"required": []string{"role", "content"},
+						},
+						"description": "Conversation messages to extract knowledge from.",
+					},
+				},
+				"required": []string{"entity_id", "messages"},
+			},
+		},
 	}
 }
 
@@ -152,6 +187,8 @@ func (s *Server) executeTool(ctx context.Context, name string, args json.RawMess
 		return s.toolDeleteMemory(ctx, args)
 	case "delete_all_memories":
 		return s.toolDeleteAllMemories(ctx, args)
+	case "extract_from_messages":
+		return s.toolExtractFromMessages(ctx, args)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -187,6 +224,9 @@ func (s *Server) toolAddMemories(ctx context.Context, args json.RawMessage) (any
 	if err != nil {
 		return nil, fmt.Errorf("entity resolution failed: %w", err)
 	}
+	if s.cfg.Embedder == nil {
+		return nil, fmt.Errorf("embedder not configured — add_memories requires an embedding provider")
+	}
 
 	// Collect contents for batch embedding.
 	contents := make([]string, len(p.Memories))
@@ -198,13 +238,9 @@ func (s *Server) toolAddMemories(ctx context.Context, args json.RawMessage) (any
 	}
 
 	// Embed all contents in one batch.
-	var embeddings [][]float32
-	if s.cfg.Embedder != nil {
-		var err error
-		embeddings, err = s.cfg.Embedder.Embed(ctx, contents)
-		if err != nil {
-			return nil, fmt.Errorf("embedding failed: %w", err)
-		}
+	embeddings, err := s.cfg.Embedder.Embed(ctx, contents)
+	if err != nil {
+		return nil, fmt.Errorf("embedding failed: %w", err)
 	}
 
 	// Build facts.
@@ -438,6 +474,57 @@ func (s *Server) toolDeleteAllMemories(ctx context.Context, args json.RawMessage
 	}, nil
 }
 
+// --- extract_from_messages ---
+
+type extractFromMessagesArgs struct {
+	EntityID string           `json:"entity_id"`
+	Messages []messagePayload `json:"messages"`
+}
+
+type messagePayload struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+func (s *Server) toolExtractFromMessages(ctx context.Context, args json.RawMessage) (any, error) {
+	if s.cfg.Pipeline == nil {
+		return nil, fmt.Errorf("extraction not available: server started without an LLM provider (use --llm-provider)")
+	}
+
+	var p extractFromMessagesArgs
+	if err := json.Unmarshal(args, &p); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if p.EntityID == "" {
+		return nil, fmt.Errorf("entity_id is required")
+	}
+	if len(p.Messages) == 0 {
+		return nil, fmt.Errorf("at least one message is required")
+	}
+
+	entityUUID, err := s.entities.getOrCreateUUID(ctx, p.EntityID)
+	if err != nil {
+		return nil, fmt.Errorf("entity resolution failed: %w", err)
+	}
+
+	msgs := make([]*llm.Message, len(p.Messages))
+	for i, m := range p.Messages {
+		msgs[i] = &llm.Message{Role: m.Role, Content: m.Content}
+	}
+
+	extracted, err := s.cfg.Pipeline.ProcessSync(ctx, &augment.Job{
+		EntityID: entityUUID,
+		Messages: msgs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("extraction failed: %w", err)
+	}
+
+	return map[string]any{
+		"extracted": extracted,
+	}, nil
+}
+
 // --- helpers ---
 
 func parseFactType(s string) store.FactType {
@@ -472,4 +559,3 @@ func significanceLabel(s store.Significance) string {
 		return "medium"
 	}
 }
-

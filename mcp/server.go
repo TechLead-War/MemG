@@ -14,15 +14,17 @@ import (
 	"sync"
 
 	"memg/embed"
+	"memg/memory/augment"
 	"memg/search"
 	"memg/store"
 )
 
 // Config holds everything the MCP server needs to operate.
 type Config struct {
-	Repo     store.Repository // persistence layer
-	Embedder embed.Embedder   // text embedding service (required for search and add)
-	Debug    bool             // enable verbose logging
+	Repo     store.Repository  // persistence layer
+	Embedder embed.Embedder    // text embedding service (required for search and add)
+	Pipeline *augment.Pipeline // extraction pipeline (optional — enables extract_from_messages)
+	Debug    bool              // enable verbose logging
 }
 
 // Server implements an MCP server over Streamable HTTP transport.
@@ -83,6 +85,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Start binds the HTTP server to the given address and begins serving.
 func (s *Server) Start(addr string) error {
+	if s.cfg.Repo == nil {
+		return fmt.Errorf("memg mcp: repository is required")
+	}
+	if s.cfg.Embedder == nil {
+		return fmt.Errorf("memg mcp: embedder is required")
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", s)
 	mux.Handle("/mcp/", s)

@@ -4,10 +4,10 @@
  */
 
 import { createHash, randomUUID } from 'crypto';
-import type { Embedder } from './embedder';
-import { cosineSimilarity, dimensionMatch } from './search';
-import { defaultContentKey, type Store } from './store';
-import type { Fact, FactFilter } from './types';
+import type { Embedder } from './embedder.js';
+import { cosineSimilarity, dimensionMatch } from './search.js';
+import { defaultContentKey, type Store } from './store.js';
+import type { Fact, FactFilter } from './types.js';
 
 /** Trivial conversation patterns that should not trigger extraction. */
 const TRIVIAL_PATTERNS = new Set([
@@ -250,7 +250,7 @@ function ttlForSignificance(sig: number): string | null {
 /**
  * Call an LLM via fetch for extraction. Supports OpenAI-compatible APIs.
  */
-async function callLLM(
+export async function callLLM(
   apiKey: string,
   model: string,
   systemPrompt: string,

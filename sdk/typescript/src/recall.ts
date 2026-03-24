@@ -3,20 +3,20 @@
  * Matches the Go memory.Recall and memory.RecallSummaries logic.
  */
 
-import type { Embedder } from './embedder';
+import type { Embedder } from './embedder.js';
 import {
   HybridEngine,
   dimensionMatch,
   type SearchCandidate,
   type RankResult,
-} from './search';
-import type { Store } from './store';
+} from './search.js';
+import type { Store } from './store.js';
 import type {
   Fact,
   FactFilter,
   RecalledFact,
   RecalledSummary,
-} from './types';
+} from './types.js';
 
 /**
  * Recall facts for an entity using hybrid search.

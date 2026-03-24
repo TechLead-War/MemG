@@ -85,6 +85,24 @@ class MemGClient {
         return result.deleted;
     }
     /**
+     * Extract structured memories from conversation messages using the server's
+     * LLM-powered extraction pipeline. Produces typed, tagged, and embedded facts
+     * with the same quality as proxy mode.
+     *
+     * Requires the MCP server to be started with --llm-provider.
+     *
+     * @param entityId - External entity identifier.
+     * @param messages - Conversation messages to extract knowledge from.
+     * @returns The number of facts extracted and stored.
+     */
+    async extractFromMessages(entityId, messages) {
+        const result = await this._call('extract_from_messages', {
+            entity_id: entityId,
+            messages,
+        });
+        return result.extracted;
+    }
+    /**
      * Send a JSON-RPC 2.0 tools/call request and return the parsed result.
      */
     async _call(toolName, args) {

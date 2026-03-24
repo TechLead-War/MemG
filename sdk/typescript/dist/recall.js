@@ -8,7 +8,7 @@ exports.recallFacts = recallFacts;
 exports.recallFactsWithVector = recallFactsWithVector;
 exports.recallSummaries = recallSummaries;
 exports.recallSummariesWithVector = recallSummariesWithVector;
-const search_1 = require("./search");
+const search_js_1 = require("./search.js");
 /**
  * Recall facts for an entity using hybrid search.
  */
@@ -78,7 +78,7 @@ async function recallSummariesWithVector(store, engine, queryVec, queryText, ent
         return [];
     const candidates = convs.map((c) => {
         let embedding = c.summaryEmbedding;
-        if (queryVec.length > 0 && !(0, search_1.dimensionMatch)(queryVec, embedding)) {
+        if (queryVec.length > 0 && !(0, search_js_1.dimensionMatch)(queryVec, embedding)) {
             embedding = undefined;
         }
         return {
@@ -105,7 +105,7 @@ function buildRecallCandidates(queryVec, queryModel, facts) {
         if (confidence === 0)
             confidence = 1.0;
         let embedding = f.embedding;
-        if (queryVec.length > 0 && !(0, search_1.dimensionMatch)(queryVec, embedding)) {
+        if (queryVec.length > 0 && !(0, search_js_1.dimensionMatch)(queryVec, embedding)) {
             embedding = undefined;
         }
         else if (queryModel &&

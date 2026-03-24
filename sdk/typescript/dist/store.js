@@ -3,11 +3,15 @@
  * SQLite-backed repository for the native MemG engine.
  * Uses better-sqlite3 (synchronous API) for fast, in-process persistence.
  */
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MemGStore = void 0;
 exports.defaultContentKey = defaultContentKey;
 const crypto_1 = require("crypto");
-const schema_1 = require("./schema");
+const schema_js_1 = require("./schema.js");
+const better_sqlite3_1 = __importDefault(require("better-sqlite3"));
 function nowISO() {
     return new Date().toISOString();
 }
@@ -85,16 +89,14 @@ function rowToMessage(row) {
 const FACT_COLUMNS = `uuid, content, embedding, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at`;
 class MemGStore {
     constructor(dbPath) {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const BetterSqlite3 = require('better-sqlite3');
-        this.db = new BetterSqlite3(dbPath);
+        this.db = new better_sqlite3_1.default(dbPath);
         this.db.pragma('journal_mode = WAL');
         this.db.pragma('foreign_keys = ON');
         this.createSchema();
     }
     createSchema() {
         const tx = this.db.transaction(() => {
-            for (const ddl of schema_1.SCHEMA_DDL) {
+            for (const ddl of schema_js_1.SCHEMA_DDL) {
                 this.db.exec(ddl);
             }
         });
@@ -372,6 +374,30 @@ class MemGStore {
         this.db
             .prepare(`UPDATE mg_conversation SET summary = ?, summary_embedding = ?, updated_at = ? WHERE uuid = ?`)
             .run(summary, embBuf, now, conversationUuid);
+    }
+    findUnsummarizedConversation(entityUuid, excludeSessionUuid) {
+        const row = this.db
+            .prepare(`SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at
+         FROM mg_conversation
+         WHERE entity_id = ? AND session_id != ? AND (summary IS NULL OR summary = '')
+         ORDER BY created_at DESC LIMIT 1`)
+            .get(entityUuid, excludeSessionUuid);
+        if (!row)
+            return null;
+        return rowToConversation(row);
+    }
+    listUnembeddedFacts(entityUuid, limit) {
+        const effectiveLimit = limit > 0 ? limit : 50;
+        const rows = this.db
+            .prepare(`SELECT ${FACT_COLUMNS} FROM mg_entity_fact WHERE entity_id = ? AND embedding IS NULL ORDER BY created_at DESC LIMIT ?`)
+            .all(entityUuid, effectiveLimit);
+        return rows.map(rowToFact);
+    }
+    updateFactEmbedding(factUuid, embedding, model) {
+        const buf = encodeEmbedding(embedding);
+        this.db
+            .prepare(`UPDATE mg_entity_fact SET embedding = ?, embedding_model = ?, updated_at = ? WHERE uuid = ?`)
+            .run(buf, model, nowISO(), factUuid);
     }
     // ---- Lifecycle ----
     close() {

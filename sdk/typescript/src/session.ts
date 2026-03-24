@@ -3,8 +3,8 @@
  * Handles sliding window sessions and conversation tracking.
  */
 
-import type { Store } from './store';
-import type { FactConversation, FactMessage, FactSession } from './types';
+import type { Store } from './store.js';
+import type { FactConversation, FactMessage, FactSession } from './types.js';
 
 export interface SessionManager {
   store: Store;

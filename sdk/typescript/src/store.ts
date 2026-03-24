@@ -11,10 +11,11 @@ import type {
   FactFilter,
   FactMessage,
   FactSession,
-} from './types';
-import { SCHEMA_DDL } from './schema';
+} from './types.js';
+import { SCHEMA_DDL } from './schema.js';
+import BetterSqlite3 from 'better-sqlite3';
 
-type Database = import('better-sqlite3').Database;
+type Database = InstanceType<typeof BetterSqlite3>;
 
 /** A value that may be synchronous or a Promise. */
 type MaybeAsync<T> = T | Promise<T>;
@@ -49,6 +50,8 @@ export interface Store {
   deleteEntityFacts(entityUuid: string): MaybeAsync<number>;
   pruneExpiredFacts(entityUuid: string, now: string): MaybeAsync<number>;
   updateRecallUsage(factUuids: string[]): MaybeAsync<void>;
+  listUnembeddedFacts(entityUuid: string, limit: number): MaybeAsync<Fact[]>;
+  updateFactEmbedding(factUuid: string, embedding: number[], model: string): MaybeAsync<void>;
 
   // Session
   ensureSession(
@@ -65,6 +68,7 @@ export interface Store {
   readRecentMessages(conversationUuid: string, limit: number): MaybeAsync<FactMessage[]>;
   listConversationSummaries(entityUuid: string, limit: number): MaybeAsync<FactConversation[]>;
   updateConversationSummary(conversationUuid: string, summary: string, embedding: number[]): MaybeAsync<void>;
+  findUnsummarizedConversation(entityUuid: string, excludeSessionUuid: string): MaybeAsync<FactConversation | null>;
 
   // Lifecycle
   close(): MaybeAsync<void>;
@@ -154,8 +158,6 @@ export class MemGStore implements Store {
   private db: Database;
 
   constructor(dbPath: string) {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const BetterSqlite3 = require('better-sqlite3') as typeof import('better-sqlite3');
     this.db = new BetterSqlite3(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
@@ -532,6 +534,38 @@ export class MemGStore implements Store {
         `UPDATE mg_conversation SET summary = ?, summary_embedding = ?, updated_at = ? WHERE uuid = ?`
       )
       .run(summary, embBuf, now, conversationUuid);
+  }
+
+  findUnsummarizedConversation(entityUuid: string, excludeSessionUuid: string): FactConversation | null {
+    const row = this.db
+      .prepare(
+        `SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at
+         FROM mg_conversation
+         WHERE entity_id = ? AND session_id != ? AND (summary IS NULL OR summary = '')
+         ORDER BY created_at DESC LIMIT 1`
+      )
+      .get(entityUuid, excludeSessionUuid) as any;
+    if (!row) return null;
+    return rowToConversation(row);
+  }
+
+  listUnembeddedFacts(entityUuid: string, limit: number): Fact[] {
+    const effectiveLimit = limit > 0 ? limit : 50;
+    const rows = this.db
+      .prepare(
+        `SELECT ${FACT_COLUMNS} FROM mg_entity_fact WHERE entity_id = ? AND embedding IS NULL ORDER BY created_at DESC LIMIT ?`
+      )
+      .all(entityUuid, effectiveLimit) as any[];
+    return rows.map(rowToFact);
+  }
+
+  updateFactEmbedding(factUuid: string, embedding: number[], model: string): void {
+    const buf = encodeEmbedding(embedding);
+    this.db
+      .prepare(
+        `UPDATE mg_entity_fact SET embedding = ?, embedding_model = ?, updated_at = ? WHERE uuid = ?`
+      )
+      .run(buf, model, nowISO(), factUuid);
   }
 
   // ---- Lifecycle ----

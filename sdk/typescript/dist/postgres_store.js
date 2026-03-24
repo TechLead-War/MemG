@@ -3,6 +3,39 @@
  * PostgreSQL-backed repository for the native MemG engine.
  * Uses the `pg` npm package (async API) for networked persistence.
  */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PostgresStore = void 0;
 const crypto_1 = require("crypto");
@@ -163,13 +196,16 @@ const POSTGRES_SCHEMA_DDL = [
   )`,
 ];
 class PostgresStore {
-    constructor(connectionString) {
-        const { Pool: PgPool } = require('pg');
-        this.pool = new PgPool({ connectionString });
+    constructor(pool) {
+        this.pool = pool;
         this.initialized = this.createSchema();
     }
     static async create(connectionString) {
-        const store = new PostgresStore(connectionString);
+        const mod = 'pg';
+        const pgModule = await Promise.resolve(`${mod}`).then(s => __importStar(require(s)));
+        const pg = pgModule.default ?? pgModule;
+        const pool = new pg.Pool({ connectionString });
+        const store = new PostgresStore(pool);
         await store.ready();
         return store;
     }
@@ -529,6 +565,27 @@ class PostgresStore {
         await this.pool.query(`UPDATE mg_conversation SET summary = $1, summary_embedding = $2, updated_at = $3 WHERE uuid = $4`, [summary, embBuf, now, conversationUuid]);
     }
     // ---- Lifecycle ----
+    async findUnsummarizedConversation(entityUuid, excludeSessionUuid) {
+        await this.ready();
+        const res = await this.pool.query(`SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at
+       FROM mg_conversation
+       WHERE entity_id = $1 AND session_id != $2 AND (summary IS NULL OR summary = '')
+       ORDER BY created_at DESC LIMIT 1`, [entityUuid, excludeSessionUuid]);
+        if (res.rows.length === 0)
+            return null;
+        return rowToConversation(res.rows[0]);
+    }
+    async listUnembeddedFacts(entityUuid, limit) {
+        await this.ready();
+        const effectiveLimit = limit > 0 ? limit : 50;
+        const res = await this.pool.query(`SELECT ${FACT_COLUMNS} FROM mg_entity_fact WHERE entity_id = $1 AND embedding IS NULL ORDER BY created_at DESC LIMIT $2`, [entityUuid, effectiveLimit]);
+        return res.rows.map(rowToFact);
+    }
+    async updateFactEmbedding(factUuid, embedding, model) {
+        await this.ready();
+        const buf = encodeEmbedding(embedding);
+        await this.pool.query(`UPDATE mg_entity_fact SET embedding = $1, embedding_model = $2, updated_at = $3 WHERE uuid = $4`, [buf, model, nowISO(), factUuid]);
+    }
     async close() {
         await this.pool.end();
     }

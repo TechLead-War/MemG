@@ -2,12 +2,12 @@
  * PostgreSQL-backed repository for the native MemG engine.
  * Uses the `pg` npm package (async API) for networked persistence.
  */
-import type { Fact, FactConversation, FactEntity, FactFilter, FactMessage, FactSession } from './types';
-import type { Store } from './store';
+import type { Fact, FactConversation, FactEntity, FactFilter, FactMessage, FactSession } from './types.js';
+import type { Store } from './store.js';
 export declare class PostgresStore implements Store {
     private pool;
     private initialized;
-    constructor(connectionString: string);
+    private constructor();
     static create(connectionString: string): Promise<PostgresStore>;
     private createSchema;
     private ready;
@@ -37,5 +37,8 @@ export declare class PostgresStore implements Store {
     readRecentMessages(conversationUuid: string, limit: number): Promise<FactMessage[]>;
     listConversationSummaries(entityUuid: string, limit: number): Promise<FactConversation[]>;
     updateConversationSummary(conversationUuid: string, summary: string, embedding: number[]): Promise<void>;
+    findUnsummarizedConversation(entityUuid: string, excludeSessionUuid: string): Promise<FactConversation | null>;
+    listUnembeddedFacts(entityUuid: string, limit: number): Promise<Fact[]>;
+    updateFactEmbedding(factUuid: string, embedding: number[], model: string): Promise<void>;
     close(): Promise<void>;
 }

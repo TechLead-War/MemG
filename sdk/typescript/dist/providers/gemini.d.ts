@@ -6,7 +6,7 @@
  * - **client**: Intercepts calls locally, querying MCP for memory context.
  * - **proxy**: Not supported for Gemini (Gemini SDK does not use OpenAI-compatible endpoints).
  */
-import type { WrapOptions } from '../types';
+import type { WrapOptions } from '../types.js';
 /**
  * Wrap a Gemini GenerativeModel with MemG memory capabilities.
  */

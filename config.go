@@ -53,6 +53,9 @@ type Config struct {
 	// EmbedProvider selects an embedding provider by registry name (e.g. "openai", "ollama").
 	// The embedder is auto-constructed during New() if SetEmbedder hasn't been called.
 	EmbedProvider string
+	// Embedder supplies pre-built embedding infrastructure. When set, it takes
+	// precedence over EmbedProvider/EmbedConfig and is probed during New().
+	Embedder embed.Embedder
 	// EmbedConfig holds connection settings for the embedding provider.
 	EmbedConfig embed.ProviderConfig
 

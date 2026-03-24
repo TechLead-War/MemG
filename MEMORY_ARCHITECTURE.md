@@ -625,6 +625,8 @@ These filters are applied at the SQL level — filtered facts never enter the ra
 
 The filters are optional. If no filter is passed, `Recall` defaults to its standard behavior: load all current, non-expired facts and rank them. The caller decides whether to filter — MemG provides the capability, the application (or the intelligence layer above it) decides when to use it.
 
+**8. Embedding backfill heals facts stored during outages.** If the embedding provider is temporarily unavailable (rate-limited, network error, API outage) during fact extraction, the fact is stored with a NULL embedding. Without intervention, that fact is findable only via BM25 lexical matching — semantically invisible. On each subsequent recall call, the system checks for facts with NULL embeddings and re-embeds them in the background. Once the embedding provider recovers, degraded facts are healed within one or two recall cycles without user intervention.
+
 ### Who Controls What
 
 The enriched memory model introduces a clear separation of responsibilities between the extraction stages (user-defined) and the core library.

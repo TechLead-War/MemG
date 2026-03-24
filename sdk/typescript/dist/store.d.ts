@@ -2,7 +2,7 @@
  * SQLite-backed repository for the native MemG engine.
  * Uses better-sqlite3 (synchronous API) for fast, in-process persistence.
  */
-import type { Fact, FactConversation, FactEntity, FactFilter, FactMessage, FactSession } from './types';
+import type { Fact, FactConversation, FactEntity, FactFilter, FactMessage, FactSession } from './types.js';
 /** A value that may be synchronous or a Promise. */
 type MaybeAsync<T> = T | Promise<T>;
 /**
@@ -30,6 +30,8 @@ export interface Store {
     deleteEntityFacts(entityUuid: string): MaybeAsync<number>;
     pruneExpiredFacts(entityUuid: string, now: string): MaybeAsync<number>;
     updateRecallUsage(factUuids: string[]): MaybeAsync<void>;
+    listUnembeddedFacts(entityUuid: string, limit: number): MaybeAsync<Fact[]>;
+    updateFactEmbedding(factUuid: string, embedding: number[], model: string): MaybeAsync<void>;
     ensureSession(entityUuid: string, processUuid: string, timeoutMs: number): MaybeAsync<{
         session: FactSession;
         isNew: boolean;
@@ -41,6 +43,7 @@ export interface Store {
     readRecentMessages(conversationUuid: string, limit: number): MaybeAsync<FactMessage[]>;
     listConversationSummaries(entityUuid: string, limit: number): MaybeAsync<FactConversation[]>;
     updateConversationSummary(conversationUuid: string, summary: string, embedding: number[]): MaybeAsync<void>;
+    findUnsummarizedConversation(entityUuid: string, excludeSessionUuid: string): MaybeAsync<FactConversation | null>;
     close(): MaybeAsync<void>;
 }
 export declare class MemGStore implements Store {
@@ -73,6 +76,9 @@ export declare class MemGStore implements Store {
     readRecentMessages(conversationUuid: string, limit: number): FactMessage[];
     listConversationSummaries(entityUuid: string, limit: number): FactConversation[];
     updateConversationSummary(conversationUuid: string, summary: string, embedding: number[]): void;
+    findUnsummarizedConversation(entityUuid: string, excludeSessionUuid: string): FactConversation | null;
+    listUnembeddedFacts(entityUuid: string, limit: number): Fact[];
+    updateFactEmbedding(factUuid: string, embedding: number[], model: string): void;
     close(): void;
 }
 /**

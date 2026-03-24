@@ -466,6 +466,9 @@ func (r *Repository) ListFactsFiltered(ctx context.Context, entityUUID string, f
 		}
 		query += " AND source_role IN (" + joinStrings(placeholders, ",") + ")"
 	}
+	if filter.UnembeddedOnly {
+		query += " AND embedding IS NULL"
+	}
 	query += " ORDER BY created_at DESC LIMIT ?"
 	args = append(args, limit)
 
@@ -550,6 +553,9 @@ func (r *Repository) ListFactsForRecall(ctx context.Context, entityUUID string, 
 			args = append(args, sr)
 		}
 		query += " AND source_role IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if filter.UnembeddedOnly {
+		query += " AND embedding IS NULL"
 	}
 	if limit > 0 {
 		query += " LIMIT ?"

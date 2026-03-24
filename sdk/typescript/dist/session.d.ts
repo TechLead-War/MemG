@@ -2,8 +2,8 @@
  * Session management for the native MemG engine.
  * Handles sliding window sessions and conversation tracking.
  */
-import type { Store } from './store';
-import type { FactMessage, FactSession } from './types';
+import type { Store } from './store.js';
+import type { FactMessage, FactSession } from './types.js';
 export interface SessionManager {
     store: Store;
     timeoutMs: number;

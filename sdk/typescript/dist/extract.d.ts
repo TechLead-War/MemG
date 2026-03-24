@@ -2,8 +2,8 @@
  * Extraction pipeline: extract structured facts from conversation messages.
  * Matches the Go proxy/extract.go logic exactly.
  */
-import type { Embedder } from './embedder';
-import { type Store } from './store';
+import type { Embedder } from './embedder.js';
+import { type Store } from './store.js';
 /** Message shape for extraction. */
 export interface ExtractionMessage {
     role: string;
@@ -13,6 +13,10 @@ export interface ExtractionMessage {
  * Check if a set of messages is trivial (greetings, acknowledgments).
  */
 export declare function isTrivialTurn(messages: ExtractionMessage[]): boolean;
+/**
+ * Call an LLM via fetch for extraction. Supports OpenAI-compatible APIs.
+ */
+export declare function callLLM(apiKey: string, model: string, systemPrompt: string, userContent: string, provider: string): Promise<string>;
 /**
  * Run the full extraction pipeline:
  * 1. Trivial turn detection

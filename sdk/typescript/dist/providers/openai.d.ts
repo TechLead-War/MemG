@@ -6,7 +6,7 @@
  * - **proxy**: Redirects traffic through the MemG reverse proxy.
  * - **client**: Intercepts calls locally, querying MCP for memory context.
  */
-import type { WrapOptions } from '../types';
+import type { WrapOptions } from '../types.js';
 /**
  * Wrap an OpenAI client with MemG memory capabilities.
  */

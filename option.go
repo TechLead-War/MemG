@@ -76,6 +76,13 @@ func WithEmbedProvider(name string, cfg embed.ProviderConfig) Option {
 	}
 }
 
+// WithEmbedder supplies a pre-built embedder instance.
+// Use this when you construct the embedder outside MemG but still want
+// startup validation to run during New().
+func WithEmbedder(e embed.Embedder) Option {
+	return func(c *Config) { c.Embedder = e }
+}
+
 // WithConsciousMode enables or disables startup context injection.
 // When enabled, the top facts by significance are always injected,
 // ensuring the LLM knows critical user attributes even for vague messages.

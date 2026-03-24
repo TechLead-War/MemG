@@ -77,6 +77,27 @@ m.delete_all("user-123")
 m.close()
 ```
 
+### Chat (Session-Aware)
+
+`chat()` manages the full memory loop: sessions, history injection, recall, LLM call, exchange persistence, and extraction.
+
+```python
+from memg import MemG
+
+m = MemG(embed_provider="openai", openai_api_key="...")
+res = m.chat(
+    [{"role": "user", "content": "I just moved to Seattle"}],
+    entity_id="user-123"
+)
+print(res["content"])
+
+# Follow-ups are history-aware — the session tracks prior turns.
+res2 = m.chat(
+    [{"role": "user", "content": "What city did I mention?"}],
+    entity_id="user-123"
+)
+```
+
 ### Gemini
 
 ```python
@@ -104,7 +125,7 @@ class MyPostgresStore(Store):
 m = MemG(store=MyPostgresStore(connection_string))
 ```
 
-See `memg.store.Store` for the full interface contract (22 methods).
+See `memg.store.Store` for the full interface contract (27 methods).
 
 ## Modes
 

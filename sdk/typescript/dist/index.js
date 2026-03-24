@@ -32,50 +32,88 @@
  * m.close();
  * ```
  */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MemG = exports.GeminiEmbedder = exports.OpenAIEmbedder = exports.TransformersEmbedder = exports.recallSummaries = exports.recallFacts = exports.isTrivialTurn = exports.runExtraction = exports.estimateTokens = exports.buildContext = exports.dimensionMatch = exports.cosineSimilarity = exports.HybridEngine = exports.MySQLStore = exports.PostgresStore = exports.defaultContentKey = exports.MemGStore = exports.detectProvider = exports.wrapGeminiClient = exports.wrapAnthropicClient = exports.wrapOpenAIClient = exports.wrapAnthropicProxy = exports.wrapOpenAIProxy = exports.MemGClient = void 0;
-const config_1 = require("./config");
-const context_1 = require("./context");
-const extract_1 = require("./extract");
-const providers_1 = require("./providers");
-const recall_1 = require("./recall");
-const search_1 = require("./search");
-const store_1 = require("./store");
-var client_1 = require("./client");
-Object.defineProperty(exports, "MemGClient", { enumerable: true, get: function () { return client_1.MemGClient; } });
-var proxy_1 = require("./proxy");
-Object.defineProperty(exports, "wrapOpenAIProxy", { enumerable: true, get: function () { return proxy_1.wrapOpenAIProxy; } });
-Object.defineProperty(exports, "wrapAnthropicProxy", { enumerable: true, get: function () { return proxy_1.wrapAnthropicProxy; } });
-var intercept_1 = require("./intercept");
-Object.defineProperty(exports, "wrapOpenAIClient", { enumerable: true, get: function () { return intercept_1.wrapOpenAIClient; } });
-Object.defineProperty(exports, "wrapAnthropicClient", { enumerable: true, get: function () { return intercept_1.wrapAnthropicClient; } });
-Object.defineProperty(exports, "wrapGeminiClient", { enumerable: true, get: function () { return intercept_1.wrapGeminiClient; } });
-var providers_2 = require("./providers");
-Object.defineProperty(exports, "detectProvider", { enumerable: true, get: function () { return providers_2.detectProvider; } });
-var store_2 = require("./store");
-Object.defineProperty(exports, "MemGStore", { enumerable: true, get: function () { return store_2.MemGStore; } });
-Object.defineProperty(exports, "defaultContentKey", { enumerable: true, get: function () { return store_2.defaultContentKey; } });
-var postgres_store_1 = require("./postgres_store");
-Object.defineProperty(exports, "PostgresStore", { enumerable: true, get: function () { return postgres_store_1.PostgresStore; } });
-var mysql_store_1 = require("./mysql_store");
-Object.defineProperty(exports, "MySQLStore", { enumerable: true, get: function () { return mysql_store_1.MySQLStore; } });
-var search_2 = require("./search");
-Object.defineProperty(exports, "HybridEngine", { enumerable: true, get: function () { return search_2.HybridEngine; } });
-Object.defineProperty(exports, "cosineSimilarity", { enumerable: true, get: function () { return search_2.cosineSimilarity; } });
-Object.defineProperty(exports, "dimensionMatch", { enumerable: true, get: function () { return search_2.dimensionMatch; } });
-var context_2 = require("./context");
-Object.defineProperty(exports, "buildContext", { enumerable: true, get: function () { return context_2.buildContext; } });
-Object.defineProperty(exports, "estimateTokens", { enumerable: true, get: function () { return context_2.estimateTokens; } });
-var extract_2 = require("./extract");
-Object.defineProperty(exports, "runExtraction", { enumerable: true, get: function () { return extract_2.runExtraction; } });
-Object.defineProperty(exports, "isTrivialTurn", { enumerable: true, get: function () { return extract_2.isTrivialTurn; } });
-var recall_2 = require("./recall");
-Object.defineProperty(exports, "recallFacts", { enumerable: true, get: function () { return recall_2.recallFacts; } });
-Object.defineProperty(exports, "recallSummaries", { enumerable: true, get: function () { return recall_2.recallSummaries; } });
-var embedder_1 = require("./embedder");
-Object.defineProperty(exports, "TransformersEmbedder", { enumerable: true, get: function () { return embedder_1.TransformersEmbedder; } });
-Object.defineProperty(exports, "OpenAIEmbedder", { enumerable: true, get: function () { return embedder_1.OpenAIEmbedder; } });
-Object.defineProperty(exports, "GeminiEmbedder", { enumerable: true, get: function () { return embedder_1.GeminiEmbedder; } });
+const config_js_1 = require("./config.js");
+const context_js_1 = require("./context.js");
+const extract_js_1 = require("./extract.js");
+const index_js_1 = require("./providers/index.js");
+const recall_js_1 = require("./recall.js");
+const search_js_1 = require("./search.js");
+const session_js_1 = require("./session.js");
+const store_js_1 = require("./store.js");
+const openai_js_1 = require("./providers/openai.js");
+const anthropic_js_1 = require("./providers/anthropic.js");
+const gemini_js_1 = require("./providers/gemini.js");
+var client_js_1 = require("./client.js");
+Object.defineProperty(exports, "MemGClient", { enumerable: true, get: function () { return client_js_1.MemGClient; } });
+var proxy_js_1 = require("./proxy.js");
+Object.defineProperty(exports, "wrapOpenAIProxy", { enumerable: true, get: function () { return proxy_js_1.wrapOpenAIProxy; } });
+Object.defineProperty(exports, "wrapAnthropicProxy", { enumerable: true, get: function () { return proxy_js_1.wrapAnthropicProxy; } });
+var intercept_js_1 = require("./intercept.js");
+Object.defineProperty(exports, "wrapOpenAIClient", { enumerable: true, get: function () { return intercept_js_1.wrapOpenAIClient; } });
+Object.defineProperty(exports, "wrapAnthropicClient", { enumerable: true, get: function () { return intercept_js_1.wrapAnthropicClient; } });
+Object.defineProperty(exports, "wrapGeminiClient", { enumerable: true, get: function () { return intercept_js_1.wrapGeminiClient; } });
+var index_js_2 = require("./providers/index.js");
+Object.defineProperty(exports, "detectProvider", { enumerable: true, get: function () { return index_js_2.detectProvider; } });
+var store_js_2 = require("./store.js");
+Object.defineProperty(exports, "MemGStore", { enumerable: true, get: function () { return store_js_2.MemGStore; } });
+Object.defineProperty(exports, "defaultContentKey", { enumerable: true, get: function () { return store_js_2.defaultContentKey; } });
+var postgres_store_js_1 = require("./postgres_store.js");
+Object.defineProperty(exports, "PostgresStore", { enumerable: true, get: function () { return postgres_store_js_1.PostgresStore; } });
+var mysql_store_js_1 = require("./mysql_store.js");
+Object.defineProperty(exports, "MySQLStore", { enumerable: true, get: function () { return mysql_store_js_1.MySQLStore; } });
+var search_js_2 = require("./search.js");
+Object.defineProperty(exports, "HybridEngine", { enumerable: true, get: function () { return search_js_2.HybridEngine; } });
+Object.defineProperty(exports, "cosineSimilarity", { enumerable: true, get: function () { return search_js_2.cosineSimilarity; } });
+Object.defineProperty(exports, "dimensionMatch", { enumerable: true, get: function () { return search_js_2.dimensionMatch; } });
+var context_js_2 = require("./context.js");
+Object.defineProperty(exports, "buildContext", { enumerable: true, get: function () { return context_js_2.buildContext; } });
+Object.defineProperty(exports, "estimateTokens", { enumerable: true, get: function () { return context_js_2.estimateTokens; } });
+var extract_js_2 = require("./extract.js");
+Object.defineProperty(exports, "runExtraction", { enumerable: true, get: function () { return extract_js_2.runExtraction; } });
+Object.defineProperty(exports, "isTrivialTurn", { enumerable: true, get: function () { return extract_js_2.isTrivialTurn; } });
+var recall_js_2 = require("./recall.js");
+Object.defineProperty(exports, "recallFacts", { enumerable: true, get: function () { return recall_js_2.recallFacts; } });
+Object.defineProperty(exports, "recallSummaries", { enumerable: true, get: function () { return recall_js_2.recallSummaries; } });
+var embedder_js_1 = require("./embedder.js");
+Object.defineProperty(exports, "TransformersEmbedder", { enumerable: true, get: function () { return embedder_js_1.TransformersEmbedder; } });
+Object.defineProperty(exports, "OpenAIEmbedder", { enumerable: true, get: function () { return embedder_js_1.OpenAIEmbedder; } });
+Object.defineProperty(exports, "GeminiEmbedder", { enumerable: true, get: function () { return embedder_js_1.GeminiEmbedder; } });
+const EMBEDDER_PROBE_TIMEOUT_MS = 15000;
 /**
  * Main MemG class providing memory operations and client wrapping.
  * Supports native in-process engine, proxy mode, and MCP client mode.
@@ -86,8 +124,10 @@ class MemG {
         this.embedder = null;
         this._mcpClient = null;
         this._initialized = false;
-        this.config = (0, config_1.resolveConfig)(opts);
-        this.engine = new search_1.HybridEngine();
+        this._consciousCache = new Map();
+        this._lastPruneAt = 0;
+        this.config = (0, config_js_1.resolveConfig)(opts);
+        this.engine = new search_js_1.HybridEngine();
         this._proxyUrl = opts?.proxyUrl ?? 'http://localhost:8787/v1';
     }
     /**
@@ -103,35 +143,44 @@ class MemG {
         else if (this.config.storeProvider === 'postgres') {
             if (!this.config.storeUrl)
                 throw new Error('storeUrl required for postgres');
-            const { PostgresStore } = require('./postgres_store');
+            const { PostgresStore } = await Promise.resolve().then(() => __importStar(require('./postgres_store.js')));
             this.store = await PostgresStore.create(this.config.storeUrl);
         }
         else if (this.config.storeProvider === 'mysql') {
             if (!this.config.storeUrl)
                 throw new Error('storeUrl required for mysql');
-            const { MySQLStore } = require('./mysql_store');
+            const { MySQLStore } = await Promise.resolve().then(() => __importStar(require('./mysql_store.js')));
             this.store = await MySQLStore.create(this.config.storeUrl);
         }
         else {
-            this.store = new store_1.MemGStore(this.config.dbPath);
+            this.store = new store_js_1.MemGStore(this.config.dbPath);
         }
-        if (this.config.embedProvider === 'gemini' && this.config.geminiApiKey) {
-            const { GeminiEmbedder } = require('./embedder');
+        if (this.config.embedProvider === 'gemini') {
+            if (!this.config.geminiApiKey) {
+                throw new Error('MemG native mode requires geminiApiKey when embedProvider="gemini".');
+            }
+            const { GeminiEmbedder } = await Promise.resolve().then(() => __importStar(require('./embedder.js')));
             this.embedder = new GeminiEmbedder(this.config.geminiApiKey, this.config.embedModel || 'text-embedding-004', this.config.embedDimension || 768);
         }
-        else if (this.config.embedProvider === 'openai' && this.config.openaiApiKey) {
-            const { OpenAIEmbedder } = require('./embedder');
+        else if (this.config.embedProvider === 'openai') {
+            if (!this.config.openaiApiKey) {
+                throw new Error('MemG native mode requires openaiApiKey when embedProvider="openai".');
+            }
+            const { OpenAIEmbedder } = await Promise.resolve().then(() => __importStar(require('./embedder.js')));
             this.embedder = new OpenAIEmbedder(this.config.openaiApiKey, this.config.embedModel || 'text-embedding-3-small', this.config.embedDimension || 1536);
         }
         else if (this.config.embedProvider === 'sentence-transformers') {
-            try {
-                const { TransformersEmbedder } = require('./embedder');
-                this.embedder = await TransformersEmbedder.create(this.config.embedModel || 'Xenova/all-MiniLM-L6-v2');
-            }
-            catch (err) {
-                console.warn('[memg] @huggingface/transformers not available, recall will use lexical-only search. Install it: npm i @huggingface/transformers');
-            }
+            const { TransformersEmbedder } = await Promise.resolve().then(() => __importStar(require('./embedder.js')));
+            this.embedder = await TransformersEmbedder.create(this.config.embedModel || 'Xenova/all-MiniLM-L6-v2');
         }
+        else {
+            throw new Error(`Unsupported embedProvider "${this.config.embedProvider}".`);
+        }
+        if (!this.embedder) {
+            throw new Error('MemG native mode requires a working embedder.');
+        }
+        await this.probeEmbedder(this.embedder);
+        this.config.embedDimension = this.embedder.dimension();
         this._initialized = true;
     }
     /**
@@ -142,7 +191,7 @@ class MemG {
      * @returns The wrapped client with the same type as the input.
      */
     static wrap(client, opts) {
-        const provider = (0, providers_1.detectProvider)(client);
+        const provider = (0, index_js_1.detectProvider)(client);
         const mergedOpts = {
             mode: 'native',
             proxyUrl: 'http://localhost:8787/v1',
@@ -151,16 +200,13 @@ class MemG {
             ...opts,
         };
         if (provider === 'openai') {
-            const { wrap } = require('./providers/openai');
-            return wrap(client, mergedOpts);
+            return (0, openai_js_1.wrap)(client, mergedOpts);
         }
         if (provider === 'anthropic') {
-            const { wrap } = require('./providers/anthropic');
-            return wrap(client, mergedOpts);
+            return (0, anthropic_js_1.wrap)(client, mergedOpts);
         }
         if (provider === 'gemini') {
-            const { wrap } = require('./providers/gemini');
-            return wrap(client, mergedOpts);
+            return (0, gemini_js_1.wrap)(client, mergedOpts);
         }
         throw new Error(`Unsupported client type: ${client?.constructor?.name}. Supported: OpenAI, Anthropic, Gemini`);
     }
@@ -200,7 +246,7 @@ class MemG {
         let inserted = 0;
         let reinforced = 0;
         for (const mem of memories) {
-            const contentKey = (0, store_1.defaultContentKey)(mem.content);
+            const contentKey = (0, store_js_1.defaultContentKey)(mem.content);
             const existing = await this.store.findFactByKey(entityUuid, contentKey);
             if (existing) {
                 await this.store.reinforceFact(existing.uuid, existing.expiresAt ?? null);
@@ -244,14 +290,11 @@ class MemG {
      */
     async search(entityId, query, limit) {
         this.ensureInitialized();
+        const embedder = this.requireEmbedder();
         const entity = await this.store.lookupEntity(entityId);
         if (!entity)
             return { memories: [], count: 0 };
-        if (!this.embedder) {
-            console.warn('[memg] no embedder available, search requires embeddings');
-            return { memories: [], count: 0 };
-        }
-        const recalled = await (0, recall_1.recallFacts)(this.store, this.engine, this.embedder, query, entity.uuid, limit ?? this.config.recallLimit, this.config.recallThreshold, this.config.maxRecallCandidates);
+        const recalled = await (0, recall_js_1.recallFacts)(this.store, this.engine, embedder, query, entity.uuid, limit ?? this.config.recallLimit, this.config.recallThreshold, this.config.maxRecallCandidates);
         const memories = recalled.map((r) => ({
             id: r.id,
             content: r.content,
@@ -330,10 +373,40 @@ class MemG {
         const provider = opts?.provider ?? this.config.llmProvider;
         const model = opts?.model ?? this.config.llmModel;
         const maxTokens = opts?.maxTokens ?? 4096;
-        // Build memory context.
-        const memoryContext = await this.buildMemoryContext(entityId, extractLastUser(messages) ?? '');
-        // Inject context into messages.
+        const entityUuid = await this.store.upsertEntity(entityId);
+        let sessionUuid = '';
+        let conversationUuid = '';
+        if (this.config.sessionTimeout > 0) {
+            try {
+                const { session, isNew } = await (0, session_js_1.ensureSession)(this.store, entityUuid, 'default', this.config.sessionTimeout);
+                sessionUuid = session.uuid;
+                conversationUuid = await (0, session_js_1.ensureConversation)(this.store, sessionUuid, entityUuid);
+                if (isNew) {
+                    this.summarizeClosedConversation(entityUuid, sessionUuid).catch(() => { });
+                }
+            }
+            catch {
+            }
+        }
+        let retrievalMessages = [...messages];
+        if (sessionUuid) {
+            try {
+                const history = await (0, session_js_1.loadRecentHistory)(this.store, sessionUuid, this.config.workingMemoryTurns);
+                if (history.length > 0) {
+                    const historyMsgs = history.map((h) => ({ role: h.role, content: h.content }));
+                    retrievalMessages = [...historyMsgs, ...messages];
+                }
+            }
+            catch {
+            }
+        }
+        const queryText = extractLastUser(retrievalMessages) ?? '';
+        const memoryContext = await this.buildMemoryContext(entityId, queryText);
         let augmented = [...messages];
+        if (sessionUuid && retrievalMessages.length > messages.length) {
+            const historyOnly = retrievalMessages.slice(0, retrievalMessages.length - messages.length);
+            augmented = [...historyOnly, ...messages];
+        }
         if (memoryContext) {
             const sysIdx = augmented.findIndex((m) => m.role === 'system');
             if (sysIdx >= 0) {
@@ -349,8 +422,19 @@ class MemG {
             throw new Error(`No API key for provider "${provider}". Set openaiApiKey, geminiApiKey, or ANTHROPIC_API_KEY.`);
         }
         const content = await chatCallLLM(apiKey, model, augmented, provider, maxTokens);
-        // Background extraction (fire-and-forget).
-        const extractMessages = messages
+        if (conversationUuid) {
+            const userText = extractLastUser(messages) ?? '';
+            Promise.resolve().then(async () => {
+                try {
+                    if (userText)
+                        await (0, session_js_1.saveUserMessage)(this.store, conversationUuid, userText);
+                    if (content)
+                        await (0, session_js_1.saveAssistantMessage)(this.store, conversationUuid, content);
+                }
+                catch { /* never block on save failure */ }
+            });
+        }
+        const extractMessages = retrievalMessages
             .filter((m) => m.role === 'user' || m.role === 'assistant')
             .map((m) => ({ role: m.role, content: m.content }));
         if (content) {
@@ -395,35 +479,31 @@ class MemG {
      */
     async buildMemoryContext(entityId, queryText) {
         this.ensureInitialized();
+        const embedder = this.requireEmbedder();
         const entity = await this.store.lookupEntity(entityId);
         if (!entity)
             return '';
+        this.backfillMissingEmbeddings(entity.uuid).catch(() => { });
+        this.pruneIfDue(entity.uuid);
         let consciousFacts = [];
         let recalledFactsList = [];
         let summaries = [];
-        // Load conscious facts if enabled.
         if (this.config.consciousMode) {
-            consciousFacts = await this.loadConsciousFacts(entity.uuid, this.config.consciousLimit);
+            consciousFacts = await this.loadConsciousFactsCached(entity.uuid, this.config.consciousLimit);
         }
-        // Recall facts and summaries if embedder is available.
-        if (this.embedder && queryText) {
-            try {
-                const [recalled, recalledSums] = await Promise.all([
-                    (0, recall_1.recallFacts)(this.store, this.engine, this.embedder, queryText, entity.uuid, this.config.recallLimit, this.config.recallThreshold, this.config.maxRecallCandidates),
-                    (0, recall_1.recallSummaries)(this.store, this.engine, this.embedder, queryText, entity.uuid, 10, this.config.recallThreshold),
-                ]);
-                recalledFactsList = recalled;
-                summaries = recalledSums;
-                // Track recall usage.
-                if (recalled.length > 0) {
-                    await this.store.updateRecallUsage(recalled.map((r) => r.id));
-                }
-            }
-            catch (err) {
-                console.warn('[memg] recall failed:', err);
+        if (queryText) {
+            const [recalled, recalledSums] = await Promise.all([
+                (0, recall_js_1.recallFacts)(this.store, this.engine, embedder, queryText, entity.uuid, this.config.recallLimit, this.config.recallThreshold, this.config.maxRecallCandidates),
+                (0, recall_js_1.recallSummaries)(this.store, this.engine, embedder, queryText, entity.uuid, 10, this.config.recallThreshold),
+            ]);
+            recalledFactsList = recalled;
+            summaries = recalledSums;
+            // Track recall usage.
+            if (recalled.length > 0) {
+                await this.store.updateRecallUsage(recalled.map((r) => r.id));
             }
         }
-        return (0, context_1.buildContext)({
+        return (0, context_js_1.buildContext)({
             consciousFacts,
             recalledFacts: recalledFactsList,
             summaries,
@@ -446,7 +526,7 @@ class MemG {
             return;
         try {
             const entityUuid = await this.store.upsertEntity(entityId);
-            await (0, extract_1.runExtraction)(this.store, this.embedder, messages, entityUuid, apiKey, this.config.llmModel, this.config.llmProvider);
+            await (0, extract_js_1.runExtraction)(this.store, this.embedder, messages, entityUuid, apiKey, this.config.llmModel, this.config.llmProvider);
         }
         catch (err) {
             console.warn('[memg] extraction failed:', err);
@@ -529,9 +609,133 @@ class MemG {
             tag: s.fact.tag,
         }));
     }
+    /**
+     * Backfill embeddings for facts that were stored without them (e.g., embedder was down).
+     * Runs in the background — does not block recall.
+     */
+    async backfillMissingEmbeddings(entityUuid) {
+        const unembedded = await this.store.listUnembeddedFacts(entityUuid, 50);
+        if (unembedded.length === 0)
+            return;
+        const contents = unembedded.map((f) => f.content);
+        let embeddings;
+        try {
+            embeddings = await this.embedder.embed(contents);
+        }
+        catch {
+            return;
+        }
+        const model = this.embedder.modelName();
+        for (let i = 0; i < embeddings.length && i < unembedded.length; i++) {
+            try {
+                await this.store.updateFactEmbedding(unembedded[i].uuid, embeddings[i], model);
+            }
+            catch {
+            }
+        }
+    }
+    /**
+     * Summarize the most recent unsummarized conversation when a new session starts.
+     * Matches Go's summarizeClosedSession behavior.
+     */
+    async summarizeClosedConversation(entityUuid, currentSessionUuid) {
+        const apiKey = this.resolveExtractionApiKey();
+        if (!apiKey)
+            return;
+        const conv = await this.store.findUnsummarizedConversation(entityUuid, currentSessionUuid);
+        if (!conv || conv.summary)
+            return;
+        await this.generateAndStoreSummary(conv.uuid, apiKey);
+    }
+    /**
+     * Generate a summary for a conversation and store it with its embedding.
+     */
+    async generateAndStoreSummary(conversationUuid, apiKey) {
+        const messages = await this.store.readMessages(conversationUuid);
+        if (messages.length === 0)
+            return;
+        const transcript = messages.map((m) => `${m.role}: ${m.content}`).join('\n');
+        const summaryPrompt = `Summarize this conversation. Focus on:
+- What was discussed
+- What decisions were made
+- What is still pending or unresolved
+- Any new information learned about the user
+
+Be concise — 2-5 sentences. Only include what is meaningful and worth remembering.
+If the conversation contains no meaningful content worth remembering (e.g. just greetings or trivial exchanges), respond with exactly: NONE`;
+        const { callLLM } = await Promise.resolve().then(() => __importStar(require('./extract.js')));
+        let summary;
+        try {
+            summary = await callLLM(apiKey, this.config.llmModel, summaryPrompt, transcript, this.config.llmProvider);
+        }
+        catch {
+            return;
+        }
+        summary = summary.trim();
+        if (!summary || summary.toUpperCase() === 'NONE')
+            return;
+        let embedding = [];
+        if (this.embedder) {
+            try {
+                const [vec] = await this.embedder.embed([summary]);
+                embedding = vec;
+            }
+            catch {
+            }
+        }
+        await this.store.updateConversationSummary(conversationUuid, summary, embedding);
+    }
+    async loadConsciousFactsCached(entityUuid, limit) {
+        const now = Date.now();
+        const cached = this._consciousCache.get(entityUuid);
+        if (cached && cached.expiresAt > now)
+            return cached.facts;
+        const facts = await this.loadConsciousFacts(entityUuid, limit);
+        this._consciousCache.set(entityUuid, { facts, expiresAt: now + 30000 });
+        return facts;
+    }
+    pruneIfDue(entityUuid) {
+        const now = Date.now();
+        if (now - this._lastPruneAt < 300000)
+            return; // 5 min interval
+        this._lastPruneAt = now;
+        const nowISO = new Date().toISOString();
+        Promise.resolve(this.store.pruneExpiredFacts(entityUuid, nowISO)).catch(() => { });
+    }
     ensureInitialized() {
         if (!this._initialized || !this.store) {
             throw new Error('MemG not initialized. Call await memg.init() first.');
+        }
+    }
+    requireEmbedder() {
+        if (!this.embedder) {
+            throw new Error('MemG native mode requires a healthy embedder for memory recall.');
+        }
+        return this.embedder;
+    }
+    async probeEmbedder(embedder) {
+        const timeout = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('embedder health check timed out')), EMBEDDER_PROBE_TIMEOUT_MS);
+        });
+        const vectors = await Promise.race([
+            embedder.embed(['memg-healthcheck']),
+            timeout,
+        ]);
+        if (!Array.isArray(vectors) || vectors.length !== 1) {
+            throw new Error(`embedder health check returned ${Array.isArray(vectors) ? vectors.length : 0} vectors`);
+        }
+        const vector = vectors[0];
+        if (!Array.isArray(vector) || vector.length === 0) {
+            throw new Error('embedder health check returned an empty vector');
+        }
+        const expectedDim = embedder.dimension();
+        if (expectedDim > 0 && vector.length !== expectedDim) {
+            throw new Error(`embedder health check dimension mismatch: got ${vector.length}, want ${expectedDim}`);
+        }
+        for (let i = 0; i < vector.length; i++) {
+            if (!Number.isFinite(vector[i])) {
+                throw new Error(`embedder health check returned invalid value at index ${i}`);
+            }
         }
     }
 }

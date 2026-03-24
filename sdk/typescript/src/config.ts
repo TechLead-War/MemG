@@ -3,7 +3,7 @@
  * All values match the Go DefaultConfig().
  */
 
-import type { NativeConfig } from './types';
+import type { NativeConfig } from './types.js';
 
 export const DEFAULT_CONFIG: Required<NativeConfig> = {
   store: undefined as any,

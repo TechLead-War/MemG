@@ -29,7 +29,9 @@ export class TransformersEmbedder implements Embedder {
   ): Promise<TransformersEmbedder> {
     let transformers: any;
     try {
-      transformers = require('@huggingface/transformers');
+      const mod = '@huggingface/transformers';
+      transformers = await import(mod);
+      transformers = transformers.default ?? transformers;
     } catch {
       throw new Error(
         'TransformersEmbedder requires @huggingface/transformers. Install it: npm i @huggingface/transformers'
