@@ -22,6 +22,8 @@ func main() {
 		runProxy(os.Args[2:])
 	case "mcp":
 		runMCP(os.Args[2:])
+	case "bench":
+		runBench(os.Args[2:])
 	case "version":
 		fmt.Printf("memg v%s\n", version)
 	case "help":
@@ -42,6 +44,7 @@ func printUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  proxy      Start the memory-augmenting reverse proxy")
 	fmt.Println("  mcp        Start the MCP (Model Context Protocol) server")
+	fmt.Println("  bench      Run the LoCoMo memory benchmark")
 	fmt.Println("  version    Print the current version")
 	fmt.Println("  help       Show this help message")
 }
