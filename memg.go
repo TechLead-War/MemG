@@ -330,7 +330,7 @@ func (g *MemG) Chat(ctx context.Context, messages []*llm.Message, opts ...any) (
 			}
 			ctxInput.RecalledFacts = facts
 
-			summaries, err := memory.RecallSummariesWithVector(ctx, g.engine, g.repo, queryVec, q, entityUUID, 5, g.cfg.RecallThreshold)
+			summaries, err := memory.RecallSummariesWithVector(ctx, g.engine, g.repo, queryVec, queryModel, q, entityUUID, 5, g.cfg.RecallThreshold)
 			if err != nil {
 				return nil, fmt.Errorf("memg: recall summaries: %w", err)
 			}
@@ -472,7 +472,7 @@ func (g *MemG) Stream(ctx context.Context, messages []*llm.Message, opts ...any)
 			}
 			ctxInput.RecalledFacts = facts
 
-			summaries, err := memory.RecallSummariesWithVector(ctx, g.engine, g.repo, queryVec, q, entityUUID, 5, g.cfg.RecallThreshold)
+			summaries, err := memory.RecallSummariesWithVector(ctx, g.engine, g.repo, queryVec, queryModel, q, entityUUID, 5, g.cfg.RecallThreshold)
 			if err != nil {
 				return nil, fmt.Errorf("memg: recall summaries: %w", err)
 			}

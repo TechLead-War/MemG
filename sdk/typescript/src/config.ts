@@ -17,9 +17,9 @@ export const DEFAULT_CONFIG: Required<NativeConfig> = {
   llmModel: 'gpt-4o-mini',
   recallLimit: 100,
   recallThreshold: 0.10,
-  maxRecallCandidates: 10000,
+  maxRecallCandidates: 50,
   sessionTimeout: 30 * 60 * 1000, // 30 minutes in ms
-  workingMemoryTurns: 20,
+  workingMemoryTurns: 10,
   memoryTokenBudget: 4000,
   summaryTokenBudget: 1000,
   consciousMode: true,

@@ -90,6 +90,8 @@ class Session:
     process_id: str = ""
     created_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
+    entity_mentions: List[str] = field(default_factory=list)
+    message_count: int = 0
 
 
 @dataclass
@@ -101,6 +103,7 @@ class Conversation:
     entity_id: str = ""
     summary: str = ""
     summary_embedding: Optional[List[float]] = None
+    summary_embedding_model: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -125,10 +128,14 @@ class FactFilter:
     statuses: Optional[List[str]] = None
     tags: Optional[List[str]] = None
     min_significance: int = 0
+    max_significance: int = 0
     exclude_expired: bool = False
+    reference_time_after: Optional[str] = None
+    reference_time_before: Optional[str] = None
     slots: Optional[List[str]] = None
     min_confidence: float = 0.0
     source_roles: Optional[List[str]] = None
+    unembedded_only: bool = False
 
 
 @dataclass
@@ -154,10 +161,71 @@ class ConsciousFact:
 
 
 @dataclass
+class TurnSummary:
+    """A summary covering a range of turns in a conversation."""
+
+    uuid: str
+    conversation_id: str
+    entity_id: str
+    start_turn: int
+    end_turn: int
+    summary: str
+    summary_embedding: Optional[List[float]] = None
+    is_overview: bool = False
+    created_at: Optional[datetime] = None
+
+
+@dataclass
+class Artifact:
+    """A produced artifact (code, JSON, SQL, etc.) within a conversation."""
+
+    uuid: str
+    conversation_id: str
+    entity_id: str
+    content: str
+    artifact_type: str = "code"
+    language: str = ""
+    description: str = ""
+    description_embedding: Optional[List[float]] = None
+    superseded_by: Optional[str] = None
+    turn_number: int = 0
+    created_at: Optional[datetime] = None
+
+
+@dataclass
 class RecalledSummary:
     """A past conversation summary that matched a recall query."""
 
     conversation_id: str
     summary: str
     score: float
+    created_at: Optional[datetime] = None
+
+
+@dataclass
+class CanonicalSlot:
+    """A globally shared slot name with its embedding vector."""
+
+    name: str
+    embedding: Optional[List[float]] = None
+    created_at: Optional[datetime] = None
+
+
+@dataclass
+class Process:
+    """A tracked process identity."""
+
+    uuid: str
+    external_id: str
+    created_at: Optional[datetime] = None
+
+
+@dataclass
+class Attribute:
+    """A key-value pair associated with a process."""
+
+    uuid: str
+    process_id: str
+    key: str
+    value: str
     created_at: Optional[datetime] = None

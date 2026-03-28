@@ -37,6 +37,13 @@ func GenerateAndStoreSummary(
 		return nil
 	}
 
+	// Limit to the last 100 messages to avoid sending unbounded transcripts
+	// to the LLM. Older context is already captured in prior summaries.
+	const maxMessages = 100
+	if len(msgs) > maxMessages {
+		msgs = msgs[len(msgs)-maxMessages:]
+	}
+
 	var transcript strings.Builder
 	for _, m := range msgs {
 		transcript.WriteString(m.Role)
@@ -72,7 +79,8 @@ func GenerateAndStoreSummary(
 		return nil
 	}
 
-	if err := repo.UpdateConversationSummary(ctx, conversationUUID, summary, vectors[0]); err != nil {
+	modelName := embed.ModelNameOf(embedder)
+	if err := repo.UpdateConversationSummary(ctx, conversationUUID, summary, vectors[0], modelName); err != nil {
 		return fmt.Errorf("summary: store: %w", err)
 	}
 

@@ -56,6 +56,16 @@ func (cc *ConsciousCache) Set(entityUUID string, facts []*ConsciousFact) {
 		facts:     facts,
 		fetchedAt: time.Now(),
 	}
+
+	// Evict stale entries when the cache grows too large.
+	if len(cc.entries) > 1000 {
+		now := time.Now()
+		for k, e := range cc.entries {
+			if now.Sub(e.fetchedAt) > cc.ttl {
+				delete(cc.entries, k)
+			}
+		}
+	}
 }
 
 // Invalidate removes the cache entry for the entity. Call this when

@@ -23,6 +23,26 @@ MemG intercepts LLM calls to automatically inject relevant recalled facts from s
 - **Local embeddings** — in-process ONNX Runtime (no Python, no external services) or legacy Python gRPC service, both with zero API keys
 - **API key management** — per-provider config with env var fallback
 
+## Install SDKs
+
+```bash
+# Python
+pip install memg-sdk
+
+# TypeScript / Node.js
+npm install memg-core-js
+```
+
+## Publish SDKs
+
+```bash
+# PyPI
+cd sdk/python && python -m build && twine upload dist/*
+
+# npm
+cd sdk/typescript && npm run build && npm publish
+```
+
 ## Quick Start (Proxy — Any Language, Zero Code Changes)
 
 The fastest way to use MemG. Start the proxy, set one env var, and your existing app gets persistent memory.
@@ -69,6 +89,7 @@ memg proxy --help
   --entity user-123        # single-entity mode
   --db ~/.memg/memory.db   # database path (default: ~/.memg/memory.db)
   --embed-provider openai  # embedding provider (default: openai)
+  --embed-model ...        # embedding model (default: provider default)
   --llm-provider openai    # extraction LLM (default: openai)
   --llm-model gpt-4o-mini  # cheaper model for extraction
   --debug                  # verbose logging
@@ -236,10 +257,10 @@ Select a provider by name with `WithLLMProvider`. Import the provider package to
 | Google Gemini | `gemini` | gemini-2.5-flash | `GEMINI_API_KEY` | `_ "memg/llm/gemini"` |
 | Ollama (local) | `ollama` | (user specified) | none | `_ "memg/llm/ollama"` |
 | Azure OpenAI | `azureopenai` | (user specified) | `AZURE_OPENAI_API_KEY` | `_ "memg/llm/azureopenai"` |
-| AWS Bedrock | `bedrock` | claude-sonnet on Bedrock | `AWS_ACCESS_KEY_ID` | `_ "memg/llm/bedrock"` |
+| AWS Bedrock | `bedrock` | anthropic.claude-sonnet-4-20250514-v1:0 | `AWS_ACCESS_KEY_ID` | `_ "memg/llm/bedrock"` |
 | DeepSeek | `deepseek` | deepseek-chat | `DEEPSEEK_API_KEY` | `_ "memg/llm/deepseek"` |
 | Groq | `groq` | llama-3.3-70b-versatile | `GROQ_API_KEY` | `_ "memg/llm/groq"` |
-| Together AI | `togetherai` | Meta-Llama-3.1-8B-Instruct-Turbo | `TOGETHER_API_KEY` | `_ "memg/llm/togetherai"` |
+| Together AI | `togetherai` | meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo | `TOGETHER_API_KEY` | `_ "memg/llm/togetherai"` |
 | xAI | `xai` | grok-3 | `XAI_API_KEY` | `_ "memg/llm/xai"` |
 
 API keys are resolved in order: explicit `ProviderConfig.APIKey` field, then the environment variable, then error.
@@ -251,10 +272,10 @@ API keys are resolved in order: explicit `ProviderConfig.APIKey` field, then the
 | OpenAI | `openai` | text-embedding-3-small | 1536 | `OPENAI_API_KEY` | `_ "memg/embed/openai"` |
 | Google Gemini | `gemini` | text-embedding-004 | 768 | `GEMINI_API_KEY` | `_ "memg/embed/gemini"` |
 | Ollama (local) | `ollama` | (user specified) | (user specified) | none | `_ "memg/embed/ollama"` |
-| HuggingFace | `huggingface` | all-MiniLM-L6-v2 | 384 | `HF_API_KEY` | `_ "memg/embed/huggingface"` |
+| HuggingFace | `huggingface` | sentence-transformers/all-MiniLM-L6-v2 | 384 | `HF_API_KEY` | `_ "memg/embed/huggingface"` |
 | Azure OpenAI | `azureopenai` | (user specified) | (user specified) | `AZURE_OPENAI_API_KEY` | `_ "memg/embed/azureopenai"` |
-| AWS Bedrock | `bedrock` | titan-embed-text-v2 | 1024 | `AWS_ACCESS_KEY_ID` | `_ "memg/embed/bedrock"` |
-| Together AI | `togetherai` | m2-bert-80M-8k-retrieval | 768 | `TOGETHER_API_KEY` | `_ "memg/embed/togetherai"` |
+| AWS Bedrock | `bedrock` | amazon.titan-embed-text-v2:0 | 1024 | `AWS_ACCESS_KEY_ID` | `_ "memg/embed/bedrock"` |
+| Together AI | `togetherai` | togethercomputer/m2-bert-80M-8k-retrieval | 768 | `TOGETHER_API_KEY` | `_ "memg/embed/togetherai"` |
 | Cohere | `cohere` | embed-english-v3.0 | 1024 | `COHERE_API_KEY` | `_ "memg/embed/cohere"` |
 | VoyageAI | `voyageai` | voyage-3 | 1024 | `VOYAGE_API_KEY` | `_ "memg/embed/voyageai"` |
 | ONNX Runtime | `onnx` | all-MiniLM-L6-v2 | 384 | none | `_ "memg/embed/onnx"` |
@@ -458,7 +479,9 @@ Create `memg.json` in your working directory, or `~/.memg/config.json` for globa
 
   "recall": {
     "limit": 100,
-    "threshold": 0.10
+    "threshold": 0.10,
+    "summary_limit": 5,
+    "summary_threshold": 0.30
   },
 
   "session": {
@@ -475,6 +498,8 @@ Create `memg.json` in your working directory, or `~/.memg/config.json` for globa
   },
 
   "conscious": true,
+  "conscious_limit": 10,
+  "conscious_cache_ttl": "30s",
   "prune_interval": "5m",
   "debug": false
 }
@@ -499,13 +524,15 @@ memg proxy
 |---|---|
 | `MEMG_LLM_PROVIDER` | LLM provider name (e.g. `openai`, `anthropic`) |
 | `MEMG_EMBED_PROVIDER` | Embedding provider name (e.g. `openai`, `local`) |
-| `MEMG_RECALL_FACTS_LIMIT` | Max facts per recall query |
-| `MEMG_RECALL_THRESHOLD` | Minimum relevance score |
+| `MEMG_RECALL_FACTS_LIMIT` | Max facts per recall query (default: 100) |
+| `MEMG_RECALL_EMBEDDINGS_LIMIT` | Max stored embeddings loaded per recall pass (default: 100000) |
+| `MEMG_RECALL_THRESHOLD` | Minimum relevance score (default: 0.10) |
 | `MEMG_SESSION_TIMEOUT` | Session timeout duration (e.g. `30m`) |
-| `MEMG_WORKING_MEMORY_TURNS` | Max recent conversation turns loaded (default: 20) |
+| `MEMG_WORKING_MEMORY_TURNS` | Max recent conversation turns loaded (library default: 10, proxy default: 20) |
 | `MEMG_MEMORY_TOKEN_BUDGET` | Total token budget for injected memory (default: 4000) |
 | `MEMG_SUMMARY_TOKEN_BUDGET` | Token budget for summary section (default: 1000) |
-| `MEMG_MAX_RECALL_CANDIDATES` | Safety cap on facts loaded per recall (default: 10000) |
+| `MEMG_MAX_RECALL_CANDIDATES` | Safety cap on facts loaded per recall (library default: 50, proxy default: 500) |
+| `MEMG_CONSCIOUS_CACHE_TTL` | Conscious facts cache lifetime (default: `30s`) |
 | `MEMG_DEBUG` | Enable debug logging (`1` or `true`) |
 
 Provider-specific API keys use their standard env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.).
@@ -524,10 +551,10 @@ memg.New(repo,
     memg.WithPruneInterval(5 * time.Minute),
     memg.WithConsciousMode(true),
     memg.WithConsciousLimit(10),
-    memg.WithWorkingMemoryTurns(20),
+    memg.WithWorkingMemoryTurns(10),
     memg.WithMemoryTokenBudget(4000),
     memg.WithSummaryTokenBudget(1000),
-    memg.WithMaxRecallCandidates(10000),
+    memg.WithMaxRecallCandidates(50),
     memg.WithEmbedDimension(384),
     memg.WithDebug(),
 )
@@ -567,9 +594,11 @@ Any app (Python, Node.js, Go, curl, ...)
 ┌──────────────────────────────────────────────────────────────┐
 │   MemG Proxy (:8787)                                        │
 │                                                              │
-│   /v1/chat/completions  → intercept (inject memory)         │
-│   /v1/messages          → intercept (Anthropic format)      │
-│   /v1/models, /v1/files → pass through untouched            │
+│   /v1/chat/completions      → intercept (OpenAI format)     │
+│   /v1/messages              → intercept (Anthropic format)  │
+│   :generateContent          → intercept (Gemini format)     │
+│   :streamGenerateContent    → intercept (Gemini streaming)  │
+│   /v1/models, /v1/files,... → pass through untouched        │
 │                                                              │
 │   ┌──────────┐  ┌──────────┐  ┌─────────┐  ┌─────────────┐ │
 │   │ Recall   │  │ Summary  │  │ Augment │  │ Built-in    │ │

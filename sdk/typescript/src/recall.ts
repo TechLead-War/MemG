@@ -18,6 +18,8 @@ import type {
   RecalledSummary,
 } from './types.js';
 
+const _backfillInProgress = new Set<string>();
+
 /**
  * Recall facts for an entity using hybrid search.
  */
@@ -70,7 +72,8 @@ export async function recallFactsWithVector(
   limit: number,
   threshold: number,
   maxCandidates: number,
-  filter?: FactFilter
+  filter?: FactFilter,
+  embedder?: Embedder
 ): Promise<RecalledFact[]> {
   if (queryVec.length === 0) return [];
 
@@ -79,13 +82,37 @@ export async function recallFactsWithVector(
     excludeExpired: true,
   };
 
-  if (maxCandidates <= 0) maxCandidates = 10000;
+  if (maxCandidates <= 0) maxCandidates = 50;
 
   const facts = await store.listFactsForRecall(entityUuid, effectiveFilter, maxCandidates);
   if (facts.length === 0) return [];
 
+  // Detect facts with NULL embeddings for background backfill.
+  const hasUnembedded = facts.some((f) => !f.embedding || f.embedding.length === 0);
+
   const candidates = buildRecallCandidates(queryVec, queryModel, facts);
   const results = engine.rank(queryVec, queryText, candidates, limit, threshold);
+
+  // Trigger background backfill for facts stored during embedding outages.
+  if (hasUnembedded && embedder && store.listUnembeddedFacts && store.updateFactEmbedding && !_backfillInProgress.has(entityUuid)) {
+    _backfillInProgress.add(entityUuid);
+    void (async () => {
+      try {
+        const unembedded = await store.listUnembeddedFacts(entityUuid, 50);
+        if (unembedded.length === 0) return;
+        const contents = unembedded.map((f) => f.content);
+        const vectors = await embedder.embed(contents);
+        const modelName = embedder.modelName();
+        for (let i = 0; i < Math.min(vectors.length, unembedded.length); i++) {
+          await store.updateFactEmbedding(unembedded[i].uuid, vectors[i], modelName);
+        }
+      } catch (e) {
+        console.warn('memg: background backfill failed:', e);
+      } finally {
+        _backfillInProgress.delete(entityUuid);
+      }
+    })();
+  }
 
   return results.map((r) => ({
     id: r.id,
@@ -124,7 +151,8 @@ export async function recallSummaries(
     queryText,
     entityUuid,
     limit,
-    threshold
+    threshold,
+    embedder.modelName()
   );
 }
 
@@ -138,16 +166,23 @@ export async function recallSummariesWithVector(
   queryText: string,
   entityUuid: string,
   limit: number,
-  threshold: number
+  threshold: number,
+  queryModel: string = ''
 ): Promise<RecalledSummary[]> {
   if (queryVec.length === 0) return [];
 
-  const convs = await store.listConversationSummaries(entityUuid, 0);
+  const convs = await store.listConversationSummaries(entityUuid, 100);
   if (convs.length === 0) return [];
 
   const candidates: SearchCandidate[] = convs.map((c) => {
     let embedding = c.summaryEmbedding;
     if (queryVec.length > 0 && !dimensionMatch(queryVec, embedding)) {
+      embedding = undefined;
+    } else if (
+      queryModel &&
+      c.summaryEmbeddingModel &&
+      c.summaryEmbeddingModel !== queryModel
+    ) {
       embedding = undefined;
     }
     return {

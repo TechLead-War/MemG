@@ -12,17 +12,17 @@ class MemGConfig:
 
     store_provider: str = "sqlite"  # sqlite, postgres, mysql
     store_url: str = ""  # connection string for postgres/mysql
-    db_path: str = "~/.memg/memory.db"
+    db_path: str = "memg.db"
     embed_provider: str = "sentence-transformers"
-    embed_model: str = "all-MiniLM-L6-v2"
+    embed_model: str = "Xenova/all-MiniLM-L6-v2"
     embed_dimension: int = 384
     llm_provider: str = "openai"
     llm_model: str = "gpt-4o-mini"
     recall_limit: int = 100
     recall_threshold: float = 0.10
-    max_recall_candidates: int = 10000
+    max_recall_candidates: int = 50
     session_timeout: int = 1800  # 30 minutes in seconds
-    working_memory_turns: int = 20
+    working_memory_turns: int = 10
     memory_token_budget: int = 4000
     summary_token_budget: int = 1000
     conscious_mode: bool = True

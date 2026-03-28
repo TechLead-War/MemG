@@ -1,8 +1,11 @@
 package memory
 
 import (
+	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"memg/store"
 )
 
 // ContextBudget controls how tokens are allocated across memory categories.
@@ -16,6 +19,8 @@ type ContextInput struct {
 	ConsciousFacts []*ConsciousFact
 	RecalledFacts  []*RecalledFact
 	Summaries      []*RecalledSummary
+	TurnSummaries  []*store.TurnSummary
+	Artifacts      []*store.Artifact
 	Budget         ContextBudget
 }
 
@@ -55,7 +60,37 @@ func BuildContext(input ContextInput) string {
 		}
 	}
 
-	// 2. Recalled facts (medium priority) — dedup against conscious.
+	// 2. Session context (turn summaries).
+	if len(input.TurnSummaries) > 0 {
+		var tsSection strings.Builder
+		tsSection.WriteString("\nSession context:\n")
+		headerTokens := estimateTokens(tsSection.String())
+		sectionTokens := headerTokens
+		any := false
+
+		for _, ts := range input.TurnSummaries {
+			var line string
+			if ts.IsOverview {
+				line = "- [Overview] " + ts.Summary + "\n"
+			} else {
+				line = fmt.Sprintf("- [Turns %d-%d] %s\n", ts.StartTurn, ts.EndTurn, ts.Summary)
+			}
+			est := estimateTokens(line)
+			if tokensUsed+sectionTokens+est > budget {
+				break
+			}
+			tsSection.WriteString(line)
+			sectionTokens += est
+			any = true
+		}
+
+		if any {
+			b.WriteString(tsSection.String())
+			tokensUsed += sectionTokens
+		}
+	}
+
+	// 3. Recalled facts (medium priority) — dedup against conscious.
 	if len(input.RecalledFacts) > 0 {
 		var factsSection strings.Builder
 		factsSection.WriteString("\nRelevant context from memory:\n")
@@ -89,7 +124,56 @@ func BuildContext(input ContextInput) string {
 		}
 	}
 
-	// 3. Summaries (lowest priority, own sub-budget).
+	// 4. Relevant code/data (artifacts).
+	if len(input.Artifacts) > 0 {
+		var artSection strings.Builder
+		artSection.WriteString("\nRelevant code/data:\n")
+		headerTokens := estimateTokens(artSection.String())
+		sectionTokens := headerTokens
+		any := false
+
+		for _, a := range input.Artifacts {
+			var line strings.Builder
+			line.WriteString("- [")
+			line.WriteString(a.ArtifactType)
+			if a.Language != "" {
+				line.WriteByte(':')
+				line.WriteString(a.Language)
+			}
+			line.WriteString("] ")
+			line.WriteString(a.Description)
+			line.WriteByte('\n')
+			if a.ArtifactType == "code" && a.Language != "" {
+				line.WriteString("  ```")
+				line.WriteString(a.Language)
+				line.WriteByte('\n')
+				line.WriteString("  ")
+				line.WriteString(a.Content)
+				line.WriteByte('\n')
+				line.WriteString("  ```\n")
+			} else {
+				line.WriteString("  ")
+				line.WriteString(a.Content)
+				line.WriteByte('\n')
+			}
+
+			entry := line.String()
+			est := estimateTokens(entry)
+			if tokensUsed+sectionTokens+est > budget {
+				break
+			}
+			artSection.WriteString(entry)
+			sectionTokens += est
+			any = true
+		}
+
+		if any {
+			b.WriteString(artSection.String())
+			tokensUsed += sectionTokens
+		}
+	}
+
+	// 5. Summaries (lowest priority, own sub-budget).
 	if len(input.Summaries) > 0 {
 		effectiveBudget := summaryBudget
 		remaining := budget - tokensUsed
@@ -127,6 +211,25 @@ func BuildContext(input ContextInput) string {
 	}
 
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// AdaptiveWindowSize calculates how many recent messages to load based on
+// remaining token budget after other context components.
+func AdaptiveWindowSize(totalBudget, usedTokens, defaultTurns int) int {
+	remaining := totalBudget - usedTokens
+	floorTokens := 800
+	if remaining < floorTokens {
+		remaining = floorTokens
+	}
+	avgTokensPerMsg := 200
+	maxMsgs := remaining / avgTokensPerMsg
+	if maxMsgs > defaultTurns {
+		maxMsgs = defaultTurns
+	}
+	if maxMsgs < floorTokens/avgTokensPerMsg {
+		maxMsgs = floorTokens / avgTokensPerMsg
+	}
+	return maxMsgs
 }
 
 // normalizeForDedup strips common prefixes and normalizes casing for more

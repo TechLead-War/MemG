@@ -12,6 +12,7 @@ coverage.txt
 
 # Dependency cache
 vendor/
+node_modules/
 
 # IDE
 .idea/

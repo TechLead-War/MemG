@@ -5,6 +5,8 @@ package memory
 import (
 	"context"
 	"log"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"memg/embed"
@@ -15,6 +17,9 @@ import (
 // RecallWithVector is like Recall but accepts a pre-computed query vector
 // instead of embedding the query text. This avoids redundant embedding calls
 // when the same query is used for both fact and summary recall.
+//
+// If an embedder is provided via RecallOpts, facts with NULL embeddings are
+// re-embedded in the background so they are available on the next recall.
 func RecallWithVector(
 	ctx context.Context,
 	engine search.Engine,
@@ -41,7 +46,7 @@ func RecallWithVector(
 	}
 
 	if maxCandidates <= 0 {
-		maxCandidates = 10000
+		maxCandidates = 50
 	}
 	facts, err := listRecallFacts(ctx, repo, entityUUID, filter, maxCandidates)
 	if err != nil {
@@ -49,6 +54,15 @@ func RecallWithVector(
 	}
 	if len(facts) == 0 {
 		return nil, nil
+	}
+
+	// Detect facts with NULL embeddings for background backfill.
+	hasUnembedded := false
+	for _, f := range facts {
+		if len(f.Embedding) == 0 {
+			hasUnembedded = true
+			break
+		}
 	}
 
 	candidates := buildRecallCandidates(queryVec, queryModel, facts)
@@ -65,7 +79,50 @@ func RecallWithVector(
 			Significance:   r.Significance,
 		}
 	}
+
+	// Trigger background backfill for facts stored during embedding outages.
+	// Use atomic flag to prevent spawning multiple concurrent backfill goroutines.
+	if hasUnembedded {
+		if fullRepo, ok := repo.(store.Repository); ok {
+			if emb := getRecallEmbedder(); emb != nil {
+				if backfillRunning.CompareAndSwap(false, true) {
+					go func() {
+						defer backfillRunning.Store(false)
+						bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						n := BackfillMissingEmbeddings(bgCtx, fullRepo, emb, entityUUID, 50)
+						if n > 0 {
+							log.Printf("memg recall: backfilled %d facts with missing embeddings", n)
+						}
+					}()
+				}
+			}
+		}
+	}
+
 	return out, nil
+}
+
+// recallEmbedder is set by SetRecallEmbedder and used for background
+// backfill of facts with NULL embeddings during recall.
+var (
+	recallEmbedder   embed.Embedder
+	recallEmbedderMu sync.RWMutex
+	backfillRunning  atomic.Bool
+)
+
+func getRecallEmbedder() embed.Embedder {
+	recallEmbedderMu.RLock()
+	defer recallEmbedderMu.RUnlock()
+	return recallEmbedder
+}
+
+// SetRecallEmbedder configures the embedder used for background backfill
+// during recall. Call this at startup when initializing the MemG instance.
+func SetRecallEmbedder(e embed.Embedder) {
+	recallEmbedderMu.Lock()
+	defer recallEmbedderMu.Unlock()
+	recallEmbedder = e
 }
 
 // RecalledFact is a stored fact that matched a recall query.
@@ -100,6 +157,10 @@ func Recall(
 	maxCandidates int,
 	filters ...store.FactFilter,
 ) ([]*RecalledFact, error) {
+	// Ensure backfill embedder is available for background re-embedding.
+	if getRecallEmbedder() == nil && embedder != nil {
+		SetRecallEmbedder(embedder)
+	}
 	vectors, err := embedder.Embed(ctx, []string{query})
 	if err != nil {
 		return nil, err

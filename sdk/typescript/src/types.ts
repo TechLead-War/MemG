@@ -93,6 +93,8 @@ export interface FactSession {
   processId: string;
   createdAt?: string;
   expiresAt?: string;
+  entityMentions: string[];
+  messageCount: number;
 }
 
 /** A conversation record. */
@@ -102,6 +104,7 @@ export interface FactConversation {
   entityId: string;
   summary: string;
   summaryEmbedding?: number[];
+  summaryEmbeddingModel?: string;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -116,16 +119,48 @@ export interface FactMessage {
   createdAt?: string;
 }
 
+/** A turn summary record. */
+export interface TurnSummary {
+  uuid: string;
+  conversationId: string;
+  entityId: string;
+  startTurn: number;
+  endTurn: number;
+  summary: string;
+  summaryEmbedding?: number[];
+  isOverview: boolean;
+  createdAt: string;
+}
+
+/** An artifact record. */
+export interface Artifact {
+  uuid: string;
+  conversationId: string;
+  entityId: string;
+  content: string;
+  artifactType: string;
+  language: string;
+  description: string;
+  descriptionEmbedding?: number[];
+  supersededBy?: string;
+  turnNumber: number;
+  createdAt: string;
+}
+
 /** Filters for querying facts. */
 export interface FactFilter {
   types?: string[];
   statuses?: string[];
   tags?: string[];
   minSignificance?: number;
+  maxSignificance?: number;
   excludeExpired?: boolean;
+  referenceTimeAfter?: string;
+  referenceTimeBefore?: string;
   slots?: string[];
   minConfidence?: number;
   sourceRoles?: string[];
+  unembeddedOnly?: boolean;
 }
 
 /** A recalled fact with its search score. */

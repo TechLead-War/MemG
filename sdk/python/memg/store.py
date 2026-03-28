@@ -2,28 +2,33 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
 import struct
 import uuid as uuid_mod
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
 from .schema import SQLITE_SCHEMA
 from .types import (
+    Artifact,
+    CanonicalSlot,
     Conversation,
     Entity,
     Fact,
     FactFilter,
     Message,
     Session,
+    TurnSummary,
 )
 
 logger = logging.getLogger("memg")
 
-_ISO_FMT = "%Y-%m-%dT%H:%M:%S"
+_ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def _now_iso() -> str:
@@ -33,7 +38,7 @@ def _now_iso() -> str:
 def _parse_dt(val: Optional[str]) -> Optional[datetime]:
     if val is None or val == "":
         return None
-    for fmt in (_ISO_FMT, "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%d %H:%M:%S.%f"):
+    for fmt in (_ISO_FMT, "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%d %H:%M:%S.%f"):
         try:
             return datetime.strptime(val, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
@@ -73,6 +78,26 @@ class Store(ABC):
     def upsert_entity(self, external_id: str) -> str: ...
     @abstractmethod
     def lookup_entity(self, external_id: str) -> Optional[Entity]: ...
+    @abstractmethod
+    def list_entity_uuids(self, limit: int = 100) -> List[str]: ...
+
+    # Fact metadata (without embedding)
+    @abstractmethod
+    def list_facts_metadata(self, entity_uuid: str, filt: FactFilter, limit: int = 100) -> List[Fact]: ...
+
+    # Process
+    @abstractmethod
+    def upsert_process(self, external_id: str) -> str: ...
+    @abstractmethod
+    def insert_process_attribute(self, process_uuid: str, key: str, value: str) -> None: ...
+
+    # Canonical slots
+    @abstractmethod
+    def list_canonical_slots(self) -> List[dict]: ...
+    @abstractmethod
+    def insert_canonical_slot(self, name: str, embedding: List[float]) -> None: ...
+    @abstractmethod
+    def find_canonical_slot_by_name(self, name: str) -> Optional[dict]: ...
 
     # Fact CRUD
     @abstractmethod
@@ -84,7 +109,7 @@ class Store(ABC):
     @abstractmethod
     def list_facts_filtered(self, entity_uuid: str, filt: FactFilter, limit: int = 100) -> List[Fact]: ...
     @abstractmethod
-    def list_facts_for_recall(self, entity_uuid: str, filt: FactFilter, limit: int = 10000) -> List[Fact]: ...
+    def list_facts_for_recall(self, entity_uuid: str, filt: FactFilter, limit: int = 50) -> List[Fact]: ...
     @abstractmethod
     def find_fact_by_key(self, entity_uuid: str, content_key: str) -> Optional[Fact]: ...
 
@@ -126,9 +151,41 @@ class Store(ABC):
     @abstractmethod
     def list_conversation_summaries(self, entity_uuid: str, limit: int = 100) -> List[Conversation]: ...
     @abstractmethod
-    def update_conversation_summary(self, conversation_uuid: str, summary: str, embedding: Optional[List[float]] = None) -> None: ...
+    def update_conversation_summary(self, conversation_uuid: str, summary: str, embedding: Optional[List[float]] = None, embedding_model: str = "") -> None: ...
     @abstractmethod
     def find_unsummarized_conversation(self, entity_uuid: str, exclude_session_uuid: str) -> Optional[Conversation]: ...
+
+    # Turn Summary
+    @abstractmethod
+    def insert_turn_summary(self, ts: TurnSummary) -> None: ...
+    @abstractmethod
+    def list_turn_summaries(self, conversation_id: str) -> List[TurnSummary]: ...
+    @abstractmethod
+    def count_turn_summaries(self, conversation_id: str) -> int: ...
+    @abstractmethod
+    def delete_turn_summaries(self, conversation_id: str, uuids: List[str]) -> None: ...
+
+    # Artifact
+    @abstractmethod
+    def insert_artifact(self, a: Artifact) -> None: ...
+    @abstractmethod
+    def supersede_artifact(self, old_uuid: str, new_uuid: str) -> None: ...
+    @abstractmethod
+    def list_active_artifacts(self, entity_id: str, conversation_id: str) -> List[Artifact]: ...
+    @abstractmethod
+    def list_active_artifacts_by_entity(self, entity_id: str) -> List[Artifact]: ...
+
+    # Session metadata
+    @abstractmethod
+    def update_session_mentions(self, session_uuid: str, mentions: List[str]) -> None: ...
+    @abstractmethod
+    def increment_session_message_count(self, session_uuid: str) -> None: ...
+    @abstractmethod
+    def get_session_mentions(self, session_uuid: str) -> List[str]: ...
+
+    # Pruning
+    @abstractmethod
+    def prune_stale_summaries(self, days: int = 90) -> int: ...
 
     # Lifecycle
     @abstractmethod
@@ -156,6 +213,16 @@ class SQLiteStore(Store):
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._create_schema()
+
+    @contextmanager
+    def _transaction(self):
+        self._conn.execute("BEGIN")
+        try:
+            yield
+            self._conn.execute("COMMIT")
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
 
     def _create_schema(self) -> None:
         for statement in SQLITE_SCHEMA.strip().split(";"):
@@ -189,6 +256,148 @@ class SQLiteStore(Store):
             external_id=row[1],
             created_at=_parse_dt(row[2]),
         )
+
+    def list_entity_uuids(self, limit: int = 100) -> List[str]:
+        rows = self._conn.execute(
+            "SELECT uuid FROM mg_entity ORDER BY created_at ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    # ---- Fact metadata ----
+
+    _FACT_METADATA_COLUMNS = (
+        "uuid, content, created_at, updated_at, "
+        "fact_type, temporal_status, significance, content_key, "
+        "reference_time, expires_at, reinforced_at, reinforced_count, "
+        "tag, slot, confidence, embedding_model, source_role, "
+        "recall_count, last_recalled_at"
+    )
+
+    def _row_to_fact_metadata(self, row: tuple) -> Fact:
+        return Fact(
+            uuid=row[0],
+            content=row[1],
+            embedding=None,
+            created_at=_parse_dt(row[2]),
+            updated_at=_parse_dt(row[3]),
+            fact_type=row[4] or "identity",
+            temporal_status=row[5] or "current",
+            significance=row[6] if row[6] is not None else 5,
+            content_key=row[7] or "",
+            reference_time=_parse_dt(row[8]),
+            expires_at=_parse_dt(row[9]),
+            reinforced_at=_parse_dt(row[10]),
+            reinforced_count=row[11] if row[11] is not None else 0,
+            tag=row[12] or "",
+            slot=row[13] or "",
+            confidence=row[14] if row[14] is not None else 1.0,
+            embedding_model=row[15] or "",
+            source_role=row[16] or "",
+            recall_count=row[17] if row[17] is not None else 0,
+            last_recalled_at=_parse_dt(row[18]),
+        )
+
+    def list_facts_metadata(self, entity_uuid: str, filt: FactFilter, limit: int = 100) -> List[Fact]:
+        query = f"SELECT {self._FACT_METADATA_COLUMNS} FROM mg_entity_fact WHERE entity_id = ?"
+        args: list = [entity_uuid]
+
+        if filt.types:
+            placeholders = ",".join("?" for _ in filt.types)
+            query += f" AND fact_type IN ({placeholders})"
+            args.extend(filt.types)
+        if filt.statuses:
+            placeholders = ",".join("?" for _ in filt.statuses)
+            query += f" AND temporal_status IN ({placeholders})"
+            args.extend(filt.statuses)
+        if filt.tags:
+            placeholders = ",".join("?" for _ in filt.tags)
+            query += f" AND tag IN ({placeholders})"
+            args.extend(filt.tags)
+        if filt.min_significance > 0:
+            query += " AND significance >= ?"
+            args.append(filt.min_significance)
+        if filt.exclude_expired:
+            query += " AND (expires_at IS NULL OR expires_at > ?)"
+            args.append(_now_iso())
+        if filt.slots:
+            placeholders = ",".join("?" for _ in filt.slots)
+            query += f" AND slot IN ({placeholders})"
+            args.extend(filt.slots)
+        if filt.min_confidence > 0:
+            query += " AND confidence >= ?"
+            args.append(filt.min_confidence)
+        if filt.source_roles:
+            placeholders = ",".join("?" for _ in filt.source_roles)
+            query += f" AND source_role IN ({placeholders})"
+            args.extend(filt.source_roles)
+        if filt.unembedded_only:
+            query += " AND embedding IS NULL"
+        if filt.max_significance > 0:
+            query += " AND significance <= ?"
+            args.append(filt.max_significance)
+        if filt.reference_time_after:
+            query += " AND reference_time IS NOT NULL AND reference_time >= ?"
+            args.append(filt.reference_time_after)
+        if filt.reference_time_before:
+            query += " AND reference_time IS NOT NULL AND reference_time <= ?"
+            args.append(filt.reference_time_before)
+
+        query += " ORDER BY created_at DESC"
+        if limit > 0:
+            query += " LIMIT ?"
+            args.append(limit)
+        rows = self._conn.execute(query, args).fetchall()
+        return [self._row_to_fact_metadata(r) for r in rows]
+
+    # ---- Process ----
+
+    def upsert_process(self, external_id: str) -> str:
+        uid = _new_uuid()
+        self._conn.execute(
+            "INSERT OR IGNORE INTO mg_process (uuid, external_id) VALUES (?, ?)",
+            (uid, external_id),
+        )
+        row = self._conn.execute(
+            "SELECT uuid FROM mg_process WHERE external_id = ?",
+            (external_id,),
+        ).fetchone()
+        return row[0]
+
+    def insert_process_attribute(self, process_uuid: str, key: str, value: str) -> None:
+        uid = _new_uuid()
+        now = _now_iso()
+        self._conn.execute(
+            "INSERT INTO mg_process_attribute (uuid, process_id, key, value, created_at) VALUES (?, ?, ?, ?, ?)",
+            (uid, process_uuid, key, value, now),
+        )
+
+    # ---- Canonical Slots ----
+
+    def list_canonical_slots(self) -> List[dict]:
+        rows = self._conn.execute(
+            "SELECT name, embedding, created_at FROM mg_slot_canonical",
+        ).fetchall()
+        return [
+            {"name": r[0], "embedding": _decode_embedding(r[1]), "created_at": _parse_dt(r[2])}
+            for r in rows
+        ]
+
+    def insert_canonical_slot(self, name: str, embedding: List[float]) -> None:
+        now = _now_iso()
+        self._conn.execute(
+            "INSERT OR IGNORE INTO mg_slot_canonical (name, embedding, created_at) VALUES (?, ?, ?)",
+            (name, _encode_embedding(embedding), now),
+        )
+
+    def find_canonical_slot_by_name(self, name: str) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT name, embedding, created_at FROM mg_slot_canonical WHERE name = ?",
+            (name,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"name": row[0], "embedding": _decode_embedding(row[1]), "created_at": _parse_dt(row[2])}
 
     # ---- Fact ----
 
@@ -298,6 +507,17 @@ class SQLiteStore(Store):
             placeholders = ",".join("?" for _ in filt.source_roles)
             query += f" AND source_role IN ({placeholders})"
             args.extend(filt.source_roles)
+        if filt.unembedded_only:
+            query += " AND embedding IS NULL"
+        if filt.max_significance > 0:
+            query += " AND significance <= ?"
+            args.append(filt.max_significance)
+        if filt.reference_time_after:
+            query += " AND reference_time IS NOT NULL AND reference_time >= ?"
+            args.append(filt.reference_time_after)
+        if filt.reference_time_before:
+            query += " AND reference_time IS NOT NULL AND reference_time <= ?"
+            args.append(filt.reference_time_before)
 
         query += f" {order_by}"
         if limit > 0:
@@ -310,8 +530,8 @@ class SQLiteStore(Store):
         rows = self._conn.execute(query, args).fetchall()
         return [self._row_to_fact(r) for r in rows]
 
-    def list_facts_for_recall(self, entity_uuid: str, filt: FactFilter, limit: int = 10000) -> List[Fact]:
-        query, args = self._build_filter_query(entity_uuid, filt, limit, order_by="")
+    def list_facts_for_recall(self, entity_uuid: str, filt: FactFilter, limit: int = 50) -> List[Fact]:
+        query, args = self._build_filter_query(entity_uuid, filt, limit, order_by="ORDER BY significance DESC, created_at DESC")
         rows = self._conn.execute(query, args).fetchall()
         return [self._row_to_fact(r) for r in rows]
 
@@ -372,9 +592,36 @@ class SQLiteStore(Store):
         if now is None:
             now = datetime.now(timezone.utc)
         now_str = now.strftime(_ISO_FMT)
+        total = 0
+        while True:
+            if entity_uuid:
+                rows = self._conn.execute(
+                    "SELECT uuid FROM mg_entity_fact WHERE entity_id = ? AND expires_at IS NOT NULL AND expires_at < ? LIMIT 1000",
+                    (entity_uuid, now_str),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT uuid FROM mg_entity_fact WHERE expires_at IS NOT NULL AND expires_at < ? LIMIT 1000",
+                    (now_str,),
+                ).fetchall()
+            if not rows:
+                break
+            uuids = [r[0] for r in rows]
+            placeholders = ",".join("?" for _ in uuids)
+            self._conn.execute(
+                f"DELETE FROM mg_entity_fact WHERE uuid IN ({placeholders})",
+                uuids,
+            )
+            total += len(uuids)
+            if len(uuids) < 1000:
+                break
+        return total
+
+    def prune_stale_summaries(self, days: int = 90) -> int:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(_ISO_FMT)
         cursor = self._conn.execute(
-            "DELETE FROM mg_entity_fact WHERE entity_id = ? AND expires_at IS NOT NULL AND expires_at < ?",
-            (entity_uuid, now_str),
+            "UPDATE mg_conversation SET summary = '', summary_embedding = NULL WHERE created_at < ? AND summary != ''",
+            (cutoff,),
         )
         return cursor.rowcount
 
@@ -404,7 +651,7 @@ class SQLiteStore(Store):
         now_str = now.strftime(_ISO_FMT)
 
         row = self._conn.execute(
-            "SELECT uuid, entity_id, process_id, created_at, expires_at "
+            "SELECT uuid, entity_id, process_id, created_at, expires_at, entity_mentions, message_count "
             "FROM mg_session WHERE entity_id = ? AND process_id = ? AND expires_at > ? "
             "ORDER BY created_at DESC LIMIT 1",
             (entity_uuid, process_uuid, now_str),
@@ -418,12 +665,15 @@ class SQLiteStore(Store):
                 "UPDATE mg_session SET expires_at = ? WHERE uuid = ?",
                 (new_expires_str, row[0]),
             )
+            mentions = json.loads(row[5]) if row[5] else []
             session = Session(
                 uuid=row[0],
                 entity_id=row[1],
                 process_id=row[2] or "",
                 created_at=_parse_dt(row[3]),
                 expires_at=new_expires,
+                entity_mentions=mentions,
+                message_count=row[6] if row[6] is not None else 0,
             )
             return session, False
 
@@ -458,7 +708,7 @@ class SQLiteStore(Store):
 
     def active_conversation(self, session_uuid: str) -> Optional[Conversation]:
         row = self._conn.execute(
-            "SELECT uuid, session_id, entity_id, summary, created_at, updated_at "
+            "SELECT uuid, session_id, entity_id, summary, summary_embedding_model, created_at, updated_at "
             "FROM mg_conversation WHERE session_id = ? ORDER BY created_at DESC LIMIT 1",
             (session_uuid,),
         ).fetchone()
@@ -469,8 +719,9 @@ class SQLiteStore(Store):
             session_id=row[1],
             entity_id=row[2] or "",
             summary=row[3] or "",
-            created_at=_parse_dt(row[4]),
-            updated_at=_parse_dt(row[5]),
+            summary_embedding_model=row[4] or "",
+            created_at=_parse_dt(row[5]),
+            updated_at=_parse_dt(row[6]),
         )
 
     def append_message(self, conversation_uuid: str, msg: Message) -> None:
@@ -526,7 +777,7 @@ class SQLiteStore(Store):
 
     def list_conversation_summaries(self, entity_uuid: str, limit: int = 100) -> List[Conversation]:
         query = (
-            "SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at "
+            "SELECT uuid, session_id, entity_id, summary, summary_embedding, summary_embedding_model, created_at, updated_at "
             "FROM mg_conversation WHERE entity_id = ? AND summary != '' AND summary_embedding IS NOT NULL "
             "ORDER BY created_at DESC"
         )
@@ -542,24 +793,25 @@ class SQLiteStore(Store):
                 entity_id=r[2] or "",
                 summary=r[3] or "",
                 summary_embedding=_decode_embedding(r[4]),
-                created_at=_parse_dt(r[5]),
-                updated_at=_parse_dt(r[6]),
+                summary_embedding_model=r[5] or "",
+                created_at=_parse_dt(r[6]),
+                updated_at=_parse_dt(r[7]),
             )
             for r in rows
         ]
 
     def update_conversation_summary(
-        self, conversation_uuid: str, summary: str, embedding: Optional[List[float]] = None
+        self, conversation_uuid: str, summary: str, embedding: Optional[List[float]] = None, embedding_model: str = ""
     ) -> None:
         now = _now_iso()
         self._conn.execute(
-            "UPDATE mg_conversation SET summary = ?, summary_embedding = ?, updated_at = ? WHERE uuid = ?",
-            (summary, _encode_embedding(embedding), now, conversation_uuid),
+            "UPDATE mg_conversation SET summary = ?, summary_embedding = ?, summary_embedding_model = ?, updated_at = ? WHERE uuid = ?",
+            (summary, _encode_embedding(embedding), embedding_model, now, conversation_uuid),
         )
 
     def find_unsummarized_conversation(self, entity_uuid: str, exclude_session_uuid: str) -> Optional[Conversation]:
         row = self._conn.execute(
-            "SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at "
+            "SELECT uuid, session_id, entity_id, summary, summary_embedding, summary_embedding_model, created_at, updated_at "
             "FROM mg_conversation "
             "WHERE entity_id = ? AND session_id != ? AND (summary IS NULL OR summary = '') "
             "ORDER BY created_at DESC LIMIT 1",
@@ -570,8 +822,122 @@ class SQLiteStore(Store):
         return Conversation(
             uuid=row[0], session_id=row[1], entity_id=row[2] or "",
             summary=row[3] or "", summary_embedding=_decode_embedding(row[4]),
-            created_at=_parse_dt(row[5]), updated_at=_parse_dt(row[6]),
+            summary_embedding_model=row[5] or "",
+            created_at=_parse_dt(row[6]), updated_at=_parse_dt(row[7]),
         )
+
+    # ---- Turn Summary ----
+
+    def insert_turn_summary(self, ts: TurnSummary) -> None:
+        ts.uuid = _new_uuid()
+        now = _now_iso()
+        self._conn.execute(
+            "INSERT INTO mg_turn_summary (uuid, conversation_id, entity_id, start_turn, end_turn, summary, summary_embedding, is_overview, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (ts.uuid, ts.conversation_id, ts.entity_id, ts.start_turn, ts.end_turn,
+             ts.summary, _encode_embedding(ts.summary_embedding),
+             1 if ts.is_overview else 0, now),
+        )
+
+    def list_turn_summaries(self, conversation_id: str) -> List[TurnSummary]:
+        rows = self._conn.execute(
+            "SELECT uuid, conversation_id, entity_id, start_turn, end_turn, summary, summary_embedding, is_overview, created_at "
+            "FROM mg_turn_summary WHERE conversation_id = ? ORDER BY is_overview ASC, start_turn ASC",
+            (conversation_id,),
+        ).fetchall()
+        return [
+            TurnSummary(
+                uuid=r[0], conversation_id=r[1], entity_id=r[2],
+                start_turn=r[3], end_turn=r[4], summary=r[5],
+                summary_embedding=_decode_embedding(r[6]),
+                is_overview=bool(r[7]), created_at=_parse_dt(r[8]),
+            )
+            for r in rows
+        ]
+
+    def count_turn_summaries(self, conversation_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM mg_turn_summary WHERE conversation_id = ? AND is_overview = 0",
+            (conversation_id,),
+        ).fetchone()
+        return row[0]
+
+    def delete_turn_summaries(self, conversation_id: str, uuids: List[str]) -> None:
+        if not uuids:
+            return
+        placeholders = ",".join("?" for _ in uuids)
+        self._conn.execute(
+            f"DELETE FROM mg_turn_summary WHERE conversation_id = ? AND uuid IN ({placeholders})",
+            [conversation_id] + uuids,
+        )
+
+    # ---- Artifact ----
+
+    def insert_artifact(self, a: Artifact) -> None:
+        a.uuid = _new_uuid()
+        now = _now_iso()
+        self._conn.execute(
+            "INSERT INTO mg_artifact (uuid, conversation_id, entity_id, content, artifact_type, language, description, description_embedding, superseded_by, turn_number, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (a.uuid, a.conversation_id, a.entity_id, a.content, a.artifact_type,
+             a.language, a.description, _encode_embedding(a.description_embedding),
+             a.superseded_by, a.turn_number, now),
+        )
+
+    def supersede_artifact(self, old_uuid: str, new_uuid: str) -> None:
+        self._conn.execute(
+            "UPDATE mg_artifact SET superseded_by = ? WHERE uuid = ?",
+            (new_uuid, old_uuid),
+        )
+
+    def list_active_artifacts(self, entity_id: str, conversation_id: str) -> List[Artifact]:
+        rows = self._conn.execute(
+            "SELECT uuid, conversation_id, entity_id, content, artifact_type, language, description, description_embedding, superseded_by, turn_number, created_at "
+            "FROM mg_artifact WHERE entity_id = ? AND conversation_id = ? AND superseded_by IS NULL ORDER BY created_at DESC",
+            (entity_id, conversation_id),
+        ).fetchall()
+        return [self._row_to_artifact(r) for r in rows]
+
+    def list_active_artifacts_by_entity(self, entity_id: str) -> List[Artifact]:
+        rows = self._conn.execute(
+            "SELECT uuid, conversation_id, entity_id, content, artifact_type, language, description, description_embedding, superseded_by, turn_number, created_at "
+            "FROM mg_artifact WHERE entity_id = ? AND superseded_by IS NULL ORDER BY created_at DESC",
+            (entity_id,),
+        ).fetchall()
+        return [self._row_to_artifact(r) for r in rows]
+
+    def _row_to_artifact(self, row: tuple) -> Artifact:
+        return Artifact(
+            uuid=row[0], conversation_id=row[1], entity_id=row[2],
+            content=row[3], artifact_type=row[4] or "code",
+            language=row[5] or "", description=row[6] or "",
+            description_embedding=_decode_embedding(row[7]),
+            superseded_by=row[8], turn_number=row[9] if row[9] is not None else 0,
+            created_at=_parse_dt(row[10]),
+        )
+
+    # ---- Session metadata ----
+
+    def update_session_mentions(self, session_uuid: str, mentions: List[str]) -> None:
+        self._conn.execute(
+            "UPDATE mg_session SET entity_mentions = ? WHERE uuid = ?",
+            (json.dumps(mentions), session_uuid),
+        )
+
+    def increment_session_message_count(self, session_uuid: str) -> None:
+        self._conn.execute(
+            "UPDATE mg_session SET message_count = message_count + 1 WHERE uuid = ?",
+            (session_uuid,),
+        )
+
+    def get_session_mentions(self, session_uuid: str) -> List[str]:
+        row = self._conn.execute(
+            "SELECT entity_mentions FROM mg_session WHERE uuid = ?",
+            (session_uuid,),
+        ).fetchone()
+        if row is None or not row[0]:
+            return []
+        return json.loads(row[0])
 
     # ---- Close ----
 

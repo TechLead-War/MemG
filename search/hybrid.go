@@ -1,9 +1,6 @@
 package search
 
-import (
-	"math"
-	"sort"
-)
+import "sort"
 
 // scored pairs a candidate index with its computed relevance score.
 type scored struct {
@@ -39,12 +36,14 @@ func (h *Hybrid) Rank(query []float32, queryText string, candidates []Candidate,
 			score *= 0.85
 		}
 
-		// Significance tiebreaker: max 0.01 boost so it never overrides relevance.
-		score += float64(candidates[i].Significance) * 0.001
-
 		// Penalize low-confidence facts (max penalty: 5% of score).
-		if candidates[i].Confidence > 0 && candidates[i].Confidence < 1.0 {
-			score *= (0.95 + 0.05*candidates[i].Confidence) // 95%-100% of original score
+		// Default confidence to 1.0 when not set (0 means unset).
+		conf := candidates[i].Confidence
+		if conf <= 0 {
+			conf = 1.0
+		}
+		if conf < 1.0 {
+			score *= (0.95 + 0.05*conf) // 95%-100% of original score
 		}
 
 		merged[i] = scored{idx: i, score: score}
@@ -55,16 +54,26 @@ func (h *Hybrid) Rank(query []float32, queryText string, candidates []Candidate,
 	})
 
 	// Collect all candidates above threshold, up to hard limit.
+	// Threshold comparison uses the raw relevance score (without significance
+	// tiebreaker) so that significance cannot promote below-threshold results.
 	var above []scored
 	for _, s := range merged {
 		if s.score < threshold {
 			break
 		}
+		// Add significance tiebreaker after threshold check: max 0.01 boost
+		// so it only affects sort order, never threshold admission.
+		s.score += float64(candidates[s.idx].Significance) * 0.001
 		above = append(above, s)
 		if len(above) >= limit {
 			break
 		}
 	}
+
+	// Re-sort after adding significance tiebreaker.
+	sort.Slice(above, func(i, j int) bool {
+		return above[i].score > above[j].score
+	})
 
 	// Apply Kneedle algorithm: find where the score curve bends and cut there.
 	cutoff := kneedleCutoff(above)
@@ -84,66 +93,48 @@ func (h *Hybrid) Rank(query []float32, queryText string, candidates []Candidate,
 	return results
 }
 
-// kneedleCutoff implements the Kneedle algorithm (Satopaa et al., ICDCS 2011)
-// to find the "knee" in a sorted score curve — the point where scores
-// transition from genuinely relevant to noise.
-//
-// The algorithm works by:
-//  1. Normalizing both axes (position and score) to [0, 1].
-//  2. Computing the difference between each normalized score and the
-//     diagonal line connecting the first and last points.
-//  3. Finding the position with the maximum difference — this is where
-//     the curve deviates most from a straight decline, i.e. the knee.
-//
-// If no significant knee is found, all results are returned.
+// kneedleCutoff finds the "knee" in sorted scores using the Kneedle algorithm
+// (Satopaa et al., ICDCS 2011). Items must be sorted by score descending.
+// It normalizes both axes to [0,1], draws a diagonal from the first point
+// (highest score) to the last point (lowest score), and finds the point
+// where the actual curve deviates most below the diagonal. Everything
+// before that point is kept; everything after is discarded.
 func kneedleCutoff(items []scored) int {
+	if len(items) <= 3 {
+		return len(items)
+	}
+
 	n := len(items)
-	if n <= 2 {
+	maxScore := items[0].score
+	minScore := items[n-1].score
+	scoreRange := maxScore - minScore
+
+	if scoreRange < 1e-9 {
 		return n
 	}
 
-	// Step 1: Normalize x (position) and y (score) to [0, 1].
-	yMin := items[n-1].score
-	yMax := items[0].score
-	yRange := yMax - yMin
-	if yRange == 0 {
-		// All scores are identical — no knee, keep everything.
-		return n
-	}
-
-	// Step 2: Compute the difference curve.
-	// The diagonal goes from (0, 1) to (1, 0) in normalized space.
-	// difference[i] = normalized_y[i] - diagonal[i]
-	// The knee is where this difference is maximized — the curve is
-	// farthest above the straight line connecting endpoints.
-	maxDiff := 0.0
-	kneeIdx := 0
+	bestDeviation := 0.0
+	kneeIdx := n
 
 	for i := 0; i < n; i++ {
-		xNorm := float64(i) / float64(n-1)        // 0 to 1
-		yNorm := (items[i].score - yMin) / yRange // 1 to 0
-		diagonal := 1.0 - xNorm                   // straight line from (0,1) to (1,0)
-		diff := yNorm - diagonal
+		x := float64(i) / float64(n-1)
+		y := (items[i].score - minScore) / scoreRange
+		diagonal := 1.0 - x
+		deviation := diagonal - y
 
-		if diff > maxDiff {
-			maxDiff = diff
+		if deviation > bestDeviation {
+			bestDeviation = deviation
 			kneeIdx = i
 		}
 	}
 
-	// Step 3: Validate the knee.
-	// If the maximum difference is too small, there's no meaningful knee —
-	// the scores decline roughly linearly. Keep everything.
-	// A threshold of 0.1 in normalized space means the curve must deviate
-	// at least 10% from the diagonal to be considered a real knee.
-	const minKneeStrength = 0.10
-	if maxDiff < minKneeStrength {
+	if kneeIdx <= 0 {
+		return 1
+	}
+	if kneeIdx >= n {
 		return n
 	}
-
-	// Cut after the knee point — keep the knee and everything above it.
-	// math.Min ensures we return at least 1.
-	return int(math.Max(1, float64(kneeIdx+1)))
+	return kneeIdx
 }
 
 // blendWeights returns (dense, lexical) weights. Short queries receive a

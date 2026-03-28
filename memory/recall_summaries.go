@@ -17,6 +17,7 @@ func RecallSummariesWithVector(
 	engine search.Engine,
 	repo store.ConversationReader,
 	queryVec []float32,
+	queryModel string,
 	queryText string,
 	entityUUID string,
 	limit int,
@@ -26,7 +27,7 @@ func RecallSummariesWithVector(
 		return nil, nil
 	}
 
-	convs, err := repo.ListConversationSummaries(ctx, entityUUID, 0)
+	convs, err := repo.ListConversationSummaries(ctx, entityUUID, 100)
 	if err != nil {
 		return nil, err
 	}
@@ -36,11 +37,15 @@ func RecallSummariesWithVector(
 
 	candidates := make([]search.Candidate, 0, len(convs))
 	var dimensionFallbackCount int
+	var modelFallbackCount int
 	for _, c := range convs {
 		embedding := c.SummaryEmbedding
 		if len(queryVec) > 0 && !search.DimensionMatch(queryVec, embedding) {
 			embedding = nil
 			dimensionFallbackCount++
+		} else if queryModel != "" && c.SummaryEmbeddingModel != "" && c.SummaryEmbeddingModel != queryModel {
+			embedding = nil
+			modelFallbackCount++
 		}
 		candidates = append(candidates, search.Candidate{
 			ID:        c.UUID,
@@ -51,6 +56,9 @@ func RecallSummariesWithVector(
 	}
 	if dimensionFallbackCount > 0 {
 		log.Printf("memg recall summaries: using lexical-only fallback for %d summaries with incompatible embedding dimensions", dimensionFallbackCount)
+	}
+	if modelFallbackCount > 0 {
+		log.Printf("memg recall summaries: using lexical-only fallback for %d summaries with embedding model mismatch (%s)", modelFallbackCount, queryModel)
 	}
 
 	results := engine.Rank(queryVec, queryText, candidates, limit, threshold)
@@ -98,7 +106,7 @@ func RecallSummaries(
 	queryVec := vectors[0]
 
 	// Load all conversation summaries for unbiased ranking.
-	convs, err := repo.ListConversationSummaries(ctx, entityUUID, 0)
+	convs, err := repo.ListConversationSummaries(ctx, entityUUID, 100)
 	if err != nil {
 		return nil, err
 	}
@@ -107,13 +115,18 @@ func RecallSummaries(
 	}
 
 	// Build candidates from conversation summaries.
+	queryModel := embed.ModelNameOf(embedder)
 	candidates := make([]search.Candidate, 0, len(convs))
 	var dimensionFallbackCount int
+	var modelFallbackCount int
 	for _, c := range convs {
 		embedding := c.SummaryEmbedding
 		if len(queryVec) > 0 && !search.DimensionMatch(queryVec, embedding) {
 			embedding = nil
 			dimensionFallbackCount++
+		} else if queryModel != "" && c.SummaryEmbeddingModel != "" && c.SummaryEmbeddingModel != queryModel {
+			embedding = nil
+			modelFallbackCount++
 		}
 		candidates = append(candidates, search.Candidate{
 			ID:        c.UUID,
@@ -124,6 +137,9 @@ func RecallSummaries(
 	}
 	if dimensionFallbackCount > 0 {
 		log.Printf("memg recall summaries: using lexical-only fallback for %d summaries with incompatible embedding dimensions", dimensionFallbackCount)
+	}
+	if modelFallbackCount > 0 {
+		log.Printf("memg recall summaries: using lexical-only fallback for %d summaries with embedding model mismatch (%s)", modelFallbackCount, queryModel)
 	}
 
 	results := engine.Rank(queryVec, query, candidates, limit, threshold)

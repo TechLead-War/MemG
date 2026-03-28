@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 
 	"memg/store"
@@ -14,6 +15,7 @@ type Pruner struct {
 	interval time.Duration
 	stopCh   chan struct{}
 	done     chan struct{}
+	startOnce sync.Once
 }
 
 // NewPruner creates a pruner that checks for expired facts every interval.
@@ -28,13 +30,15 @@ func NewPruner(repo store.Repository, interval time.Duration) *Pruner {
 }
 
 // Start begins the background pruning loop. It is safe to call Start
-// only once; subsequent calls have no effect.
+// multiple times; subsequent calls are no-ops.
 func (p *Pruner) Start() {
-	if p.interval <= 0 {
-		close(p.done)
-		return
-	}
-	go p.loop()
+	p.startOnce.Do(func() {
+		if p.interval <= 0 {
+			close(p.done)
+			return
+		}
+		go p.loop()
+	})
 }
 
 // Stop signals the pruner to stop and blocks until the loop exits.

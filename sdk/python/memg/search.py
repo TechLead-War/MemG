@@ -5,6 +5,7 @@ Port of the Go search package: cosine similarity, BM25, Kneedle cutoff.
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from dataclasses import dataclass
@@ -12,25 +13,25 @@ from typing import List, Optional
 
 from .types import Fact, RecalledFact
 
+logger = logging.getLogger(__name__)
+
 STOP_WORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if",
-    "in", "into", "is", "it", "no", "not", "of", "on", "or", "such",
-    "that", "the", "their", "then", "there", "these", "they", "this",
-    "to", "was", "will", "with", "i", "me", "my", "we", "our", "you",
-    "your", "he", "she", "him", "her", "his", "its", "do", "did", "does",
-    "have", "has", "had", "what", "which", "who", "whom", "when", "where",
-    "how", "can", "could", "would", "should", "may", "might", "shall",
-    "must", "am", "been", "being", "were", "so", "than", "too", "very",
-    "just", "about", "above", "after", "again", "all", "also", "any",
-    "because", "before", "between", "both", "each", "few", "from",
-    "further", "here", "more", "most", "nor", "only", "other", "out",
-    "over", "own", "same", "some", "through", "under", "until", "up",
-    "while", "why", "down", "during", "off", "once", "like", "against",
-    "without", "around", "among", "yet", "either", "neither", "every",
-    "those", "them", "need",
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need",
+    "to", "of", "in", "for", "on", "with", "at", "by", "from", "as",
+    "into", "about", "like", "through", "after", "over", "between", "out",
+    "against", "during", "without", "before", "under", "around", "among",
+    "and", "but", "or", "nor", "not", "so", "yet", "both", "either",
+    "neither", "each", "every", "all", "any", "few", "more", "most",
+    "other", "some", "such", "no", "only", "own", "same", "than", "too",
+    "very", "just", "because", "if", "when", "where", "how", "what",
+    "which", "who", "whom", "this", "that", "these", "those",
+    "i", "me", "my", "we", "our", "you", "your", "he", "him", "his",
+    "she", "her", "it", "its", "they", "them", "their",
 }
 
-_SPLIT_RE = re.compile(r"[^a-zA-Z0-9]+")
+_SPLIT_RE = re.compile(r"(?:[^\w]|_)+", re.UNICODE)
 
 
 def tokenize(text: str) -> List[str]:
@@ -73,12 +74,13 @@ def _bm25_scores(query_text: str, candidates: List[_Candidate]) -> List[float]:
         return [0.0] * n_cands
 
     docs = [tokenize(c.content) for c in candidates]
+    doc_sets = [set(d) for d in docs]
     avg_len = sum(len(d) for d in docs) / len(docs) if docs else 1.0
 
     n = float(len(docs))
     idf = {}
     for t in terms:
-        df = sum(1 for doc in docs if t in doc)
+        df = sum(1 for ds in doc_sets if t in ds)
         idf[t] = math.log((n - df + 0.5) / (df + 0.5) + 1.0)
 
     k1 = 1.2
@@ -133,31 +135,41 @@ class _Scored:
 
 
 def kneedle_cutoff(items: List[_Scored]) -> int:
+    """Find the knee using the Kneedle algorithm (Satopaa et al., ICDCS 2011).
+
+    Items must be sorted by score descending. Normalizes both axes to [0,1],
+    draws a diagonal from the first to the last point, and finds where the
+    curve deviates most below the diagonal. Returns number of items to keep.
+    """
+    if len(items) <= 3:
+        return len(items)
+
     n = len(items)
-    if n <= 2:
+    max_score = items[0].score
+    min_score = items[n - 1].score
+    score_range = max_score - min_score
+
+    if score_range < 1e-9:
         return n
 
-    y_min = items[-1].score
-    y_max = items[0].score
-    y_range = y_max - y_min
-    if y_range == 0:
-        return n
+    best_deviation = 0.0
+    knee_idx = n
 
-    max_diff = 0.0
-    knee_idx = 0
     for i in range(n):
-        x_norm = i / (n - 1)
-        y_norm = (items[i].score - y_min) / y_range
-        diagonal = 1.0 - x_norm
-        diff = y_norm - diagonal
-        if diff > max_diff:
-            max_diff = diff
+        x = i / (n - 1)
+        y = (items[i].score - min_score) / score_range
+        diagonal = 1.0 - x
+        deviation = diagonal - y
+
+        if deviation > best_deviation:
+            best_deviation = deviation
             knee_idx = i
 
-    if max_diff < 0.10:
+    if knee_idx <= 0:
+        return 1
+    if knee_idx >= n:
         return n
-
-    return max(1, knee_idx + 1)
+    return knee_idx
 
 
 class HybridSearchEngine:
@@ -170,16 +182,22 @@ class HybridSearchEngine:
         facts: List[Fact],
         limit: int = 100,
         threshold: float = 0.10,
+        query_model: str = "",
     ) -> List[RecalledFact]:
         if not facts:
             return []
 
         candidates = []
+        mismatch_count = 0
         for i, f in enumerate(facts):
             confidence = f.confidence if f.confidence > 0 else 1.0
             embedding = f.embedding
             if embedding is not None and len(query_vec) > 0 and len(embedding) != len(query_vec):
                 embedding = None
+                mismatch_count += 1
+            elif query_model and getattr(f, "embedding_model", "") and f.embedding_model != query_model:
+                embedding = None
+                mismatch_count += 1
             candidates.append(_Candidate(
                 idx=i,
                 id=f.uuid,
@@ -187,9 +205,15 @@ class HybridSearchEngine:
                 embedding=embedding,
                 created_at=f.created_at,
                 temporal_status=f.temporal_status or "current",
-                significance=f.significance if f.significance else 5,
+                significance=f.significance if f.significance is not None else 0,
                 confidence=confidence,
             ))
+
+        if mismatch_count > 0:
+            logger.warning(
+                "memg recall: skipped %d facts with embedding dimension mismatch (query=%d)",
+                mismatch_count, len(query_vec),
+            )
 
         dense = _vector_scores(query_vec, candidates)
         lexical = _bm25_scores(query_text, candidates)
@@ -201,8 +225,6 @@ class HybridSearchEngine:
 
             if c.temporal_status == "historical":
                 score *= 0.85
-
-            score += c.significance * 0.001
 
             if 0 < c.confidence < 1.0:
                 score *= (0.95 + 0.05 * c.confidence)
@@ -218,6 +240,12 @@ class HybridSearchEngine:
             above.append(s)
             if len(above) >= limit:
                 break
+
+        for s in above:
+            c = candidates[s.idx]
+            s.score += c.significance * 0.001
+
+        above.sort(key=lambda s: s.score, reverse=True)
 
         cutoff = kneedle_cutoff(above)
 
@@ -241,6 +269,7 @@ class HybridSearchEngine:
         summaries: list,
         limit: int = 5,
         threshold: float = 0.10,
+        query_model: str = "",
     ) -> list:
         """Rank conversation summaries using hybrid search.
 
@@ -257,6 +286,8 @@ class HybridSearchEngine:
             embedding = s.summary_embedding
             if embedding is not None and len(query_vec) > 0 and len(embedding) != len(query_vec):
                 embedding = None
+            elif query_model and getattr(s, "summary_embedding_model", "") and s.summary_embedding_model != query_model:
+                embedding = None
             candidates.append(_Candidate(
                 idx=i,
                 id=s.uuid,
@@ -264,7 +295,7 @@ class HybridSearchEngine:
                 embedding=embedding,
                 created_at=s.created_at,
                 temporal_status="current",
-                significance=5,
+                significance=0,
                 confidence=1.0,
             ))
 

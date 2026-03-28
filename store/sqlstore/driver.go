@@ -5,6 +5,7 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -469,6 +470,10 @@ func (r *Repository) ListFactsFiltered(ctx context.Context, entityUUID string, f
 	if filter.UnembeddedOnly {
 		query += " AND embedding IS NULL"
 	}
+	if filter.MaxSignificance > 0 {
+		query += " AND significance <= ?"
+		args = append(args, int(filter.MaxSignificance))
+	}
 	query += " ORDER BY created_at DESC LIMIT ?"
 	args = append(args, limit)
 
@@ -557,6 +562,11 @@ func (r *Repository) ListFactsForRecall(ctx context.Context, entityUUID string, 
 	if filter.UnembeddedOnly {
 		query += " AND embedding IS NULL"
 	}
+	if filter.MaxSignificance > 0 {
+		query += " AND significance <= ?"
+		args = append(args, int(filter.MaxSignificance))
+	}
+	query += " ORDER BY significance DESC, created_at DESC"
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)
@@ -642,6 +652,13 @@ func (r *Repository) ListFactsMetadata(ctx context.Context, entityUUID string, f
 			args = append(args, sr)
 		}
 		query += " AND source_role IN (" + joinStrings(placeholders, ",") + ")"
+	}
+	if filter.UnembeddedOnly {
+		query += " AND embedding IS NULL"
+	}
+	if filter.MaxSignificance > 0 {
+		query += " AND significance <= ?"
+		args = append(args, int(filter.MaxSignificance))
 	}
 	query += " ORDER BY created_at DESC LIMIT ?"
 	args = append(args, limit)
@@ -825,9 +842,9 @@ func (r *Repository) ActiveConversation(ctx context.Context, sessionUUID string)
 	return c, nil
 }
 
-func (r *Repository) UpdateConversationSummary(ctx context.Context, conversationUUID, summary string, embedding []float32) error {
+func (r *Repository) UpdateConversationSummary(ctx context.Context, conversationUUID, summary string, embedding []float32, embeddingModel string) error {
 	now := time.Now().UTC()
-	_, err := r.db.ExecContext(ctx, r.q.ConvUpdateSummary, summary, encodeEmbedding(embedding), now, conversationUUID)
+	_, err := r.db.ExecContext(ctx, r.q.ConvUpdateSummary, summary, encodeEmbedding(embedding), embeddingModel, now, conversationUUID)
 	if err != nil {
 		return fmt.Errorf("update conversation summary: %w", err)
 	}
@@ -835,7 +852,7 @@ func (r *Repository) UpdateConversationSummary(ctx context.Context, conversation
 }
 
 func (r *Repository) ListConversationSummaries(ctx context.Context, entityUUID string, limit int) ([]*store.Conversation, error) {
-	query := `SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at
+	query := `SELECT uuid, session_id, entity_id, summary, summary_embedding, summary_embedding_model, created_at, updated_at
 		FROM mg_conversation
 		WHERE entity_id = ? AND summary != '' AND summary_embedding IS NOT NULL`
 	args := []any{entityUUID}
@@ -856,7 +873,7 @@ func (r *Repository) ListConversationSummaries(ctx context.Context, entityUUID s
 		c := &store.Conversation{}
 		var raw []byte
 		var createdAt, updatedAt flexTime
-		if err := rows.Scan(&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &raw, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&c.UUID, &c.SessionID, &c.EntityID, &c.Summary, &raw, &c.SummaryEmbeddingModel, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan conversation summary: %w", err)
 		}
 		c.CreatedAt = createdAt.Time
@@ -966,12 +983,15 @@ func (r *Repository) EnsureSession(ctx context.Context, entityUUID, processUUID 
 	// Check for an active (non-expired) session.
 	s := &store.Session{}
 	var createdAt, expiresAt flexTime
+	var mentionsJSON string
 	err := r.db.QueryRowContext(ctx, r.q.SessionSelect, entityUUID, processUUID, now).Scan(
 		&s.UUID, &s.EntityID, &s.ProcessID, &createdAt, &expiresAt,
+		&mentionsJSON, &s.MessageCount,
 	)
 	if err == nil {
 		s.CreatedAt = createdAt.Time
 		s.ExpiresAt = expiresAt.Time
+		_ = json.Unmarshal([]byte(mentionsJSON), &s.EntityMentions)
 		// Slide the expiry forward.
 		newExpiry := now.Add(timeout)
 		if _, slideErr := r.db.ExecContext(ctx, r.q.SessionSlide, newExpiry, s.UUID); slideErr != nil {
@@ -987,7 +1007,7 @@ func (r *Repository) EnsureSession(ctx context.Context, entityUUID, processUUID 
 	// No active session; create one.
 	id := uuid.New().String()
 	expires := now.Add(timeout)
-	if _, err := r.db.ExecContext(ctx, r.q.SessionInsert, id, entityUUID, processUUID, now, expires); err != nil {
+	if _, err := r.db.ExecContext(ctx, r.q.SessionInsert, id, entityUUID, processUUID, now, expires, "[]", 0); err != nil {
 		return nil, false, fmt.Errorf("create session: %w", err)
 	}
 	return &store.Session{
@@ -1075,6 +1095,220 @@ func (r *Repository) FindCanonicalSlotByName(ctx context.Context, name string) (
 		s.CreatedAt = createdAt.Time
 	}
 	return s, nil
+}
+
+// ---- TurnSummaryWriter ----
+
+func (r *Repository) InsertTurnSummary(ctx context.Context, ts *store.TurnSummary) error {
+	ts.UUID = uuid.New().String()
+	now := time.Now().UTC()
+	isOverview := 0
+	if ts.IsOverview {
+		isOverview = 1
+	}
+	query := `INSERT INTO mg_turn_summary (uuid, conversation_id, entity_id, start_turn, end_turn, summary, summary_embedding, is_overview, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	query = r.rewritePlaceholders(query)
+	_, err := r.db.ExecContext(ctx, query,
+		ts.UUID, ts.ConversationID, ts.EntityID,
+		ts.StartTurn, ts.EndTurn, ts.Summary,
+		encodeEmbedding(ts.SummaryEmbedding), isOverview, now,
+	)
+	if err != nil {
+		return fmt.Errorf("insert turn summary: %w", err)
+	}
+	ts.CreatedAt = now
+	return nil
+}
+
+func (r *Repository) DeleteTurnSummaries(ctx context.Context, conversationID string, uuids []string) error {
+	if len(uuids) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(uuids))
+	args := make([]any, 0, len(uuids)+1)
+	args = append(args, conversationID)
+	for i, id := range uuids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	query := `DELETE FROM mg_turn_summary WHERE conversation_id = ? AND uuid IN (` + strings.Join(placeholders, ",") + `)`
+	query = r.rewritePlaceholders(query)
+	_, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("delete turn summaries: %w", err)
+	}
+	return nil
+}
+
+// ---- TurnSummaryReader ----
+
+func (r *Repository) ListTurnSummaries(ctx context.Context, conversationID string) ([]*store.TurnSummary, error) {
+	query := `SELECT uuid, conversation_id, entity_id, start_turn, end_turn, summary, summary_embedding, is_overview, created_at FROM mg_turn_summary WHERE conversation_id = ? ORDER BY is_overview ASC, start_turn ASC`
+	query = r.rewritePlaceholders(query)
+	rows, err := r.db.QueryContext(ctx, query, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("list turn summaries: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*store.TurnSummary
+	for rows.Next() {
+		ts := &store.TurnSummary{}
+		var raw []byte
+		var isOverview int
+		var createdAt flexTime
+		if err := rows.Scan(
+			&ts.UUID, &ts.ConversationID, &ts.EntityID,
+			&ts.StartTurn, &ts.EndTurn, &ts.Summary,
+			&raw, &isOverview, &createdAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan turn summary: %w", err)
+		}
+		ts.SummaryEmbedding = decodeEmbedding(raw)
+		ts.IsOverview = isOverview != 0
+		ts.CreatedAt = createdAt.Time
+		out = append(out, ts)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) CountTurnSummaries(ctx context.Context, conversationID string) (int, error) {
+	query := `SELECT COUNT(*) FROM mg_turn_summary WHERE conversation_id = ? AND is_overview = 0`
+	query = r.rewritePlaceholders(query)
+	var count int
+	err := r.db.QueryRowContext(ctx, query, conversationID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count turn summaries: %w", err)
+	}
+	return count, nil
+}
+
+// ---- ArtifactWriter ----
+
+func (r *Repository) InsertArtifact(ctx context.Context, a *store.Artifact) error {
+	a.UUID = uuid.New().String()
+	now := time.Now().UTC()
+	query := `INSERT INTO mg_artifact (uuid, conversation_id, entity_id, content, artifact_type, language, description, description_embedding, superseded_by, turn_number, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	query = r.rewritePlaceholders(query)
+	var supersededBy any
+	if a.SupersededBy != "" {
+		supersededBy = a.SupersededBy
+	}
+	_, err := r.db.ExecContext(ctx, query,
+		a.UUID, a.ConversationID, a.EntityID, a.Content,
+		a.ArtifactType, a.Language, a.Description,
+		encodeEmbedding(a.DescriptionEmbedding), supersededBy,
+		a.TurnNumber, now,
+	)
+	if err != nil {
+		return fmt.Errorf("insert artifact: %w", err)
+	}
+	a.CreatedAt = now
+	return nil
+}
+
+func (r *Repository) SupersedeArtifact(ctx context.Context, oldUUID, newUUID string) error {
+	query := `UPDATE mg_artifact SET superseded_by = ? WHERE uuid = ?`
+	query = r.rewritePlaceholders(query)
+	_, err := r.db.ExecContext(ctx, query, newUUID, oldUUID)
+	if err != nil {
+		return fmt.Errorf("supersede artifact: %w", err)
+	}
+	return nil
+}
+
+// ---- ArtifactReader ----
+
+func (r *Repository) ListActiveArtifacts(ctx context.Context, entityID, conversationID string) ([]*store.Artifact, error) {
+	query := `SELECT uuid, conversation_id, entity_id, content, artifact_type, language, description, description_embedding, superseded_by, turn_number, created_at FROM mg_artifact WHERE entity_id = ? AND conversation_id = ? AND superseded_by IS NULL ORDER BY created_at DESC`
+	query = r.rewritePlaceholders(query)
+	rows, err := r.db.QueryContext(ctx, query, entityID, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("list active artifacts: %w", err)
+	}
+	defer rows.Close()
+	return scanArtifacts(rows)
+}
+
+func (r *Repository) ListActiveArtifactsByEntity(ctx context.Context, entityID string) ([]*store.Artifact, error) {
+	query := `SELECT uuid, conversation_id, entity_id, content, artifact_type, language, description, description_embedding, superseded_by, turn_number, created_at FROM mg_artifact WHERE entity_id = ? AND superseded_by IS NULL ORDER BY created_at DESC`
+	query = r.rewritePlaceholders(query)
+	rows, err := r.db.QueryContext(ctx, query, entityID)
+	if err != nil {
+		return nil, fmt.Errorf("list active artifacts by entity: %w", err)
+	}
+	defer rows.Close()
+	return scanArtifacts(rows)
+}
+
+func scanArtifacts(rows *sql.Rows) ([]*store.Artifact, error) {
+	var out []*store.Artifact
+	for rows.Next() {
+		a := &store.Artifact{}
+		var raw []byte
+		var supersededBy sql.NullString
+		var createdAt flexTime
+		if err := rows.Scan(
+			&a.UUID, &a.ConversationID, &a.EntityID, &a.Content,
+			&a.ArtifactType, &a.Language, &a.Description,
+			&raw, &supersededBy, &a.TurnNumber, &createdAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan artifact: %w", err)
+		}
+		a.DescriptionEmbedding = decodeEmbedding(raw)
+		if supersededBy.Valid {
+			a.SupersededBy = supersededBy.String
+		}
+		a.CreatedAt = createdAt.Time
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ---- SessionMetadataWriter ----
+
+func (r *Repository) UpdateSessionMentions(ctx context.Context, sessionUUID string, mentions []string) error {
+	data, err := json.Marshal(mentions)
+	if err != nil {
+		return fmt.Errorf("marshal mentions: %w", err)
+	}
+	query := `UPDATE mg_session SET entity_mentions = ? WHERE uuid = ?`
+	query = r.rewritePlaceholders(query)
+	_, err = r.db.ExecContext(ctx, query, string(data), sessionUUID)
+	if err != nil {
+		return fmt.Errorf("update session mentions: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) IncrementSessionMessageCount(ctx context.Context, sessionUUID string) error {
+	query := `UPDATE mg_session SET message_count = message_count + 1 WHERE uuid = ?`
+	query = r.rewritePlaceholders(query)
+	_, err := r.db.ExecContext(ctx, query, sessionUUID)
+	if err != nil {
+		return fmt.Errorf("increment session message count: %w", err)
+	}
+	return nil
+}
+
+// ---- SessionMetadataReader ----
+
+func (r *Repository) GetSessionMentions(ctx context.Context, sessionUUID string) ([]string, error) {
+	query := `SELECT entity_mentions FROM mg_session WHERE uuid = ?`
+	query = r.rewritePlaceholders(query)
+	var mentionsJSON string
+	err := r.db.QueryRowContext(ctx, query, sessionUUID).Scan(&mentionsJSON)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get session mentions: %w", err)
+	}
+	var mentions []string
+	if err := json.Unmarshal([]byte(mentionsJSON), &mentions); err != nil {
+		return nil, fmt.Errorf("unmarshal session mentions: %w", err)
+	}
+	return mentions, nil
 }
 
 // ---- io.Closer ----

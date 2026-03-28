@@ -33,7 +33,7 @@ type Config struct {
 	RecallSummaryLimit     int               // max summaries per recall query (default 5)
 	RecallFactThreshold    float64           // min score for fact recall (default 0.3)
 	RecallSummaryThreshold float64           // min score for summary recall (default 0.3)
-	MaxRecallCandidates    int               // safety cap on facts loaded per recall pass (default 10000)
+	MaxRecallCandidates    int               // safety cap on facts loaded per recall pass (default 500)
 	ConsciousCacheTTL      time.Duration     // conscious cache entry lifetime (default 30s)
 	Debug                  bool              // enable verbose logging
 }

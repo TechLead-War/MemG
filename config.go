@@ -100,11 +100,11 @@ func DefaultConfig() *Config {
 		RetryBackoff:          time.Second,
 		EmbedDimension:        384,
 		PruneInterval:         5 * time.Minute,
-		MaxRecallCandidates:   10000,
+		MaxRecallCandidates:   50,
 		ConsciousMode:         true,
 		ConsciousLimit:        10,
 		ConsciousCacheTTL:     30 * time.Second,
-		WorkingMemoryTurns:    20,
+		WorkingMemoryTurns:    10,
 		MemoryTokenBudget:     4000,
 		SummaryTokenBudget:    1000,
 	}

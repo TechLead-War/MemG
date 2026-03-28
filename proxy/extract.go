@@ -24,13 +24,19 @@ type extractedFact struct {
 	Confidence    *float64 `json:"confidence"`
 }
 
-// DefaultExtractionStage is the built-in extraction stage that the proxy uses
-// when no custom stages are registered. It prompts an LLM to extract structured
-// facts from conversation messages and embeds them for vector search.
+// PromptBuilder is a function that builds the extraction prompt.
+// It receives the session context (date info, speaker names, etc.) and
+// returns the full system prompt for the extraction LLM.
+type PromptBuilder func(sessionCtx string) string
+
+// DefaultExtractionStage is the built-in extraction stage used by the proxy
+// and available to any caller (including benchmarks). It prompts an LLM to
+// extract structured facts from conversation messages and embeds them.
 type DefaultExtractionStage struct {
 	provider       llm.Provider
 	embedder       embed.Embedder
 	embeddingModel string
+	promptBuilder  PromptBuilder // nil = use default prompt
 }
 
 // NewDefaultExtractionStage creates the built-in extraction stage.
@@ -40,6 +46,14 @@ func NewDefaultExtractionStage(provider llm.Provider, embedder embed.Embedder) *
 		embedder:       embedder,
 		embeddingModel: embed.ModelNameOf(embedder),
 	}
+}
+
+// WithPromptBuilder sets a custom prompt builder for the extraction stage.
+// This allows callers (e.g. benchmarks) to use a domain-specific prompt
+// while sharing all other extraction, validation, and embedding logic.
+func (s *DefaultExtractionStage) WithPromptBuilder(pb PromptBuilder) *DefaultExtractionStage {
+	s.promptBuilder = pb
+	return s
 }
 
 // Name returns the human-readable label for this stage.
@@ -55,50 +69,21 @@ func (s *DefaultExtractionStage) Execute(ctx context.Context, job *augment.Job) 
 		return nil, nil
 	}
 
-	userMessages := userOnlyMessages(job.Messages)
-	if len(userMessages) == 0 {
-		return nil, nil
-	}
-
-	// Build a transcript from user-grounded messages only. This prevents the
-	// assistant's speculation from hardening into durable memory by default.
+	// Build a transcript from all messages so the LLM has full conversational
+	// context. Source role is determined post-extraction via word overlap to
+	// filter low-confidence assistant inferences.
 	var transcript strings.Builder
-	for _, msg := range userMessages {
+	for _, msg := range job.Messages {
 		fmt.Fprintf(&transcript, "%s: %s\n", msg.Role, msg.Content)
 	}
 
-	// Build the extraction prompt with today's date for temporal resolution.
-	now := time.Now()
-	today := now.Format("2006-01-02")
-	yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
-
-	prompt := fmt.Sprintf(`You are a knowledge extraction engine. Today's date is %s.
-
-Extract facts from this conversation. Return a JSON array. Each fact:
-{
-  "content": "the fact as a clear statement about the user",
-  "type": "identity|event|pattern",
-  "significance": 1-10,
-  "tag": "category label",
-  "slot": "semantic slot name (e.g. location, job, diet, name, email, relationship, preference)",
-  "reference_time": "ISO date if time-bound, empty string if not",
-  "confidence": 0.0-1.0
-}
-
-Rules:
-- "identity" = enduring truths (preferences, attributes, relationships)
-- "event" = things that happened at a specific time
-- "pattern" = behavioral tendencies observed across the conversation
-- "tag" = a category label. Use one of: skill, preference, relationship, medical, location, work, hobby, personal, financial, or other
-- "slot" = the semantic slot this fact fills. Use: location, job, diet, name, email, relationship, preference, medical, hobby, skill, or other
-- "reference_time" = ISO 8601 date (YYYY-MM-DD) for time-bound facts, empty string otherwise
-- "confidence" = how confident you are (1.0 = explicitly stated by user, 0.5 = inferred, 0.0 = guessing)
-- Resolve relative dates: "today" → "%s", "yesterday" → "%s"
-- Significance: 10 = life-critical (allergies, medical), 7-9 = important (job, location), 4-6 = moderate, 1-3 = trivial (lunch, weather)
-- Skip greetings, filler, "thank you", and trivial exchanges
-- If nothing is worth extracting, return []
-
-Return ONLY the JSON array, no other text.`, today, today, yesterday)
+	// Build the extraction prompt — use custom builder if set.
+	var prompt string
+	if s.promptBuilder != nil {
+		prompt = s.promptBuilder(job.SessionContext)
+	} else {
+		prompt = defaultExtractionPrompt(job.SessionContext)
+	}
 
 	req := &llm.Request{
 		System:    prompt,
@@ -121,12 +106,34 @@ Return ONLY the JSON array, no other text.`, today, today, yesterday)
 		return nil, nil
 	}
 
+	// Collect user vs assistant text for source_role determination.
+	var userText, assistantText strings.Builder
+	for _, msg := range job.Messages {
+		if msg.Role == llm.RoleUser {
+			userText.WriteString(strings.ToLower(msg.Content))
+			userText.WriteByte(' ')
+		} else {
+			assistantText.WriteString(strings.ToLower(msg.Content))
+			assistantText.WriteByte(' ')
+		}
+	}
+	userWords := strings.Fields(userText.String())
+	assistantWords := strings.Fields(assistantText.String())
+
 	facts := make([]*store.Fact, 0, len(extracted))
 	contents := make([]string, 0, len(extracted))
 
 	for _, ef := range extracted {
 		factType := resolveFactType(ef.Type)
 		significance := clampSignificance(ef.Significance)
+		sourceRole := inferSourceRole(ef.Content, userWords, assistantWords)
+		conf := confidenceValue(ef.Confidence)
+
+		// Drop low-confidence assistant-sourced facts per doc: prevents
+		// the system from hardening the model's guesses into durable memory.
+		if sourceRole == llm.RoleAssistant && conf < 0.7 {
+			continue
+		}
 
 		f := &store.Fact{
 			Content:        ef.Content,
@@ -135,9 +142,9 @@ Return ONLY the JSON array, no other text.`, today, today, yesterday)
 			TemporalStatus: store.TemporalCurrent,
 			Tag:            strings.ToLower(strings.TrimSpace(ef.Tag)),
 			Slot:           strings.ToLower(strings.TrimSpace(ef.Slot)),
-			Confidence:     confidenceValue(ef.Confidence),
+			Confidence:     conf,
 			EmbeddingModel: s.embeddingModel,
-			SourceRole:     llm.RoleUser,
+			SourceRole:     sourceRole,
 			ExpiresAt:      store.TTLForSignificance(significance),
 		}
 		if ef.ReferenceTime != "" {
@@ -335,14 +342,76 @@ func isTrivialTurn(messages []*llm.Message) bool {
 	return true
 }
 
-func userOnlyMessages(messages []*llm.Message) []*llm.Message {
-	out := make([]*llm.Message, 0, len(messages))
-	for _, msg := range messages {
-		if msg.Role == llm.RoleUser {
-			out = append(out, msg)
+// defaultExtractionPrompt builds the standard extraction prompt with temporal resolution.
+func defaultExtractionPrompt(sessionCtx string) string {
+	now := time.Now()
+	today := now.Format("2006-01-02")
+	yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
+
+	dateCtx := fmt.Sprintf("Today's date is %s.", today)
+	if sessionCtx != "" {
+		dateCtx = sessionCtx
+	}
+
+	return fmt.Sprintf(`You are a knowledge extraction engine. %s
+
+Extract facts from this conversation. Return a JSON array. Each fact:
+{
+  "content": "the fact as a clear statement, include the person's name if multiple speakers",
+  "type": "identity|event|pattern",
+  "significance": 1-10,
+  "tag": "category label",
+  "slot": "semantic slot name (e.g. location, job, diet, name, email, relationship, preference)",
+  "reference_time": "ISO date if time-bound, empty string if not",
+  "confidence": 0.0-1.0
+}
+
+Rules:
+- Extract facts about ALL participants in the conversation. Include names when attributing facts.
+- "identity" = enduring truths (preferences, attributes, relationships)
+- "event" = things that happened at a specific time
+- "pattern" = behavioral tendencies observed across the conversation
+- "tag" = a category label. Use one of: skill, preference, relationship, medical, location, work, hobby, personal, financial, or other
+- "slot" = the semantic slot this fact fills. Use: location, job, diet, name, email, relationship, preference, medical, hobby, skill, or other
+- "reference_time" = ISO 8601 date (YYYY-MM-DD) for time-bound facts, empty string otherwise
+- "confidence" = how confident you are (1.0 = explicitly stated, 0.5 = inferred, 0.0 = guessing)
+- Resolve relative dates: "today" → "%s", "yesterday" → "%s"
+- Significance: 10 = life-critical (allergies, medical), 7-9 = important (job, location), 4-6 = moderate, 1-3 = trivial (lunch, weather)
+- Also extract: sentiments, attitudes, opinions, specific phrases, and emotional states expressed by participants
+- Do NOT extract greetings or filler like 'hi', 'bye', 'thanks'. DO extract emotions, opinions, and attitudes even if they seem casual — they are facts
+- If nothing is worth extracting, return []
+
+Return ONLY the JSON array, no other text.`, dateCtx, today, yesterday)
+}
+
+// inferSourceRole determines whether a fact originated from user or assistant
+// messages by computing simple word overlap. This avoids relying on the LLM's
+// self-report per the architecture doc.
+func inferSourceRole(factContent string, userWords, assistantWords []string) string {
+	userSet := make(map[string]bool, len(userWords))
+	for _, w := range userWords {
+		userSet[w] = true
+	}
+	assistantSet := make(map[string]bool, len(assistantWords))
+	for _, w := range assistantWords {
+		assistantSet[w] = true
+	}
+
+	factTokens := strings.Fields(strings.ToLower(factContent))
+	userHits := 0
+	assistantHits := 0
+	for _, ft := range factTokens {
+		if userSet[ft] {
+			userHits++
+		}
+		if assistantSet[ft] {
+			assistantHits++
 		}
 	}
-	return out
+	if assistantHits > userHits {
+		return llm.RoleAssistant
+	}
+	return llm.RoleUser
 }
 
 func confidenceValue(v *float64) float64 {

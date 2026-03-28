@@ -19,11 +19,14 @@ from .client import MemGClient, MemGError
 from .config import MemGConfig
 from .types import (
     AddResult,
+    Attribute,
+    CanonicalSlot,
     ConsciousFact,
     Fact,
     FactFilter,
     Memory,
     MemoryInput,
+    Process,
     RecalledFact,
     SearchResult,
 )
@@ -40,9 +43,25 @@ from .embedder import (
     auto_detect_embedder,
 )
 from .search import HybridSearchEngine
-from .context import build_context
+from .context import build_context, adaptive_window_size
 from .recall import recall_facts, recall_summaries
 from .extract import run_extraction
+from .artifact_detect import DetectedArtifact, detect_artifacts
+from .artifact import store_artifacts, recall_artifacts
+from .turn_summary import maintain_turn_summaries
+from .entity_mentions import extract_entity_mentions
+from .consolidator import consolidate_entity
+from .conscious import load_conscious_context
+from .decay import prune_expired_and_stale
+from .reembed import backfill_missing_embeddings, re_embed_facts
+from .summary import generate_and_store_summary
+from .conversation import (
+    normalize_conversation_messages,
+    diff_incoming_messages,
+    merge_history,
+)
+from .query import QueryTransform, QueryTransformer
+from .recall_context import recall_and_build_context, RecallConfig
 
 __all__ = [
     # Core
@@ -68,6 +87,14 @@ __all__ = [
     "recall_facts",
     "recall_summaries",
     "run_extraction",
+    # Artifact & Turn Summary
+    "DetectedArtifact",
+    "detect_artifacts",
+    "store_artifacts",
+    "recall_artifacts",
+    "maintain_turn_summaries",
+    "extract_entity_mentions",
+    "adaptive_window_size",
     # Types
     "Memory",
     "MemoryInput",
@@ -77,6 +104,24 @@ __all__ = [
     "FactFilter",
     "RecalledFact",
     "ConsciousFact",
+    "CanonicalSlot",
+    "Process",
+    "Attribute",
+    # Consolidation & Conscious
+    "consolidate_entity",
+    "load_conscious_context",
+    # Decay & Reembed
+    "prune_expired_and_stale",
+    "backfill_missing_embeddings",
+    "re_embed_facts",
+    # Summary & Conversation
+    "generate_and_store_summary",
+    "normalize_conversation_messages",
+    "diff_incoming_messages",
+    "merge_history",
+    # Query
+    "QueryTransform",
+    "QueryTransformer",
 ]
 
 logger = logging.getLogger("memg")
@@ -340,7 +385,13 @@ class MemG:
             except Exception:
                 pass
 
-        self._store.update_conversation_summary(conversation_uuid, summary, embedding)
+        model_name = ""
+        if self._embedder and hasattr(self._embedder, "model_name"):
+            try:
+                model_name = self._embedder.model_name()
+            except Exception:
+                model_name = ""
+        self._store.update_conversation_summary(conversation_uuid, summary, embedding, embedding_model=model_name)
 
     def add(
         self,

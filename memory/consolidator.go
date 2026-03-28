@@ -6,6 +6,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"memg/embed"
@@ -17,12 +18,13 @@ import (
 // pattern facts, marks the originals as historical, and preserves a summary
 // of repeated behavior.
 type Consolidator struct {
-	repo     store.Repository
-	provider llm.Provider
-	embedder embed.Embedder
-	interval time.Duration
-	stopCh   chan struct{}
-	done     chan struct{}
+	repo      store.Repository
+	provider  llm.Provider
+	embedder  embed.Embedder
+	interval  time.Duration
+	stopCh    chan struct{}
+	done      chan struct{}
+	startOnce sync.Once
 }
 
 // NewConsolidator creates a consolidator that runs every interval.
@@ -38,13 +40,16 @@ func NewConsolidator(repo store.Repository, provider llm.Provider, embedder embe
 	}
 }
 
-// Start begins the background consolidation loop.
+// Start begins the background consolidation loop. It is safe to call Start
+// multiple times; subsequent calls are no-ops.
 func (c *Consolidator) Start() {
-	if c.interval <= 0 || c.provider == nil || c.embedder == nil {
-		close(c.done)
-		return
-	}
-	go c.loop()
+	c.startOnce.Do(func() {
+		if c.interval <= 0 || c.provider == nil || c.embedder == nil {
+			close(c.done)
+			return
+		}
+		go c.loop()
+	})
 }
 
 // Stop signals the consolidator to stop and waits for the loop to exit.
@@ -119,6 +124,7 @@ func (c *Consolidator) consolidateEntity(ctx context.Context, entityUUID string)
 		Statuses:            []store.TemporalStatus{store.TemporalCurrent},
 		ExcludeExpired:      true,
 		ReferenceTimeBefore: &cutoff,
+		MaxSignificance:     store.SignificanceMedium,
 	}
 
 	facts, err := c.repo.ListFactsFiltered(ctx, entityUUID, filter, 500)

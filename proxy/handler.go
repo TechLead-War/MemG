@@ -244,7 +244,7 @@ func (s *Server) recall(ctx context.Context, entityUUID, queryText string) strin
 
 			maxCandidates := s.cfg.MaxRecallCandidates
 			if maxCandidates <= 0 {
-				maxCandidates = 10000
+				maxCandidates = 50
 			}
 			facts, err := memory.RecallWithVector(
 				ctx, s.engine, s.cfg.Repo,
@@ -257,7 +257,7 @@ func (s *Server) recall(ctx context.Context, entityUUID, queryText string) strin
 
 			summaries, err := memory.RecallSummariesWithVector(
 				ctx, s.engine, s.cfg.Repo,
-				queryVec, queryText, entityUUID, summaryLimit, summaryThreshold,
+				queryVec, queryModel, queryText, entityUUID, summaryLimit, summaryThreshold,
 			)
 			if err != nil {
 				fmt.Printf("memg proxy: summary recall failed: %v\n", err)

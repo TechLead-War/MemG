@@ -5,12 +5,14 @@
 
 import { createHash, randomUUID } from 'crypto';
 import type {
+  Artifact,
   Fact,
   FactConversation,
   FactEntity,
   FactFilter,
   FactMessage,
   FactSession,
+  TurnSummary,
 } from './types.js';
 import { SCHEMA_DDL } from './schema.js';
 import BetterSqlite3 from 'better-sqlite3';
@@ -33,6 +35,19 @@ export interface Store {
   // Entity
   upsertEntity(externalId: string): MaybeAsync<string>;
   lookupEntity(externalId: string): MaybeAsync<FactEntity | null>;
+  listEntityUuids(limit: number): MaybeAsync<string[]>;
+
+  // Fact metadata (without embedding decoding)
+  listFactsMetadata(entityUuid: string, filter: FactFilter, limit: number): MaybeAsync<Fact[]>;
+
+  // Process
+  upsertProcess(externalId: string): MaybeAsync<string>;
+  insertProcessAttribute(processUuid: string, key: string, value: string): MaybeAsync<void>;
+
+  // Canonical slots
+  listCanonicalSlots(): MaybeAsync<Array<{name: string; embedding?: number[]; createdAt: string}>>;
+  insertCanonicalSlot(name: string, embedding: number[]): MaybeAsync<void>;
+  findCanonicalSlotByName(name: string): MaybeAsync<{name: string; embedding?: number[]; createdAt: string} | null>;
 
   // Fact CRUD
   insertFact(entityUuid: string, fact: Fact): MaybeAsync<void>;
@@ -49,6 +64,7 @@ export interface Store {
   deleteFact(entityUuid: string, factUuid: string): MaybeAsync<void>;
   deleteEntityFacts(entityUuid: string): MaybeAsync<number>;
   pruneExpiredFacts(entityUuid: string, now: string): MaybeAsync<number>;
+  pruneStaleSummaries(days?: number): MaybeAsync<number>;
   updateRecallUsage(factUuids: string[]): MaybeAsync<void>;
   listUnembeddedFacts(entityUuid: string, limit: number): MaybeAsync<Fact[]>;
   updateFactEmbedding(factUuid: string, embedding: number[], model: string): MaybeAsync<void>;
@@ -67,8 +83,25 @@ export interface Store {
   readMessages(conversationUuid: string): MaybeAsync<FactMessage[]>;
   readRecentMessages(conversationUuid: string, limit: number): MaybeAsync<FactMessage[]>;
   listConversationSummaries(entityUuid: string, limit: number): MaybeAsync<FactConversation[]>;
-  updateConversationSummary(conversationUuid: string, summary: string, embedding: number[]): MaybeAsync<void>;
+  updateConversationSummary(conversationUuid: string, summary: string, embedding: number[], embeddingModel: string): MaybeAsync<void>;
   findUnsummarizedConversation(entityUuid: string, excludeSessionUuid: string): MaybeAsync<FactConversation | null>;
+
+  // Turn Summary
+  insertTurnSummary(ts: TurnSummary): MaybeAsync<void>;
+  listTurnSummaries(conversationId: string): MaybeAsync<TurnSummary[]>;
+  countTurnSummaries(conversationId: string): MaybeAsync<number>;
+  deleteTurnSummaries(conversationId: string, uuids: string[]): MaybeAsync<void>;
+
+  // Artifact
+  insertArtifact(a: Artifact): MaybeAsync<void>;
+  supersedeArtifact(oldUuid: string, newUuid: string): MaybeAsync<void>;
+  listActiveArtifacts(entityId: string, conversationId: string): MaybeAsync<Artifact[]>;
+  listActiveArtifactsByEntity(entityId: string): MaybeAsync<Artifact[]>;
+
+  // Session metadata
+  updateSessionMentions(sessionUuid: string, mentions: string[]): MaybeAsync<void>;
+  incrementSessionMessageCount(sessionUuid: string): MaybeAsync<void>;
+  getSessionMentions(sessionUuid: string): MaybeAsync<string[]>;
 
   // Lifecycle
   close(): MaybeAsync<void>;
@@ -136,6 +169,7 @@ function rowToConversation(row: any): FactConversation {
     entityId: row.entity_id ?? '',
     summary: row.summary ?? '',
     summaryEmbedding: decodeEmbedding(row.summary_embedding),
+    summaryEmbeddingModel: row.summary_embedding_model ?? '',
     createdAt: row.created_at ?? undefined,
     updatedAt: row.updated_at ?? undefined,
   };
@@ -152,7 +186,92 @@ function rowToMessage(row: any): FactMessage {
   };
 }
 
+function rowToTurnSummary(row: any): TurnSummary {
+  return {
+    uuid: row.uuid,
+    conversationId: row.conversation_id,
+    entityId: row.entity_id,
+    startTurn: row.start_turn,
+    endTurn: row.end_turn,
+    summary: row.summary,
+    summaryEmbedding: decodeEmbedding(row.summary_embedding),
+    isOverview: row.is_overview === 1,
+    createdAt: row.created_at,
+  };
+}
+
+function rowToArtifact(row: any): Artifact {
+  return {
+    uuid: row.uuid,
+    conversationId: row.conversation_id,
+    entityId: row.entity_id,
+    content: row.content,
+    artifactType: row.artifact_type ?? 'code',
+    language: row.language ?? '',
+    description: row.description ?? '',
+    descriptionEmbedding: decodeEmbedding(row.description_embedding),
+    supersededBy: row.superseded_by ?? undefined,
+    turnNumber: row.turn_number ?? 0,
+    createdAt: row.created_at,
+  };
+}
+
 const FACT_COLUMNS = `uuid, content, embedding, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at`;
+
+function buildFactFilterClauses(filter: FactFilter): { clauses: string; args: any[] } {
+  let clauses = '';
+  const args: any[] = [];
+
+  if (filter.types && filter.types.length > 0) {
+    clauses += ` AND fact_type IN (${filter.types.map(() => '?').join(',')})`;
+    args.push(...filter.types);
+  }
+  if (filter.statuses && filter.statuses.length > 0) {
+    clauses += ` AND temporal_status IN (${filter.statuses.map(() => '?').join(',')})`;
+    args.push(...filter.statuses);
+  }
+  if (filter.tags && filter.tags.length > 0) {
+    clauses += ` AND tag IN (${filter.tags.map(() => '?').join(',')})`;
+    args.push(...filter.tags);
+  }
+  if (filter.minSignificance && filter.minSignificance > 0) {
+    clauses += ` AND significance >= ?`;
+    args.push(filter.minSignificance);
+  }
+  if (filter.excludeExpired) {
+    clauses += ` AND (expires_at IS NULL OR expires_at > ?)`;
+    args.push(nowISO());
+  }
+  if (filter.slots && filter.slots.length > 0) {
+    clauses += ` AND slot IN (${filter.slots.map(() => '?').join(',')})`;
+    args.push(...filter.slots);
+  }
+  if (filter.minConfidence && filter.minConfidence > 0) {
+    clauses += ` AND confidence >= ?`;
+    args.push(filter.minConfidence);
+  }
+  if (filter.sourceRoles && filter.sourceRoles.length > 0) {
+    clauses += ` AND source_role IN (${filter.sourceRoles.map(() => '?').join(',')})`;
+    args.push(...filter.sourceRoles);
+  }
+  if (filter.unembeddedOnly) {
+    clauses += ` AND embedding IS NULL`;
+  }
+  if (filter.maxSignificance && filter.maxSignificance > 0) {
+    clauses += ` AND significance <= ?`;
+    args.push(filter.maxSignificance);
+  }
+  if (filter.referenceTimeAfter) {
+    clauses += ` AND reference_time IS NOT NULL AND reference_time >= ?`;
+    args.push(filter.referenceTimeAfter);
+  }
+  if (filter.referenceTimeBefore) {
+    clauses += ` AND reference_time IS NOT NULL AND reference_time <= ?`;
+    args.push(filter.referenceTimeBefore);
+  }
+
+  return { clauses, args };
+}
 
 export class MemGStore implements Store {
   private db: Database;
@@ -192,6 +311,104 @@ export class MemGStore implements Store {
       .get(externalId) as any;
     if (!row) return null;
     return { uuid: row.uuid, externalId: row.external_id, createdAt: row.created_at };
+  }
+
+  listEntityUuids(limit: number): string[] {
+    const rows = this.db
+      .prepare(`SELECT DISTINCT uuid FROM mg_entity LIMIT ?`)
+      .all(limit) as any[];
+    return rows.map((r: any) => r.uuid);
+  }
+
+  // ---- Fact metadata ----
+
+  listFactsMetadata(entityUuid: string, filter: FactFilter, limit: number): Fact[] {
+    const metaCols = `uuid, content, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at`;
+    const { clauses, args: filterArgs } = buildFactFilterClauses(filter);
+    let query = `SELECT ${metaCols} FROM mg_entity_fact WHERE entity_id = ?${clauses}`;
+    const args: any[] = [entityUuid, ...filterArgs];
+
+    query += ` ORDER BY created_at DESC`;
+    if (limit > 0) {
+      query += ` LIMIT ?`;
+      args.push(limit);
+    }
+
+    const rows = this.db.prepare(query).all(...args) as any[];
+    return rows.map((row: any) => ({
+      uuid: row.uuid,
+      content: row.content,
+      createdAt: row.created_at ?? undefined,
+      updatedAt: row.updated_at ?? undefined,
+      factType: row.fact_type ?? 'identity',
+      temporalStatus: row.temporal_status ?? 'current',
+      significance: row.significance ?? 5,
+      contentKey: row.content_key ?? '',
+      referenceTime: row.reference_time ?? undefined,
+      expiresAt: row.expires_at ?? undefined,
+      reinforcedAt: row.reinforced_at ?? undefined,
+      reinforcedCount: row.reinforced_count ?? 0,
+      tag: row.tag ?? '',
+      slot: row.slot ?? '',
+      confidence: row.confidence ?? 1.0,
+      embeddingModel: row.embedding_model ?? '',
+      sourceRole: row.source_role ?? '',
+      recallCount: row.recall_count ?? 0,
+      lastRecalledAt: row.last_recalled_at ?? undefined,
+    }));
+  }
+
+  // ---- Process ----
+
+  upsertProcess(externalId: string): string {
+    const id = randomUUID();
+    this.db
+      .prepare(`INSERT OR IGNORE INTO mg_process (uuid, external_id) VALUES (?, ?)`)
+      .run(id, externalId);
+    const row = this.db
+      .prepare(`SELECT uuid FROM mg_process WHERE external_id = ?`)
+      .get(externalId) as { uuid: string } | undefined;
+    return row!.uuid;
+  }
+
+  insertProcessAttribute(processUuid: string, key: string, value: string): void {
+    const id = randomUUID();
+    const now = nowISO();
+    this.db
+      .prepare(`INSERT INTO mg_process_attribute (uuid, process_id, key, value, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(id, processUuid, key, value, now);
+  }
+
+  // ---- Canonical slots ----
+
+  listCanonicalSlots(): Array<{name: string; embedding?: number[]; createdAt: string}> {
+    const rows = this.db
+      .prepare(`SELECT name, embedding, created_at FROM mg_slot_canonical ORDER BY name ASC`)
+      .all() as any[];
+    return rows.map((row: any) => ({
+      name: row.name,
+      embedding: decodeEmbedding(row.embedding),
+      createdAt: row.created_at,
+    }));
+  }
+
+  insertCanonicalSlot(name: string, embedding: number[]): void {
+    const buf = encodeEmbedding(embedding);
+    this.db
+      .prepare(`INSERT OR IGNORE INTO mg_slot_canonical (name, embedding) VALUES (?, ?)`)
+      .run(name, buf);
+  }
+
+  findCanonicalSlotByName(name: string): {name: string; embedding?: number[]; createdAt: string} | null {
+    const row = this.db
+      .prepare(`SELECT name, embedding, created_at FROM mg_slot_canonical WHERE name = ?`)
+      .get(name) as any;
+    if (!row) return null;
+    return {
+      name: row.name,
+      embedding: decodeEmbedding(row.embedding),
+      createdAt: row.created_at,
+    };
   }
 
   // ---- Fact CRUD ----
@@ -248,41 +465,9 @@ export class MemGStore implements Store {
   }
 
   listFactsFiltered(entityUuid: string, filter: FactFilter, limit: number): Fact[] {
-    let query = `SELECT ${FACT_COLUMNS} FROM mg_entity_fact WHERE entity_id = ?`;
-    const args: any[] = [entityUuid];
-
-    if (filter.types && filter.types.length > 0) {
-      query += ` AND fact_type IN (${filter.types.map(() => '?').join(',')})`;
-      args.push(...filter.types);
-    }
-    if (filter.statuses && filter.statuses.length > 0) {
-      query += ` AND temporal_status IN (${filter.statuses.map(() => '?').join(',')})`;
-      args.push(...filter.statuses);
-    }
-    if (filter.tags && filter.tags.length > 0) {
-      query += ` AND tag IN (${filter.tags.map(() => '?').join(',')})`;
-      args.push(...filter.tags);
-    }
-    if (filter.minSignificance && filter.minSignificance > 0) {
-      query += ` AND significance >= ?`;
-      args.push(filter.minSignificance);
-    }
-    if (filter.excludeExpired) {
-      query += ` AND (expires_at IS NULL OR expires_at > ?)`;
-      args.push(nowISO());
-    }
-    if (filter.slots && filter.slots.length > 0) {
-      query += ` AND slot IN (${filter.slots.map(() => '?').join(',')})`;
-      args.push(...filter.slots);
-    }
-    if (filter.minConfidence && filter.minConfidence > 0) {
-      query += ` AND confidence >= ?`;
-      args.push(filter.minConfidence);
-    }
-    if (filter.sourceRoles && filter.sourceRoles.length > 0) {
-      query += ` AND source_role IN (${filter.sourceRoles.map(() => '?').join(',')})`;
-      args.push(...filter.sourceRoles);
-    }
+    const { clauses, args: filterArgs } = buildFactFilterClauses(filter);
+    let query = `SELECT ${FACT_COLUMNS} FROM mg_entity_fact WHERE entity_id = ?${clauses}`;
+    const args: any[] = [entityUuid, ...filterArgs];
 
     query += ` ORDER BY created_at DESC`;
     if (limit > 0) {
@@ -295,43 +480,11 @@ export class MemGStore implements Store {
   }
 
   listFactsForRecall(entityUuid: string, filter: FactFilter, limit: number): Fact[] {
-    let query = `SELECT ${FACT_COLUMNS} FROM mg_entity_fact WHERE entity_id = ?`;
-    const args: any[] = [entityUuid];
+    const { clauses, args: filterArgs } = buildFactFilterClauses(filter);
+    let query = `SELECT ${FACT_COLUMNS} FROM mg_entity_fact WHERE entity_id = ?${clauses}`;
+    const args: any[] = [entityUuid, ...filterArgs];
 
-    if (filter.types && filter.types.length > 0) {
-      query += ` AND fact_type IN (${filter.types.map(() => '?').join(',')})`;
-      args.push(...filter.types);
-    }
-    if (filter.statuses && filter.statuses.length > 0) {
-      query += ` AND temporal_status IN (${filter.statuses.map(() => '?').join(',')})`;
-      args.push(...filter.statuses);
-    }
-    if (filter.tags && filter.tags.length > 0) {
-      query += ` AND tag IN (${filter.tags.map(() => '?').join(',')})`;
-      args.push(...filter.tags);
-    }
-    if (filter.minSignificance && filter.minSignificance > 0) {
-      query += ` AND significance >= ?`;
-      args.push(filter.minSignificance);
-    }
-    if (filter.excludeExpired) {
-      query += ` AND (expires_at IS NULL OR expires_at > ?)`;
-      args.push(nowISO());
-    }
-    if (filter.slots && filter.slots.length > 0) {
-      query += ` AND slot IN (${filter.slots.map(() => '?').join(',')})`;
-      args.push(...filter.slots);
-    }
-    if (filter.minConfidence && filter.minConfidence > 0) {
-      query += ` AND confidence >= ?`;
-      args.push(filter.minConfidence);
-    }
-    if (filter.sourceRoles && filter.sourceRoles.length > 0) {
-      query += ` AND source_role IN (${filter.sourceRoles.map(() => '?').join(',')})`;
-      args.push(...filter.sourceRoles);
-    }
-
-    // No ORDER BY created_at — prevents newest-first bias in recall.
+    query += ` ORDER BY significance DESC, created_at DESC`;
     if (limit > 0) {
       query += ` LIMIT ?`;
       args.push(limit);
@@ -388,11 +541,37 @@ export class MemGStore implements Store {
   }
 
   pruneExpiredFacts(entityUuid: string, now: string): number {
+    let total = 0;
+    for (;;) {
+      let selectQuery = `SELECT uuid FROM mg_entity_fact WHERE expires_at IS NOT NULL AND expires_at < ?`;
+      const selectArgs: any[] = [now];
+      if (entityUuid) {
+        selectQuery = `SELECT uuid FROM mg_entity_fact WHERE entity_id = ? AND expires_at IS NOT NULL AND expires_at < ?`;
+        selectArgs.unshift(entityUuid);
+      }
+      selectQuery += ` LIMIT 1000`;
+      const rows = this.db
+        .prepare(selectQuery)
+        .all(...selectArgs) as any[];
+      if (rows.length === 0) break;
+      const uuids = rows.map((r: any) => r.uuid);
+      const placeholders = uuids.map(() => '?').join(',');
+      this.db
+        .prepare(`DELETE FROM mg_entity_fact WHERE uuid IN (${placeholders})`)
+        .run(...uuids);
+      total += uuids.length;
+      if (uuids.length < 1000) break;
+    }
+    return total;
+  }
+
+  pruneStaleSummaries(days: number = 90): number {
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const result = this.db
       .prepare(
-        `DELETE FROM mg_entity_fact WHERE entity_id = ? AND expires_at IS NOT NULL AND expires_at < ?`
+        `UPDATE mg_conversation SET summary = '', summary_embedding = NULL WHERE created_at < ? AND summary != ''`
       )
-      .run(entityUuid, now);
+      .run(cutoff);
     return result.changes;
   }
 
@@ -421,13 +600,15 @@ export class MemGStore implements Store {
 
     const row = this.db
       .prepare(
-        `SELECT uuid, entity_id, process_id, created_at, expires_at FROM mg_session WHERE entity_id = ? AND process_id = ? AND expires_at > ? ORDER BY created_at DESC LIMIT 1`
+        `SELECT uuid, entity_id, process_id, created_at, expires_at, entity_mentions, message_count FROM mg_session WHERE entity_id = ? AND process_id = ? AND expires_at > ? ORDER BY created_at DESC LIMIT 1`
       )
       .get(entityUuid, processUuid, nowStr) as any;
 
     if (row) {
       const newExpiry = new Date(now.getTime() + timeoutMs).toISOString();
       this.db.prepare(`UPDATE mg_session SET expires_at = ? WHERE uuid = ?`).run(newExpiry, row.uuid);
+      let mentions: string[] = [];
+      try { mentions = JSON.parse(row.entity_mentions ?? '[]'); } catch { mentions = []; }
       return {
         session: {
           uuid: row.uuid,
@@ -435,6 +616,8 @@ export class MemGStore implements Store {
           processId: row.process_id,
           createdAt: row.created_at,
           expiresAt: newExpiry,
+          entityMentions: mentions,
+          messageCount: row.message_count ?? 0,
         },
         isNew: false,
       };
@@ -455,6 +638,8 @@ export class MemGStore implements Store {
         processId: processUuid,
         createdAt: nowStr,
         expiresAt,
+        entityMentions: [],
+        messageCount: 0,
       },
       isNew: true,
     };
@@ -476,7 +661,7 @@ export class MemGStore implements Store {
   activeConversation(sessionUuid: string): FactConversation | null {
     const row = this.db
       .prepare(
-        `SELECT uuid, session_id, entity_id, summary, created_at, updated_at FROM mg_conversation WHERE session_id = ? ORDER BY created_at DESC LIMIT 1`
+        `SELECT uuid, session_id, entity_id, summary, summary_embedding_model, created_at, updated_at FROM mg_conversation WHERE session_id = ? ORDER BY created_at DESC LIMIT 1`
       )
       .get(sessionUuid) as any;
     if (!row) return null;
@@ -491,6 +676,9 @@ export class MemGStore implements Store {
         `INSERT INTO mg_message (uuid, conversation_id, role, content, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)`
       )
       .run(msg.uuid, conversationUuid, msg.role, msg.content, msg.kind ?? 'text', msg.createdAt ?? now);
+    this.db
+      .prepare(`UPDATE mg_conversation SET updated_at = ? WHERE uuid = ?`)
+      .run(now, conversationUuid);
   }
 
   readMessages(conversationUuid: string): FactMessage[] {
@@ -512,7 +700,7 @@ export class MemGStore implements Store {
   }
 
   listConversationSummaries(entityUuid: string, limit: number): FactConversation[] {
-    let query = `SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at FROM mg_conversation WHERE entity_id = ? AND summary != '' AND summary_embedding IS NOT NULL ORDER BY created_at DESC`;
+    let query = `SELECT uuid, session_id, entity_id, summary, summary_embedding, summary_embedding_model, created_at, updated_at FROM mg_conversation WHERE entity_id = ? AND summary != '' AND summary_embedding IS NOT NULL ORDER BY created_at DESC`;
     const args: any[] = [entityUuid];
     if (limit > 0) {
       query += ` LIMIT ?`;
@@ -525,21 +713,22 @@ export class MemGStore implements Store {
   updateConversationSummary(
     conversationUuid: string,
     summary: string,
-    embedding: number[]
+    embedding: number[],
+    embeddingModel: string = ''
   ): void {
     const now = nowISO();
     const embBuf = encodeEmbedding(embedding);
     this.db
       .prepare(
-        `UPDATE mg_conversation SET summary = ?, summary_embedding = ?, updated_at = ? WHERE uuid = ?`
+        `UPDATE mg_conversation SET summary = ?, summary_embedding = ?, summary_embedding_model = ?, updated_at = ? WHERE uuid = ?`
       )
-      .run(summary, embBuf, now, conversationUuid);
+      .run(summary, embBuf, embeddingModel, now, conversationUuid);
   }
 
   findUnsummarizedConversation(entityUuid: string, excludeSessionUuid: string): FactConversation | null {
     const row = this.db
       .prepare(
-        `SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at
+        `SELECT uuid, session_id, entity_id, summary, summary_embedding, summary_embedding_model, created_at, updated_at
          FROM mg_conversation
          WHERE entity_id = ? AND session_id != ? AND (summary IS NULL OR summary = '')
          ORDER BY created_at DESC LIMIT 1`
@@ -566,6 +755,124 @@ export class MemGStore implements Store {
         `UPDATE mg_entity_fact SET embedding = ?, embedding_model = ?, updated_at = ? WHERE uuid = ?`
       )
       .run(buf, model, nowISO(), factUuid);
+  }
+
+  // ---- Turn Summary ----
+
+  insertTurnSummary(ts: TurnSummary): void {
+    if (!ts.uuid) ts.uuid = randomUUID();
+    const embedding = ts.summaryEmbedding ? encodeEmbedding(ts.summaryEmbedding) : null;
+    this.db
+      .prepare(
+        `INSERT INTO mg_turn_summary (uuid, conversation_id, entity_id, start_turn, end_turn, summary, summary_embedding, is_overview, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        ts.uuid,
+        ts.conversationId,
+        ts.entityId,
+        ts.startTurn,
+        ts.endTurn,
+        ts.summary,
+        embedding,
+        ts.isOverview ? 1 : 0,
+        ts.createdAt ?? nowISO()
+      );
+  }
+
+  listTurnSummaries(conversationId: string): TurnSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT uuid, conversation_id, entity_id, start_turn, end_turn, summary, summary_embedding, is_overview, created_at FROM mg_turn_summary WHERE conversation_id = ? ORDER BY is_overview ASC, start_turn ASC`
+      )
+      .all(conversationId) as any[];
+    return rows.map(rowToTurnSummary);
+  }
+
+  countTurnSummaries(conversationId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) as cnt FROM mg_turn_summary WHERE conversation_id = ? AND is_overview = 0`
+      )
+      .get(conversationId) as any;
+    return row?.cnt ?? 0;
+  }
+
+  deleteTurnSummaries(conversationId: string, uuids: string[]): void {
+    if (uuids.length === 0) return;
+    const placeholders = uuids.map(() => '?').join(',');
+    this.db
+      .prepare(`DELETE FROM mg_turn_summary WHERE conversation_id = ? AND uuid IN (${placeholders})`)
+      .run(conversationId, ...uuids);
+  }
+
+  // ---- Artifact ----
+
+  insertArtifact(a: Artifact): void {
+    if (!a.uuid) a.uuid = randomUUID();
+    const embedding = a.descriptionEmbedding ? encodeEmbedding(a.descriptionEmbedding) : null;
+    this.db
+      .prepare(
+        `INSERT INTO mg_artifact (uuid, conversation_id, entity_id, content, artifact_type, language, description, description_embedding, superseded_by, turn_number, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        a.uuid,
+        a.conversationId,
+        a.entityId,
+        a.content,
+        a.artifactType ?? 'code',
+        a.language ?? '',
+        a.description ?? '',
+        embedding,
+        a.supersededBy ?? null,
+        a.turnNumber ?? 0,
+        a.createdAt ?? nowISO()
+      );
+  }
+
+  supersedeArtifact(oldUuid: string, newUuid: string): void {
+    this.db
+      .prepare(`UPDATE mg_artifact SET superseded_by = ? WHERE uuid = ?`)
+      .run(newUuid, oldUuid);
+  }
+
+  listActiveArtifacts(entityId: string, conversationId: string): Artifact[] {
+    const rows = this.db
+      .prepare(
+        `SELECT uuid, conversation_id, entity_id, content, artifact_type, language, description, description_embedding, superseded_by, turn_number, created_at FROM mg_artifact WHERE entity_id = ? AND conversation_id = ? AND superseded_by IS NULL ORDER BY created_at DESC`
+      )
+      .all(entityId, conversationId) as any[];
+    return rows.map(rowToArtifact);
+  }
+
+  listActiveArtifactsByEntity(entityId: string): Artifact[] {
+    const rows = this.db
+      .prepare(
+        `SELECT uuid, conversation_id, entity_id, content, artifact_type, language, description, description_embedding, superseded_by, turn_number, created_at FROM mg_artifact WHERE entity_id = ? AND superseded_by IS NULL ORDER BY created_at DESC`
+      )
+      .all(entityId) as any[];
+    return rows.map(rowToArtifact);
+  }
+
+  // ---- Session metadata ----
+
+  updateSessionMentions(sessionUuid: string, mentions: string[]): void {
+    this.db
+      .prepare(`UPDATE mg_session SET entity_mentions = ? WHERE uuid = ?`)
+      .run(JSON.stringify(mentions), sessionUuid);
+  }
+
+  incrementSessionMessageCount(sessionUuid: string): void {
+    this.db
+      .prepare(`UPDATE mg_session SET message_count = message_count + 1 WHERE uuid = ?`)
+      .run(sessionUuid);
+  }
+
+  getSessionMentions(sessionUuid: string): string[] {
+    const row = this.db
+      .prepare(`SELECT entity_mentions FROM mg_session WHERE uuid = ?`)
+      .get(sessionUuid) as any;
+    if (!row) return [];
+    try { return JSON.parse(row.entity_mentions ?? '[]'); } catch { return []; }
   }
 
   // ---- Lifecycle ----

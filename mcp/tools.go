@@ -322,7 +322,7 @@ func (s *Server) toolSearchMemories(ctx context.Context, args json.RawMessage) (
 		return nil, fmt.Errorf("entity resolution failed: %w", err)
 	}
 
-	results, err := memory.Recall(ctx, s.cfg.Embedder, s.engine, s.cfg.Repo, p.Query, entityUUID, p.Limit, 0.1, 10000)
+	results, err := memory.Recall(ctx, s.cfg.Embedder, s.engine, s.cfg.Repo, p.Query, entityUUID, p.Limit, 0.1, 500)
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}

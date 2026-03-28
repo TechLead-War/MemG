@@ -41,6 +41,7 @@ type FactFilter struct {
 	Statuses           []TemporalStatus // nil = all statuses
 	Tags               []string         // nil = all tags; filter by category label
 	MinSignificance    Significance     // 0 = no minimum
+	MaxSignificance    Significance     // 0 = no maximum
 	ExcludeExpired     bool             // true = skip facts past ExpiresAt
 	ReferenceTimeAfter  *time.Time      // nil = no lower bound on reference_time
 	ReferenceTimeBefore *time.Time      // nil = no upper bound on reference_time
@@ -123,7 +124,7 @@ type CanonicalSlotStore interface {
 type ConversationWriter interface {
 	StartConversation(ctx context.Context, sessionUUID, entityUUID string) (uuid string, err error)
 	// UpdateConversationSummary stores a summary and its embedding for a conversation.
-	UpdateConversationSummary(ctx context.Context, conversationUUID, summary string, embedding []float32) error
+	UpdateConversationSummary(ctx context.Context, conversationUUID, summary string, embedding []float32, embeddingModel string) error
 }
 
 // ConversationPruner manages conversation lifecycle cleanup.
@@ -175,6 +176,41 @@ type ProcessAttributeWriter interface {
 	InsertProcessAttribute(ctx context.Context, processUUID string, attr *Attribute) error
 }
 
+// TurnSummaryWriter persists turn summaries for a conversation.
+type TurnSummaryWriter interface {
+	InsertTurnSummary(ctx context.Context, ts *TurnSummary) error
+	DeleteTurnSummaries(ctx context.Context, conversationID string, uuids []string) error
+}
+
+// TurnSummaryReader retrieves turn summaries for a conversation.
+type TurnSummaryReader interface {
+	ListTurnSummaries(ctx context.Context, conversationID string) ([]*TurnSummary, error)
+	CountTurnSummaries(ctx context.Context, conversationID string) (int, error)
+}
+
+// ArtifactWriter persists artifacts produced during conversations.
+type ArtifactWriter interface {
+	InsertArtifact(ctx context.Context, a *Artifact) error
+	SupersedeArtifact(ctx context.Context, oldUUID, newUUID string) error
+}
+
+// ArtifactReader retrieves active artifacts.
+type ArtifactReader interface {
+	ListActiveArtifacts(ctx context.Context, entityID, conversationID string) ([]*Artifact, error)
+	ListActiveArtifactsByEntity(ctx context.Context, entityID string) ([]*Artifact, error)
+}
+
+// SessionMetadataWriter updates session-level metadata.
+type SessionMetadataWriter interface {
+	UpdateSessionMentions(ctx context.Context, sessionUUID string, mentions []string) error
+	IncrementSessionMessageCount(ctx context.Context, sessionUUID string) error
+}
+
+// SessionMetadataReader reads session-level metadata.
+type SessionMetadataReader interface {
+	GetSessionMentions(ctx context.Context, sessionUUID string) ([]string, error)
+}
+
 // Migrator handles schema creation and version upgrades.
 type Migrator interface {
 	Migrate(ctx context.Context) error
@@ -199,6 +235,12 @@ type Repository interface {
 	MessageWriter
 	MessageReader
 	SessionWriter
+	SessionMetadataWriter
+	SessionMetadataReader
+	TurnSummaryWriter
+	TurnSummaryReader
+	ArtifactWriter
+	ArtifactReader
 	ProcessWriter
 	ProcessAttributeWriter
 	Migrator

@@ -57,11 +57,13 @@ func mysqlQueries() Queries {
 				"FOREIGN KEY (process_id) REFERENCES mg_process(uuid)" +
 				")",
 			"CREATE TABLE IF NOT EXISTS mg_session (" +
-				"uuid       VARCHAR(36) PRIMARY KEY," +
-				"entity_id  VARCHAR(36) NOT NULL," +
-				"process_id VARCHAR(36) NOT NULL DEFAULT ''," +
-				"created_at DATETIME NOT NULL," +
-				"expires_at DATETIME NOT NULL," +
+				"uuid            VARCHAR(36) PRIMARY KEY," +
+				"entity_id       VARCHAR(36) NOT NULL," +
+				"process_id      VARCHAR(36) NOT NULL DEFAULT ''," +
+				"created_at      DATETIME NOT NULL," +
+				"expires_at      DATETIME NOT NULL," +
+				"entity_mentions TEXT NOT NULL," +
+				"message_count   INTEGER NOT NULL DEFAULT 0," +
 				"INDEX idx_mg_session_lookup (entity_id, process_id, expires_at)" +
 				")",
 			"CREATE TABLE IF NOT EXISTS mg_conversation (" +
@@ -70,6 +72,7 @@ func mysqlQueries() Queries {
 				"entity_id         VARCHAR(36) NOT NULL DEFAULT ''," +
 				"summary           TEXT NOT NULL," +
 				"summary_embedding LONGBLOB," +
+				"summary_embedding_model VARCHAR(255) NOT NULL DEFAULT ''," +
 				"created_at        DATETIME NOT NULL," +
 				"updated_at        DATETIME NOT NULL," +
 				"INDEX idx_mg_conv_session (session_id, created_at)" +
@@ -88,6 +91,33 @@ func mysqlQueries() Queries {
 				"name       VARCHAR(255) PRIMARY KEY," +
 				"embedding  LONGBLOB NOT NULL," +
 				"created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP" +
+				")",
+			"CREATE TABLE IF NOT EXISTS mg_turn_summary (" +
+				"uuid              VARCHAR(36) PRIMARY KEY," +
+				"conversation_id   VARCHAR(36) NOT NULL," +
+				"entity_id         VARCHAR(36) NOT NULL," +
+				"start_turn        INTEGER NOT NULL," +
+				"end_turn          INTEGER NOT NULL," +
+				"summary           TEXT NOT NULL," +
+				"summary_embedding LONGBLOB," +
+				"is_overview       INTEGER NOT NULL DEFAULT 0," +
+				"created_at        DATETIME NOT NULL," +
+				"INDEX idx_mg_turnsummary_conv (conversation_id, is_overview, created_at)" +
+				")",
+			"CREATE TABLE IF NOT EXISTS mg_artifact (" +
+				"uuid                  VARCHAR(36) PRIMARY KEY," +
+				"conversation_id       VARCHAR(36) NOT NULL," +
+				"entity_id             VARCHAR(36) NOT NULL," +
+				"content               TEXT NOT NULL," +
+				"artifact_type         VARCHAR(50) NOT NULL DEFAULT 'code'," +
+				"language              VARCHAR(50) NOT NULL DEFAULT ''," +
+				"description           TEXT NOT NULL," +
+				"description_embedding LONGBLOB," +
+				"superseded_by         VARCHAR(36)," +
+				"turn_number           INTEGER NOT NULL DEFAULT 0," +
+				"created_at            DATETIME NOT NULL," +
+				"INDEX idx_mg_artifact_entity (entity_id, created_at)," +
+				"INDEX idx_mg_artifact_conv (conversation_id, created_at)" +
 				")",
 			"CREATE TABLE IF NOT EXISTS mg_schema_version (" +
 				"id      INTEGER PRIMARY KEY DEFAULT 1," +
@@ -122,8 +152,8 @@ func mysqlQueries() Queries {
 		ConvInsert:          `INSERT INTO mg_conversation (uuid, session_id, entity_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
 		ConvSelect:          `SELECT uuid, session_id, entity_id, summary, created_at, updated_at FROM mg_conversation WHERE uuid = ?`,
 		ConvSelectActive:    `SELECT uuid, session_id, entity_id, summary, created_at, updated_at FROM mg_conversation WHERE session_id = ? ORDER BY created_at DESC LIMIT 1`,
-		ConvUpdateSummary:   `UPDATE mg_conversation SET summary = ?, summary_embedding = ?, updated_at = ? WHERE uuid = ?`,
-		ConvSelectSummaries:    `SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at FROM mg_conversation WHERE entity_id = ? AND summary != '' AND summary_embedding IS NOT NULL ORDER BY created_at DESC LIMIT ?`,
+		ConvUpdateSummary:   `UPDATE mg_conversation SET summary = ?, summary_embedding = ?, summary_embedding_model = ?, updated_at = ? WHERE uuid = ?`,
+		ConvSelectSummaries:    `SELECT uuid, session_id, entity_id, summary, summary_embedding, summary_embedding_model, created_at, updated_at FROM mg_conversation WHERE entity_id = ? AND summary != '' AND summary_embedding IS NOT NULL ORDER BY created_at DESC LIMIT ?`,
 		ConvSelectUnsummarized: `SELECT uuid, session_id, entity_id, summary, created_at, updated_at FROM mg_conversation WHERE entity_id = ? AND summary = '' AND session_id != ? ORDER BY created_at DESC LIMIT 1`,
 		ConvPruneSummaries:     `UPDATE mg_conversation SET summary = '', summary_embedding = NULL, updated_at = ? WHERE summary != '' AND created_at < ?`,
 
@@ -131,8 +161,8 @@ func mysqlQueries() Queries {
 		MsgSelect:       `SELECT uuid, conversation_id, role, content, kind, created_at FROM mg_message WHERE conversation_id = ? ORDER BY created_at ASC`,
 		MsgSelectRecent: `SELECT uuid, conversation_id, role, content, kind, created_at FROM mg_message WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?`,
 
-		SessionInsert: `INSERT INTO mg_session (uuid, entity_id, process_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
-		SessionSelect: `SELECT uuid, entity_id, process_id, created_at, expires_at FROM mg_session WHERE entity_id = ? AND process_id = ? AND expires_at > ? ORDER BY created_at DESC LIMIT 1`,
+		SessionInsert: `INSERT INTO mg_session (uuid, entity_id, process_id, created_at, expires_at, entity_mentions, message_count) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		SessionSelect: `SELECT uuid, entity_id, process_id, created_at, expires_at, entity_mentions, message_count FROM mg_session WHERE entity_id = ? AND process_id = ? AND expires_at > ? ORDER BY created_at DESC LIMIT 1`,
 		SessionSlide:  `UPDATE mg_session SET expires_at = ? WHERE uuid = ?`,
 
 		ProcessInsert:   `INSERT IGNORE INTO mg_process (uuid, external_id) VALUES (?, ?)`,

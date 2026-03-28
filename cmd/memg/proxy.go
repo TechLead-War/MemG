@@ -124,7 +124,7 @@ func runProxy(args []string) {
 		RecallFactThreshold:    fc.RecallThresholdVal(0.10),
 		RecallSummaryLimit:     fc.RecallSummaryLimitVal(5),
 		RecallSummaryThreshold: fc.RecallSummaryThresholdVal(0.30),
-		MaxRecallCandidates:    10000,
+		MaxRecallCandidates:    500,
 		PruneInterval:          fc.PruneIntervalDuration(5 * time.Minute),
 		Debug:                  fc.Debug,
 	}

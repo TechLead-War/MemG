@@ -162,7 +162,7 @@ Semantic retrieval handles long-term memory — recalling facts from days or wee
 MemG groups messages into **sessions**. A session is an inactivity-bounded window (default: 30 minutes) during which all messages belong to the same conversation. Sessions use **sliding expiry** — each new message resets the timeout clock. When the user sends a message:
 
 1. MemG checks if there's an active session (one whose expiry time is still in the future). If found, the expiry is advanced forward by the timeout duration.
-2. The most recent messages from that session's conversation are loaded (capped by `WorkingMemoryTurns`, default 20) and prepended to the LLM request. The model sees recent conversation context without unbounded history growth.
+2. The most recent messages from that session's conversation are loaded (capped by `WorkingMemoryTurns`, default 10) and prepended to the LLM request. The model sees recent conversation context without unbounded history growth.
 3. If no active session exists (the timeout elapsed without activity), a new session and conversation are started. The old session's conversation is summarized in the background (see Technique 5). The model sees only the current message — a clean slate.
 4. After the LLM responds, both the user's message and the model's response are appended to the conversation log.
 
@@ -449,7 +449,7 @@ Every fact gets a **significance level** assigned by the extraction stage at cre
 | Medium | `5` (SignificanceMedium) | "User is reading Project Hail Mary", "User works at Google" | 30 days | Relevant for a while, then stale |
 | Low | `1–4` | "User ate pasta for lunch", "User's meeting was moved to 3pm" | 7 days | Ephemeral, useful only short-term |
 
-A background pruner periodically scans for facts whose TTL has expired and removes them from the database. This keeps the fact store from growing without bound and naturally prioritizes durable knowledge over transient details.
+A pruning operation scans for facts whose TTL has expired and removes them from the database. This keeps the fact store from growing without bound and naturally prioritizes durable knowledge over transient details. Pruning is exposed as a one-shot function (`PruneExpiredFacts` / `PruneStaleSummaries`). In single-instance deployments, the Go library runs an in-process pruner on a configurable interval (`WithPruneInterval`, default: 5 minutes). In horizontally scaled deployments, disable the in-process timer and trigger pruning via an external scheduler (cron job, Kubernetes CronJob, task queue) to avoid duplicate work across instances.
 
 **Important clarification: significance is not search weight.** A common misconception is that high-significance facts should rank higher in retrieval results. This would cause the system to mention your peanut allergy in response to every query — "What's the weather?" would somehow surface allergy information because it has a high significance score. That is not how human memory works. You do not think about your peanut allergy while watching a movie. It surfaces only when something triggers it — someone offers you food, a restaurant menu appears, a recipe mentions peanuts.
 
@@ -511,11 +511,11 @@ This is enough to demote historical facts below their current counterparts but n
 **3. Significance acts as a tiebreaker.** Among facts with nearly identical relevance scores, significance provides a small nudge — a maximum boost of **0.01**:
 
 ```
-tiebreaker = significance_normalized × 0.01
+tiebreaker = significance × 0.001
 final_score = relevance_score + tiebreaker
 ```
 
-This is deliberately tiny. A significance boost of 0.01 cannot override a relevance difference of 0.05. It only matters when two facts are essentially tied on relevance — in that case, the more significant fact wins. This prevents significance from distorting retrieval while still allowing it to break ties sensibly.
+Where `significance` is the raw integer (1–10). For significance 10, the maximum tiebreaker is 0.01. This is deliberately tiny. A significance boost of 0.01 cannot override a relevance difference of 0.05. It only matters when two facts are essentially tied on relevance — in that case, the more significant fact wins. This prevents significance from distorting retrieval while still allowing it to break ties sensibly.
 
 **4. Historical facts are annotated in context.** When historical facts are injected into the LLM's system prompt, they are explicitly marked:
 
@@ -744,20 +744,29 @@ BEFORE the LLM call:
 │   │     • "User is vegetarian" (significance: 8)
 │   │     • "User lives in downtown Portland" (significance: 8)
 │   │
-│   ├── Priority 2: Recalled facts (query-relevant, using pre-computed vector):
+│   ├── Priority 2: Session context (turn-range summaries):
+│   │   Loaded from current conversation's turn summaries:
+│   │     • [Turns 1-5] "Discussed evening plans, user prefers quiet spots"
+│   │
+│   ├── Priority 3: Recalled facts (query-relevant, using pre-computed vector):
 │   │   Kneedle cutoff applied after hybrid ranking:
 │   │     • "User dislikes loud environments" (score: 0.25)
 │   │   (Note: "User is vegetarian" already in conscious set — deduplicated)
 │   │
-│   └── Priority 3: Recalled summaries (using same pre-computed vector):
+│   ├── Priority 4: Relevant code/data (artifacts):
+│   │   Hybrid search on description embeddings + content BM25:
+│   │     (none matched this query)
+│   │
+│   └── Priority 5: Recalled summaries (using same pre-computed vector):
 │       Kneedle cutoff applied, capped by SummaryTokenBudget:
 │         • [Mar 10] "Discussed dining preferences. User mentioned
 │           wanting to try more plant-based restaurants."
 │
-│   Token budget enforced across all three layers (default: 4000 tokens).
+│   Token budget enforced across all five layers (default: 4000 tokens).
 │
-├── Step 3 — Working Memory (recent session history):
-│   Last 20 messages loaded via SQL LIMIT (not full transcript):
+├── Step 3 — Working Memory (adaptive token-aware window):
+│   Remaining budget after context layers determines message count.
+│   Recent messages loaded via SQL LIMIT (not full transcript):
 │     User: "I'm thinking about going out tonight"
 │     Assistant: "That sounds fun! What kind of outing?"
 │
@@ -766,6 +775,9 @@ BEFORE the LLM call:
              - User is allergic to peanuts
              - User is vegetarian
              - User lives in downtown Portland
+
+             Session context:
+             - [Turns 1-5] Discussed evening plans, user prefers quiet spots
 
              Relevant context from memory:
              - User dislikes loud environments
@@ -788,21 +800,35 @@ AFTER the LLM responds:
 │   RecallCount and LastRecalledAt updated for all injected facts.
 │   Conscious cache invalidated if high-significance facts changed.
 │
-├── Long-term (async, background):
-│   Distillation pipeline extracts (skipped for trivial turns like "ok"):
-│     • "User is interested in dining out in Portland"
-│       (slot: "preference", confidence: 0.9, source_role: "user")
-│     • "User was recommended Verde Cocina restaurant"
-│       (slot: "", confidence: 0.7, source_role: "assistant")
-│   Validated, embedded, deduplicated, and stored. Slot conflicts
-│   resolved. Low-confidence assistant inferences filtered.
+├── Background pipeline (async, unified per-entity job):
+│   ├── Fact extraction (skipped for trivial turns like "ok"):
+│   │     • "User is interested in dining out in Portland"
+│   │       (slot: "preference", confidence: 0.9, source_role: "user")
+│   │     • "User was recommended Verde Cocina restaurant"
+│   │       (slot: "", confidence: 0.7, source_role: "assistant")
+│   │   Validated, embedded, deduplicated, and stored. Slot conflicts
+│   │   resolved. Low-confidence assistant inferences filtered.
+│   │
+│   ├── Artifact detection:
+│   │   Scans user + assistant messages for code fences, JSON, SQL.
+│   │   Each artifact stored with LLM-generated description + embedding.
+│   │   Semantically similar existing artifacts marked superseded.
+│   │
+│   ├── Entity mention accumulation:
+│   │   Extracts proper nouns and technical terms from new facts.
+│   │   Appends to session's entity_mentions (capped at 15).
+│   │
+│   └── Turn-range summary generation:
+│       If conversation exceeds working memory window (10 turns),
+│       older turns compressed into immutable turn-range summary.
+│       Oldest summaries consolidated into overview when >3 exist.
 │
 └── On session expiry (async, background):
     Full conversation summarized by LLM, embedded, stored.
     Old summaries (>90 days) pruned by background pruner.
 ```
 
-The result: the model gave a personalized recommendation using facts from long-term memory (vegetarian, Portland, noise preference), narrative context from a past conversation summary (plant-based interest), conversational flow from the current session, and created new knowledge for future interactions. The three layers — facts, summaries, and session history — each contribute context that the others cannot.
+The result: the model gave a personalized recommendation using facts from long-term memory (vegetarian, Portland, noise preference), narrative context from a past conversation summary (plant-based interest), session continuity from turn-range summaries, conversational flow from the current session, and created new knowledge for future interactions. The five layers — conscious facts, turn-range summaries, recalled facts, artifacts, and conversation summaries — each contribute context that the others cannot. Meanwhile, the unified background pipeline extracted facts, detected artifacts, accumulated entity mentions, and generated turn-range summaries as independent stages within a single job.
 
 ---
 
@@ -852,7 +878,7 @@ This means a continuous conversation never gets interrupted by session boundarie
 
 #### Working Memory Turns
 
-`LoadRecentHistory` replaces `LoadHistory` as the default conversation replay path. It caps the number of messages returned to `WorkingMemoryTurns` (default: 20), taking only the most recent turns. The limiting happens at the SQL level via `ReadRecentMessages` (`ORDER BY created_at DESC LIMIT N` with an in-memory reverse) — a 500-message session only transfers 20 rows from the database, not all 500. This prevents both unbounded prompt growth and unnecessary I/O.
+`LoadRecentHistory` replaces `LoadHistory` as the default conversation replay path. It caps the number of messages returned to `WorkingMemoryTurns` (default: 10), taking only the most recent turns. The limiting happens at the SQL level via `ReadRecentMessages` (`ORDER BY created_at DESC LIMIT N` with an in-memory reverse) — a 500-message session only transfers 10 rows from the database, not all 500. This prevents both unbounded prompt growth and unnecessary I/O.
 
 `DiffIncomingMessages` solves the replay duplication problem. When the proxy receives messages from the client, some may already be persisted from earlier in the session (the client is replaying its own context). The diff function uses **sequence-based tail comparison** — it finds the longest prefix of incoming messages that matches a suffix of existing messages, then returns everything after that overlap. This preserves legitimate repeated messages (a user asking the same question twice) while filtering out replayed history, unlike a set-membership approach that would silently drop valid duplicates.
 
@@ -862,20 +888,24 @@ The unified context builder (`memory.BuildContext`) replaces the previous approa
 
 ```
 Priority 1: Conscious facts (user profile — always first)
-Priority 2: Recalled facts (query-relevant knowledge)
-Priority 3: Summaries (past conversation narratives — own sub-budget)
+Priority 2: Session context (turn-range summaries — conversation continuity)
+Priority 3: Recalled facts (query-relevant knowledge)
+Priority 4: Relevant code/data (artifacts — code and structured outputs)
+Priority 5: Summaries (past conversation narratives — own sub-budget)
 ```
 
-Each component checks a shared `seen` set to prevent the same content from appearing in two categories. The deduplication normalizes text by lowercasing and stripping common prefixes ("The user ", "User ", "User's ", "[historical] ") before comparison, catching phrasing variants that would slip past a raw string match. The builder uses a word-based token estimator (~1.3 tokens per whitespace-delimited word, with a rune-based fallback for CJK text) to stay within `MemoryTokenBudget` (default: 4000 tokens). Summaries have their own `SummaryTokenBudget` (default: 1000 tokens), capped by the remaining space after facts.
+Each component checks a shared `seen` set to prevent the same content from appearing in two categories. The deduplication normalizes text by lowercasing and stripping common prefixes ("The user ", "User ", "User's ", "[historical] ") before comparison, catching phrasing variants that would slip past a raw string match. The builder uses a word-based token estimator (~1.3 tokens per whitespace-delimited word, with a rune-based fallback for CJK text) to stay within `MemoryTokenBudget` (default: 4000 tokens). Summaries and artifacts share a `SummaryTokenBudget` (default: 1000 tokens), capped by the remaining space after facts. See Subsystem 7 for details on turn-range summaries, artifacts, and the adaptive token-aware window.
 
 #### Configuration
 
 | Setting | Default | Env Var | What It Controls |
 |---|---|---|---|
 | `SessionTimeout` | 30m | `MEMG_SESSION_TIMEOUT` | Inactivity timeout before session rollover |
-| `WorkingMemoryTurns` | 20 | `MEMG_WORKING_MEMORY_TURNS` | Max recent turns loaded as conversation history |
+| `WorkingMemoryTurns` | 10 | `MEMG_WORKING_MEMORY_TURNS` | Max recent turns loaded as conversation history |
 | `MemoryTokenBudget` | 4000 | `MEMG_MEMORY_TOKEN_BUDGET` | Total token budget for all injected memory |
 | `SummaryTokenBudget` | 1000 | `MEMG_SUMMARY_TOKEN_BUDGET` | Token budget for summary section within the total |
+| `AdaptiveWindow` | true | `MEMG_ADAPTIVE_WINDOW` | Dynamically size raw message window based on remaining token budget |
+| `ArtifactDetection` | true | `MEMG_ARTIFACT_DETECTION` | Detect and store code blocks, JSON, and SQL from LLM responses |
 
 ---
 
@@ -979,7 +1009,7 @@ After:  embed("restaurant query") → recall facts with vector → recall summar
 
 `ListFactsForRecall` is a new store method that orders by `significance DESC` instead of `created_at DESC`. This ensures that a user's oldest high-significance fact (e.g., a peanut allergy mentioned a year ago) ranks ahead of yesterday's lunch preference in the candidate set.
 
-`MaxRecallCandidates` (default: 10,000) serves as a safety cap instead of the old `RecallEmbeddingsLimit`, preventing unbounded table scans while still allowing the system to search the full fact base for users with large fact stores.
+`MaxRecallCandidates` (default: 50) serves as a safety cap instead of the old `RecallEmbeddingsLimit`, preventing unbounded table scans while still allowing the system to search the full fact base for users with large fact stores.
 
 #### Query Transformation
 
@@ -1130,7 +1160,7 @@ The `Consolidator` is a background worker that periodically clusters old event f
 
 This prevents the fact store from growing linearly with time. Instead of 365 "User ate X" event facts over a year, the system consolidates them into a handful of pattern facts like "User typically eats pasta, sandwiches, and salads for lunch" while keeping the originals available as historical records.
 
-The consolidator runs on a configurable interval (disabled by default) and safely no-ops if the LLM provider or embedder are not configured. It iterates per-entity (via `ListEntityUUIDs`) rather than querying across all entities, ensuring patterns are never mixed across users. Originals are only marked historical **after** the pattern fact is successfully inserted, preventing data loss if the insert fails.
+The consolidator is exposed as a one-shot function (`ConsolidateEntity` / `consolidate_entity`) that processes a single entity. For production deployments, it should be triggered by an external scheduler (cron job, task queue) rather than an in-process timer — this avoids duplicate consolidation work when multiple app instances run horizontally. The function iterates facts per-entity, ensuring patterns are never mixed across users. Originals are only marked historical **after** the pattern fact is successfully inserted, preventing data loss if the insert fails.
 
 On-demand consolidation for a single entity is also supported — useful after bulk imports or when an entity's fact count exceeds a threshold. See the README for the API.
 
@@ -1195,7 +1225,7 @@ SQLite allows only one concurrent writer, so 4 open connections is sufficient �
 
 #### Recall Candidate Cap
 
-`RecallWithVector` now accepts a `maxCandidates` parameter (default: 10,000) that is passed to the database query as a `LIMIT`. Previously, the function loaded **all** facts for an entity regardless of count — at 100,000 facts with 1536-dimension embeddings, this consumes ~600MB per query.
+`RecallWithVector` now accepts a `maxCandidates` parameter (default: 50) that is passed to the database query as a `LIMIT`. Previously, the function loaded **all** facts for an entity regardless of count — at 100,000 facts with 1536-dimension embeddings, this consumes ~600MB per query.
 
 The cap is configured via `MaxRecallCandidates` in both library mode (`Config`) and proxy mode (`proxy.Config`), and can be overridden via the `MEMG_MAX_RECALL_CANDIDATES` environment variable. Facts are loaded in significance order (via `ListFactsForRecall`), so the cap drops the least significant facts first.
 
@@ -1209,3 +1239,237 @@ After:  collect unique slots → embed([slot1, slot2, ...]) → compare all → 
 ```
 
 Cached slots (already in the canonical registry) skip the embedding call entirely. The batch optimization reduces embedding latency from O(unique_slots × embedding_latency) to O(1 × embedding_latency) per extraction job.
+
+---
+
+### Subsystem 7: Session Intelligence (v3)
+
+#### The Problem
+
+The previous system treats conversations as flat message streams with a fixed working memory window. This causes three gaps:
+
+1. **Context loss in long conversations.** When a conversation exceeds the working memory window, older messages vanish from the LLM's view. The session summary only appears after the session expires — during the conversation itself, there is no compressed representation of earlier turns.
+2. **Structured output amnesia.** When the LLM produces code, JSON, or SQL, that content is stored only as part of the raw conversation log. Twenty turns later, when the user says "modify that code," the code has scrolled out of the working memory window and is not retrievable through fact recall (facts capture knowledge, not artifacts).
+3. **Vague query blindness.** Messages like "yes," "that one," or "do it" carry almost no semantic signal. Embedding these produces near-random vectors that match nothing in memory, even when the conversation context makes the intent obvious.
+
+Subsystem 7 addresses all three gaps with five interconnected features: rolling turn-range summaries, an artifact store, an entity mention accumulator, an adaptive token-aware window, and a unified background pipeline.
+
+#### Rolling Turn-Range Summaries
+
+When conversations exceed the working memory window (default: 10 turns), older messages are compressed into immutable turn-range summaries. Unlike a single mutable digest, each summary covers a fixed range of turns and is never edited after creation.
+
+**Two-level structure:**
+
+- Up to 3 non-overview turn-range summaries (e.g., "Turns 1-5: ...", "Turns 6-10: ...", "Turns 11-15: ...")
+- 1 consolidated overview that merges older summaries
+
+When a 4th non-overview summary is created, the oldest 2 are consolidated with the existing overview into a new overview. This bounds total summary tokens at ~1000.
+
+**Schema:** `mg_turn_summary` table with `uuid`, `conversation_id`, `entity_id`, `start_turn`, `end_turn`, `summary`, `summary_embedding`, `is_overview`, `created_at`.
+
+Summaries are generated by an LLM call in the background, embedded for potential recall, and injected into the context as:
+
+```
+Session context:
+- [Turns 1-5] Designed REST API, chose Go + PostgreSQL...
+- [Turns 6-10] Implemented endpoints with bcrypt hashing...
+- [Overview] Started with user registration, progressed to full auth...
+```
+
+**Why immutable turn ranges instead of a rolling digest:** A single mutable digest must be rewritten after every turn, losing detail with each compression pass. By the 50th turn, the digest is a heavily lossy summary of a summary of a summary. Immutable turn-range summaries preserve the detail of each range permanently — "Turns 6-10" always describes exactly what happened in turns 6-10, regardless of how long the conversation continues. The overview layer handles compression across ranges, not within them.
+
+**Consolidation trigger:** When a 4th non-overview summary is created:
+
+1. The oldest 2 non-overview summaries are loaded.
+2. If an existing overview exists, it is loaded as well.
+3. An LLM call merges all three (or two, if no overview yet) into a new overview.
+4. The new overview replaces the old one. The consumed non-overview summaries are deleted.
+5. The result: at most 3 non-overview summaries + 1 overview at any time.
+
+This keeps the summary token footprint bounded regardless of conversation length. A 200-turn conversation has the same summary overhead as a 20-turn one — the overview absorbs the history.
+
+#### Artifact Store
+
+Code blocks, JSON objects, SQL statements, and other structured outputs are detected and stored separately from conversational facts. This solves a gap that no other memory system addresses — when the user says "modify that code" 20 turns later, the actual code is retrievable.
+
+**Detection:** After each LLM response, the system scans both user and assistant messages for:
+
+- Code fences (`` ```language\n...\n``` ``)
+- Inline code blocks (>3 consecutive indented lines)
+- Valid JSON objects
+- SQL statements (SELECT, INSERT, CREATE, etc.)
+
+Detection runs as a stage in the unified background pipeline (see below), not inline with the response path.
+
+**Storage:** Each artifact is stored with:
+
+| Field | Purpose |
+|---|---|
+| `content` | The raw code, JSON, or SQL text |
+| `description` | A 1-line LLM-generated description of what the artifact does |
+| `description_embedding` | Dense vector of the description, for semantic search |
+| `artifact_type` | `code`, `json`, or `sql` |
+| `language` | Programming language (for code fences) or empty |
+| `turn_number` | Which conversation turn produced it, for ordering |
+| `superseded_by` | UUID of the artifact that replaced this one (if any) |
+
+**Schema:** `mg_artifact` table with `uuid`, `conversation_id`, `entity_id`, `content`, `artifact_type`, `language`, `description`, `description_embedding`, `superseded_by`, `turn_number`, `created_at`.
+
+**Retrieval:** Hybrid search using description embeddings (cosine similarity) + raw content (BM25 keyword matching). This means "the bcrypt thing" matches via BM25 on the raw content even if the description says "user registration endpoint." The same Kneedle cutoff used for fact recall determines how many artifacts are returned.
+
+**Versioning:** When a new artifact semantically matches an existing one (cosine similarity > 0.8 on description embeddings), the old artifact is marked superseded — its `superseded_by` field is set to the new artifact's UUID. Only non-superseded artifacts are returned during recall, preventing stale code from polluting context. The superseded artifact is preserved in the database for history, but excluded from search results.
+
+The 0.8 threshold is deliberately high. Two artifacts must be nearly identical in purpose to trigger supersession — a "user registration endpoint" and a "user authentication middleware" both involve users and auth but serve different purposes and would score below 0.8. Only true revisions (same endpoint, updated logic) clear the threshold.
+
+#### Entity Mention Accumulator
+
+Session-level metadata tracks specific entity mentions (proper nouns, technical terms, specific concepts) extracted from facts during each conversation turn. Capped at the last 15 unique mentions.
+
+Unlike generic tags ("work", "preference"), entity mentions are specific: "PostgreSQL", "REST API", "bcrypt", "Alice". They are extracted from the fact content produced by the distillation pipeline — not from raw messages — so only mentions that survived extraction validation are tracked.
+
+**How it helps retrieval:** When the user sends a vague message ("yes", "that one", "do it") and primary recall returns fewer than 3 results, the entity mentions are appended to the query before re-embedding, providing semantic signal for better retrieval:
+
+```
+Original query: "yes"                    → embedding matches nothing
+Augmented query: "yes PostgreSQL bcrypt"  → embedding finds related facts
+```
+
+The re-embedding happens only when the initial recall is insufficient (fewer than 3 results after Kneedle cutoff). If the primary query produces adequate results, entity mentions are not consulted — they are a fallback, not a default.
+
+**Schema:** `entity_mentions TEXT` column on `mg_session` (JSON array of strings), `message_count INTEGER` column on `mg_session`. The `message_count` tracks the number of messages in the session, used by the turn-range summary generator to determine when older turns need compression.
+
+**Cap enforcement:** When a new mention is added and the list exceeds 15 entries, the oldest mention is removed (FIFO). This keeps the list focused on recent conversational context rather than accumulating mentions from the entire session.
+
+#### Adaptive Token-Aware Window
+
+Instead of a fixed message count for working memory, the system dynamically sizes the raw message window based on remaining token budget after other context components (conscious facts, recalled facts, summaries, artifacts).
+
+```
+remaining = total_budget - conscious_tokens - recall_tokens - summary_tokens - artifact_tokens
+max_messages = remaining / avg_tokens_per_message (200)
+```
+
+A floor of 800 tokens (approximately 4 messages) ensures the user's most recent conversation is always visible. This handles both extremes:
+
+| Scenario | Context load | Window behavior |
+|---|---|---|
+| Heavy recall (many relevant facts + artifacts) | 3500 tokens consumed | Window shrinks to ~2-3 messages, facts take priority |
+| Empty recall (new user, no stored knowledge) | 200 tokens consumed | Window expands to ~19 messages, raw conversation fills the budget |
+| Moderate recall | 2000 tokens consumed | Window at ~10 messages, balanced split |
+
+The adaptive window replaces the static `WorkingMemoryTurns` cap when `AdaptiveWindow` is enabled (default: true). When disabled, the system falls back to the fixed cap. The `WorkingMemoryTurns` setting still serves as the upper bound even in adaptive mode — the window never exceeds it, regardless of remaining budget.
+
+This is critical for the turn-range summary interaction. When summaries compress older turns, the adaptive window responds by allocating more budget to recent messages. The two features are complementary: summaries preserve context that the window drops, and the window expands to fill space that summaries free up.
+
+#### Unified Background Pipeline
+
+All background work (artifact detection, fact extraction, entity mention accumulation, turn-range summary generation) runs as independent stages within a single per-entity job. This replaces the previous model where fact extraction was the only background stage.
+
+**Key properties:**
+
+**Bounded concurrency:** Maximum 2 concurrent background jobs per entity. If more queue up, pending messages are coalesced into a single batch job. This handles agent loops where 5 rapid messages arrive before the first job completes — the system runs 2 jobs, not 5.
+
+**Stage fault isolation:** Each stage has independent error handling. Artifact detection failing does not prevent fact extraction, entity mention updates, or summary generation from completing. A stage that returns an error is logged and skipped; subsequent stages proceed normally.
+
+**Single pipeline:** There are no separate worker pools for extraction vs summarization vs artifact detection. One queue, one set of workers, multiple stages. This simplifies resource accounting — the bounded goroutine pool (Subsystem 6) governs all background work through a single concurrency limit.
+
+**Stage ordering:** Within a job, stages execute in a fixed order:
+
+1. **Fact extraction** — produces facts from conversation messages.
+2. **Artifact detection** — scans messages for code, JSON, SQL.
+3. **Entity mention accumulation** — extracts mentions from newly produced facts.
+4. **Turn-range summary generation** — compresses older turns if the conversation exceeds the working memory window.
+
+This ordering is deliberate. Entity mention accumulation depends on fact extraction output (it reads the extracted facts, not raw messages). Turn-range summary generation runs last because it needs to know the current turn count after the new messages are persisted.
+
+**Coalescing:** When a job is already in-flight for an entity and a new message arrives, the new message is added to a pending batch rather than spawning a separate job. When the in-flight job completes and finds a pending batch, it starts a new job that processes the accumulated messages together. This prevents redundant LLM calls — 5 rapid messages produce at most 2 extraction calls, not 5.
+
+#### Context Builder Updates
+
+The context builder (`BuildContext` / `buildContext` / `build_context`) now assembles five layers instead of three:
+
+```
+Priority 1: User profile (conscious facts — always present)
+Priority 2: Session context (turn-range summaries — conversation continuity)
+Priority 3: Relevant context from memory (recalled facts — query-relevant knowledge)
+Priority 4: Relevant code/data (artifacts — code and structured outputs)
+Priority 5: Relevant past conversations (summaries — narrative context from prior sessions)
+```
+
+Cross-component deduplication ensures the same information does not appear in multiple layers. A fact that appears in the user profile is not repeated in recalled facts. An artifact whose description matches a recalled fact's content is deduplicated. The total token budget (default: 4000) is enforced across all five layers, with summaries and artifacts sharing a sub-budget.
+
+The five-layer structure produces a system prompt that reads naturally:
+
+```
+User profile:
+- User is allergic to peanuts
+- User is a backend engineer at Google
+- User lives in Seattle
+
+Session context:
+- [Turns 1-5] Designed REST API, chose Go + PostgreSQL stack
+- [Turns 6-10] Implemented user registration and login endpoints with bcrypt hashing
+- [Overview] Started with user registration system, progressed to full auth flow with JWT
+
+Relevant context from memory:
+- User prefers PostgreSQL over MySQL for new projects
+- User uses Go 1.22 with standard library HTTP server
+
+Relevant code/data:
+- [code:go] User registration handler with bcrypt password hashing
+
+Relevant past conversations:
+- [Mar 15, 2026] Discussed microservice architecture for the auth system
+```
+
+The user profile provides baseline identity. Session context provides within-conversation continuity beyond the raw message window. Recalled facts provide cross-session knowledge. Artifacts provide retrievable structured outputs. Conversation summaries provide cross-session narrative threads. Together, the five layers ensure the LLM has comprehensive context without any single layer dominating the token budget.
+
+---
+
+### Subsystem 8: Unified Recall Entry Point
+
+#### The Problem
+
+The recall pipeline involves seven coordinated steps: embedding the query, loading conscious facts, recalling relevant facts, recalling summaries, loading turn summaries, loading artifacts, and assembling the final context string. Without a unified entry point, every caller (proxy handler, library `Chat()`, benchmarks, custom integrations) re-implements this orchestration, leading to inconsistent behavior and missed improvements.
+
+#### RecallAndBuildContext
+
+`RecallAndBuildContext` is the single entry point for the full memory recall pipeline. It encapsulates all seven steps internally:
+
+1. **Embed the query** (once, reused for all recall passes)
+2. **Load conscious facts** (top facts by significance, always present)
+3. **Recall relevant facts** via hybrid search (cosine + BM25 + Kneedle cutoff)
+4. **Recall relevant conversation summaries** (past session narratives)
+5. **Load turn summaries** for the active conversation (if conversation ID provided)
+6. **Load relevant artifacts** (code, JSON, SQL from the active conversation)
+7. **Assemble context** via `BuildContext` with five-layer priority and token budgeting
+
+```
+// Go
+memory.RecallAndBuildContext(ctx, repo, embedder, engine, entityUUID, query, cfg)
+
+// TypeScript
+recallAndBuildContext(store, embedder, entityUuid, query, cfg?)
+
+// Python
+recall_and_build_context(store, embedder, entity_uuid, query, cfg=None)
+```
+
+All three implementations share identical logic and identical function signatures. Callers configure behavior via `RecallConfig`:
+
+| Setting | Default | What It Controls |
+|---|---|---|
+| `RecallLimit` | 50 | Max facts recalled per query |
+| `RecallThreshold` | 0.05 | Minimum score for recalled facts |
+| `MaxCandidates` | 50 | Max candidate facts loaded from DB |
+| `MemoryTokenBudget` | 4000 | Total token budget for context |
+| `SummaryTokenBudget` | 1000 | Sub-budget for summaries |
+| `ConsciousLimit` | 10 | Max conscious profile facts |
+| `SummaryLimit` | 5 | Max summaries recalled |
+| `ConversationID` | "" | Active conversation for turn summaries and artifacts |
+
+**Note on defaults:** The defaults above apply when `RecallAndBuildContext` is called directly without explicit configuration. When called through the Go library's `Chat()`/`Stream()` or the proxy, the higher-level config provides the values — the library defaults to `RecallFactsLimit: 100`, `RecallThreshold: 0.10`, `MaxRecallCandidates: 50`, while the proxy defaults to `RecallFactsLimit: 100`, `RecallThreshold: 0.10`, `MaxRecallCandidates: 500`. These override the `RecallConfig` defaults above.
+
+#### Why This Matters
+
+Any improvement to the recall pipeline — a new ranking signal, a better cutoff algorithm, an additional context layer — automatically propagates to every caller. The proxy, the library, benchmarks, and custom integrations all benefit without code changes. The alternative (each caller orchestrating the pipeline) means improvements must be manually wired into every integration point, and some will inevitably be missed.

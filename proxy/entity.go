@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -65,12 +66,31 @@ func (ec *entityCache) getOrCreateUUID(ctx context.Context, externalID string) (
 	}
 
 	ec.mu.Lock()
-	// Evict stale entries if cache grows too large.
 	if len(ec.cache) > 10000 {
 		now := time.Now()
+		// First pass: evict stale entries.
 		for k, v := range ec.cache {
 			if now.Sub(v.fetchedAt) > entityCacheTTL {
 				delete(ec.cache, k)
+			}
+		}
+		// Hard cap: if still over 10,000 after stale eviction,
+		// drop oldest entries until at the limit.
+		if len(ec.cache) > 10000 {
+			type aged struct {
+				key string
+				at  time.Time
+			}
+			entries := make([]aged, 0, len(ec.cache))
+			for k, v := range ec.cache {
+				entries = append(entries, aged{key: k, at: v.fetchedAt})
+			}
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].at.Before(entries[j].at)
+			})
+			excess := len(ec.cache) - 10000
+			for i := 0; i < excess; i++ {
+				delete(ec.cache, entries[i].key)
 			}
 		}
 	}

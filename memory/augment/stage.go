@@ -12,9 +12,10 @@ import (
 
 // Job describes a unit of work for the augmentation pipeline.
 type Job struct {
-	EntityID  string
-	ProcessID string
-	Messages  []*llm.Message
+	EntityID       string
+	ProcessID      string
+	Messages       []*llm.Message
+	SessionContext string // optional: date/context for temporal resolution (e.g. "This session took place on 20 January, 2023")
 }
 
 // Extraction holds the structured knowledge produced by a Stage.

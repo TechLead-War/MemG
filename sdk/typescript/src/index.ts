@@ -73,9 +73,25 @@ export { MemGStore, defaultContentKey, type Store } from './store.js';
 export { PostgresStore } from './postgres_store.js';
 export { MySQLStore } from './mysql_store.js';
 export { HybridEngine, cosineSimilarity, dimensionMatch } from './search.js';
-export { buildContext, estimateTokens } from './context.js';
+export { buildContext, estimateTokens, adaptiveWindowSize } from './context.js';
 export { runExtraction, isTrivialTurn } from './extract.js';
+export { detectArtifacts, type DetectedArtifact } from './artifact_detect.js';
+export { storeArtifacts, recallArtifacts } from './artifact.js';
+export { maintainTurnSummaries } from './turn_summary.js';
+export { extractEntityMentions } from './entity_mentions.js';
 export { recallFacts, recallSummaries } from './recall.js';
+export { consolidateEntity, type ConsolidatorConfig } from './consolidator.js';
+export { loadConsciousContext } from './conscious.js';
+export { pruneExpiredAndStale } from './decay.js';
+export { backfillMissingEmbeddings, reEmbedFacts } from './reembed.js';
+export { generateAndStoreSummary } from './summary.js';
+export {
+  normalizeConversationMessages,
+  diffIncomingMessages,
+  mergeHistory,
+} from './conversation.js';
+export { type QueryTransform, type QueryTransformer } from './query.js';
+export { recallAndBuildContext, type RecallConfig } from './recall_context.js';
 export { TransformersEmbedder, OpenAIEmbedder, GeminiEmbedder } from './embedder.js';
 export type { Embedder } from './embedder.js';
 export type {
@@ -95,6 +111,8 @@ export type {
   RecalledFact,
   RecalledSummary,
   ConsciousFact,
+  TurnSummary,
+  Artifact,
 } from './types.js';
 
 const EMBEDDER_PROBE_TIMEOUT_MS = 15_000;
@@ -779,7 +797,8 @@ If the conversation contains no meaningful content worth remembering (e.g. just 
       }
     }
 
-    await this.store!.updateConversationSummary(conversationUuid, summary, embedding);
+    const modelName = this.embedder ? this.embedder.modelName() : '';
+    await this.store!.updateConversationSummary(conversationUuid, summary, embedding, modelName);
   }
 
   private async loadConsciousFactsCached(entityUuid: string, limit: number): Promise<ConsciousFact[]> {

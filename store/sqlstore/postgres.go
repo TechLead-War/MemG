@@ -55,11 +55,13 @@ func postgresQueries() Queries {
 				created_at TIMESTAMPTZ NOT NULL
 			)`,
 			`CREATE TABLE IF NOT EXISTS mg_session (
-				uuid       TEXT PRIMARY KEY,
-				entity_id  TEXT NOT NULL,
-				process_id TEXT NOT NULL DEFAULT '',
-				created_at TIMESTAMPTZ NOT NULL,
-				expires_at TIMESTAMPTZ NOT NULL
+				uuid            TEXT PRIMARY KEY,
+				entity_id       TEXT NOT NULL,
+				process_id      TEXT NOT NULL DEFAULT '',
+				created_at      TIMESTAMPTZ NOT NULL,
+				expires_at      TIMESTAMPTZ NOT NULL,
+				entity_mentions TEXT NOT NULL DEFAULT '[]',
+				message_count   INTEGER NOT NULL DEFAULT 0
 			)`,
 			`CREATE INDEX IF NOT EXISTS idx_mg_session_lookup ON mg_session(entity_id, process_id, expires_at)`,
 			`CREATE TABLE IF NOT EXISTS mg_conversation (
@@ -68,6 +70,7 @@ func postgresQueries() Queries {
 				entity_id         TEXT NOT NULL DEFAULT '',
 				summary           TEXT NOT NULL DEFAULT '',
 				summary_embedding BYTEA,
+				summary_embedding_model TEXT NOT NULL DEFAULT '',
 				created_at        TIMESTAMPTZ NOT NULL,
 				updated_at        TIMESTAMPTZ NOT NULL
 			)`,
@@ -86,6 +89,33 @@ func postgresQueries() Queries {
 				embedding  BYTEA NOT NULL,
 				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 			)`,
+			`CREATE TABLE IF NOT EXISTS mg_turn_summary (
+				uuid              TEXT PRIMARY KEY,
+				conversation_id   TEXT NOT NULL,
+				entity_id         TEXT NOT NULL,
+				start_turn        INTEGER NOT NULL,
+				end_turn          INTEGER NOT NULL,
+				summary           TEXT NOT NULL,
+				summary_embedding BYTEA,
+				is_overview       INTEGER NOT NULL DEFAULT 0,
+				created_at        TIMESTAMPTZ NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_mg_turnsummary_conv ON mg_turn_summary(conversation_id, is_overview, created_at)`,
+			`CREATE TABLE IF NOT EXISTS mg_artifact (
+				uuid                  TEXT PRIMARY KEY,
+				conversation_id       TEXT NOT NULL,
+				entity_id             TEXT NOT NULL,
+				content               TEXT NOT NULL,
+				artifact_type         TEXT NOT NULL DEFAULT 'code',
+				language              TEXT NOT NULL DEFAULT '',
+				description           TEXT NOT NULL DEFAULT '',
+				description_embedding BYTEA,
+				superseded_by         TEXT,
+				turn_number           INTEGER NOT NULL DEFAULT 0,
+				created_at            TIMESTAMPTZ NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_mg_artifact_entity ON mg_artifact(entity_id, created_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_mg_artifact_conv ON mg_artifact(conversation_id, created_at)`,
 			`CREATE TABLE IF NOT EXISTS mg_schema_version (
 				id      INTEGER PRIMARY KEY DEFAULT 1,
 				version INTEGER NOT NULL DEFAULT 1
@@ -119,8 +149,8 @@ func postgresQueries() Queries {
 		ConvInsert:          `INSERT INTO mg_conversation (uuid, session_id, entity_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)`,
 		ConvSelect:          `SELECT uuid, session_id, entity_id, summary, created_at, updated_at FROM mg_conversation WHERE uuid = $1`,
 		ConvSelectActive:    `SELECT uuid, session_id, entity_id, summary, created_at, updated_at FROM mg_conversation WHERE session_id = $1 ORDER BY created_at DESC LIMIT 1`,
-		ConvUpdateSummary:   `UPDATE mg_conversation SET summary = $1, summary_embedding = $2, updated_at = $3 WHERE uuid = $4`,
-		ConvSelectSummaries:    `SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at FROM mg_conversation WHERE entity_id = $1 AND summary != '' AND summary_embedding IS NOT NULL ORDER BY created_at DESC LIMIT $2`,
+		ConvUpdateSummary:   `UPDATE mg_conversation SET summary = $1, summary_embedding = $2, summary_embedding_model = $3, updated_at = $4 WHERE uuid = $5`,
+		ConvSelectSummaries:    `SELECT uuid, session_id, entity_id, summary, summary_embedding, summary_embedding_model, created_at, updated_at FROM mg_conversation WHERE entity_id = $1 AND summary != '' AND summary_embedding IS NOT NULL ORDER BY created_at DESC LIMIT $2`,
 		ConvSelectUnsummarized: `SELECT uuid, session_id, entity_id, summary, created_at, updated_at FROM mg_conversation WHERE entity_id = $1 AND summary = '' AND session_id != $2 ORDER BY created_at DESC LIMIT 1`,
 		ConvPruneSummaries:     `UPDATE mg_conversation SET summary = '', summary_embedding = NULL, updated_at = $1 WHERE summary != '' AND created_at < $2`,
 
@@ -128,8 +158,8 @@ func postgresQueries() Queries {
 		MsgSelect:       `SELECT uuid, conversation_id, role, content, kind, created_at FROM mg_message WHERE conversation_id = $1 ORDER BY created_at ASC`,
 		MsgSelectRecent: `SELECT uuid, conversation_id, role, content, kind, created_at FROM mg_message WHERE conversation_id = $1 ORDER BY created_at DESC LIMIT $2`,
 
-		SessionInsert: `INSERT INTO mg_session (uuid, entity_id, process_id, created_at, expires_at) VALUES ($1, $2, $3, $4, $5)`,
-		SessionSelect: `SELECT uuid, entity_id, process_id, created_at, expires_at FROM mg_session WHERE entity_id = $1 AND process_id = $2 AND expires_at > $3 ORDER BY created_at DESC LIMIT 1`,
+		SessionInsert: `INSERT INTO mg_session (uuid, entity_id, process_id, created_at, expires_at, entity_mentions, message_count) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		SessionSelect: `SELECT uuid, entity_id, process_id, created_at, expires_at, entity_mentions, message_count FROM mg_session WHERE entity_id = $1 AND process_id = $2 AND expires_at > $3 ORDER BY created_at DESC LIMIT 1`,
 		SessionSlide:  `UPDATE mg_session SET expires_at = $1 WHERE uuid = $2`,
 
 		ProcessInsert:   `INSERT INTO mg_process (uuid, external_id) VALUES ($1, $2) ON CONFLICT (external_id) DO NOTHING`,

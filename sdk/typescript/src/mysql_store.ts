@@ -5,12 +5,14 @@
 
 import { randomUUID } from 'crypto';
 import type {
+  Artifact,
   Fact,
   FactConversation,
   FactEntity,
   FactFilter,
   FactMessage,
   FactSession,
+  TurnSummary,
 } from './types.js';
 import type { Store } from './store.js';
 
@@ -78,6 +80,7 @@ function rowToConversation(row: any): FactConversation {
     entityId: row.entity_id ?? '',
     summary: row.summary ?? '',
     summaryEmbedding: decodeEmbedding(row.summary_embedding),
+    summaryEmbeddingModel: row.summary_embedding_model ?? '',
     createdAt: row.created_at ?? undefined,
     updatedAt: row.updated_at ?? undefined,
   };
@@ -91,6 +94,36 @@ function rowToMessage(row: any): FactMessage {
     content: row.content,
     kind: row.kind ?? 'text',
     createdAt: row.created_at ?? undefined,
+  };
+}
+
+function rowToTurnSummary(row: any): TurnSummary {
+  return {
+    uuid: row.uuid,
+    conversationId: row.conversation_id,
+    entityId: row.entity_id,
+    startTurn: row.start_turn,
+    endTurn: row.end_turn,
+    summary: row.summary,
+    summaryEmbedding: decodeEmbedding(row.summary_embedding),
+    isOverview: row.is_overview === 1,
+    createdAt: row.created_at,
+  };
+}
+
+function rowToArtifact(row: any): Artifact {
+  return {
+    uuid: row.uuid,
+    conversationId: row.conversation_id,
+    entityId: row.entity_id,
+    content: row.content,
+    artifactType: row.artifact_type ?? 'code',
+    language: row.language ?? '',
+    description: row.description ?? '',
+    descriptionEmbedding: decodeEmbedding(row.description_embedding),
+    supersededBy: row.superseded_by ?? undefined,
+    turnNumber: row.turn_number ?? 0,
+    createdAt: row.created_at,
   };
 }
 
@@ -144,11 +177,13 @@ const MYSQL_SCHEMA_DDL: string[] = [
     FOREIGN KEY (process_id) REFERENCES mg_process(uuid)
   )`,
   `CREATE TABLE IF NOT EXISTS mg_session (
-    uuid       VARCHAR(36) PRIMARY KEY,
-    entity_id  VARCHAR(36) NOT NULL,
-    process_id VARCHAR(36) NOT NULL DEFAULT '',
-    created_at DATETIME NOT NULL,
-    expires_at DATETIME NOT NULL,
+    uuid            VARCHAR(36) PRIMARY KEY,
+    entity_id       VARCHAR(36) NOT NULL,
+    process_id      VARCHAR(36) NOT NULL DEFAULT '',
+    created_at      DATETIME NOT NULL,
+    expires_at      DATETIME NOT NULL,
+    entity_mentions TEXT NOT NULL,
+    message_count   INTEGER NOT NULL DEFAULT 0,
     INDEX idx_mg_session_lookup (entity_id, process_id, expires_at)
   )`,
   `CREATE TABLE IF NOT EXISTS mg_conversation (
@@ -157,6 +192,7 @@ const MYSQL_SCHEMA_DDL: string[] = [
     entity_id         VARCHAR(36) NOT NULL DEFAULT '',
     summary           TEXT NOT NULL,
     summary_embedding LONGBLOB,
+    summary_embedding_model VARCHAR(255) NOT NULL DEFAULT '',
     created_at        DATETIME NOT NULL,
     updated_at        DATETIME NOT NULL,
     INDEX idx_mg_conv_session (session_id, created_at)
@@ -175,6 +211,33 @@ const MYSQL_SCHEMA_DDL: string[] = [
     name       VARCHAR(255) PRIMARY KEY,
     embedding  LONGBLOB NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS mg_turn_summary (
+    uuid              VARCHAR(36) PRIMARY KEY,
+    conversation_id   VARCHAR(36) NOT NULL,
+    entity_id         VARCHAR(36) NOT NULL,
+    start_turn        INTEGER NOT NULL,
+    end_turn          INTEGER NOT NULL,
+    summary           TEXT NOT NULL,
+    summary_embedding LONGBLOB,
+    is_overview       TINYINT NOT NULL DEFAULT 0,
+    created_at        DATETIME NOT NULL,
+    INDEX idx_mg_turnsummary_conv (conversation_id, is_overview, created_at)
+  )`,
+  `CREATE TABLE IF NOT EXISTS mg_artifact (
+    uuid                  VARCHAR(36) PRIMARY KEY,
+    conversation_id       VARCHAR(36) NOT NULL,
+    entity_id             VARCHAR(36) NOT NULL,
+    content               TEXT NOT NULL,
+    artifact_type         VARCHAR(50) NOT NULL DEFAULT 'code',
+    language              VARCHAR(100) NOT NULL DEFAULT '',
+    description           TEXT NOT NULL,
+    description_embedding LONGBLOB,
+    superseded_by         VARCHAR(36),
+    turn_number           INTEGER NOT NULL DEFAULT 0,
+    created_at            DATETIME NOT NULL,
+    INDEX idx_mg_artifact_entity (entity_id, created_at),
+    INDEX idx_mg_artifact_conv (conversation_id, created_at)
   )`,
   `CREATE TABLE IF NOT EXISTS mg_schema_version (
     id      INTEGER PRIMARY KEY DEFAULT 1,
@@ -241,6 +304,159 @@ export class MySQLStore implements Store {
     if (rows.length === 0) return null;
     const row = rows[0];
     return { uuid: row.uuid, externalId: row.external_id, createdAt: row.created_at };
+  }
+
+  async listEntityUuids(limit: number): Promise<string[]> {
+    await this.ready();
+    const [rows] = await this.pool.query(
+      `SELECT DISTINCT uuid FROM mg_entity LIMIT ?`,
+      [limit]
+    ) as any;
+    return rows.map((r: any) => r.uuid);
+  }
+
+  async listFactsMetadata(entityUuid: string, filter: FactFilter, limit: number): Promise<Fact[]> {
+    await this.ready();
+    const metaCols = `uuid, content, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at`;
+    let query = `SELECT ${metaCols} FROM mg_entity_fact WHERE entity_id = ?`;
+    const args: any[] = [entityUuid];
+
+    if (filter.types && filter.types.length > 0) {
+      query += ` AND fact_type IN (${filter.types.map(() => '?').join(',')})`;
+      args.push(...filter.types);
+    }
+    if (filter.statuses && filter.statuses.length > 0) {
+      query += ` AND temporal_status IN (${filter.statuses.map(() => '?').join(',')})`;
+      args.push(...filter.statuses);
+    }
+    if (filter.tags && filter.tags.length > 0) {
+      query += ` AND tag IN (${filter.tags.map(() => '?').join(',')})`;
+      args.push(...filter.tags);
+    }
+    if (filter.minSignificance && filter.minSignificance > 0) {
+      query += ` AND significance >= ?`;
+      args.push(filter.minSignificance);
+    }
+    if (filter.excludeExpired) {
+      query += ` AND (expires_at IS NULL OR expires_at > ?)`;
+      args.push(nowISO());
+    }
+    if (filter.slots && filter.slots.length > 0) {
+      query += ` AND slot IN (${filter.slots.map(() => '?').join(',')})`;
+      args.push(...filter.slots);
+    }
+    if (filter.minConfidence && filter.minConfidence > 0) {
+      query += ` AND confidence >= ?`;
+      args.push(filter.minConfidence);
+    }
+    if (filter.sourceRoles && filter.sourceRoles.length > 0) {
+      query += ` AND source_role IN (${filter.sourceRoles.map(() => '?').join(',')})`;
+      args.push(...filter.sourceRoles);
+    }
+    if (filter.unembeddedOnly) {
+      query += ` AND embedding IS NULL`;
+    }
+    if (filter.maxSignificance && filter.maxSignificance > 0) {
+      query += ` AND significance <= ?`;
+      args.push(filter.maxSignificance);
+    }
+    if (filter.referenceTimeAfter) {
+      query += ` AND reference_time IS NOT NULL AND reference_time >= ?`;
+      args.push(filter.referenceTimeAfter);
+    }
+    if (filter.referenceTimeBefore) {
+      query += ` AND reference_time IS NOT NULL AND reference_time <= ?`;
+      args.push(filter.referenceTimeBefore);
+    }
+
+    query += ` ORDER BY created_at DESC`;
+    if (limit > 0) {
+      query += ` LIMIT ?`;
+      args.push(limit);
+    }
+
+    const [rows] = await this.pool.query(query, args) as any;
+    return rows.map((row: any) => ({
+      uuid: row.uuid,
+      content: row.content,
+      createdAt: row.created_at ?? undefined,
+      updatedAt: row.updated_at ?? undefined,
+      factType: row.fact_type ?? 'identity',
+      temporalStatus: row.temporal_status ?? 'current',
+      significance: row.significance ?? 5,
+      contentKey: row.content_key ?? '',
+      referenceTime: row.reference_time ?? undefined,
+      expiresAt: row.expires_at ?? undefined,
+      reinforcedAt: row.reinforced_at ?? undefined,
+      reinforcedCount: row.reinforced_count ?? 0,
+      tag: row.tag ?? '',
+      slot: row.slot ?? '',
+      confidence: row.confidence ?? 1.0,
+      embeddingModel: row.embedding_model ?? '',
+      sourceRole: row.source_role ?? '',
+      recallCount: row.recall_count ?? 0,
+      lastRecalledAt: row.last_recalled_at ?? undefined,
+    }));
+  }
+
+  async upsertProcess(externalId: string): Promise<string> {
+    await this.ready();
+    const id = randomUUID();
+    await this.pool.query(
+      `INSERT IGNORE INTO mg_process (uuid, external_id) VALUES (?, ?)`,
+      [id, externalId]
+    );
+    const [rows] = await this.pool.query(
+      `SELECT uuid FROM mg_process WHERE external_id = ?`,
+      [externalId]
+    ) as any;
+    return rows[0].uuid;
+  }
+
+  async insertProcessAttribute(processUuid: string, key: string, value: string): Promise<void> {
+    await this.ready();
+    const id = randomUUID();
+    const now = nowISO();
+    await this.pool.query(
+      'INSERT INTO mg_process_attribute (uuid, process_id, `key`, value, created_at) VALUES (?, ?, ?, ?, ?)',
+      [id, processUuid, key, value, now]
+    );
+  }
+
+  async listCanonicalSlots(): Promise<Array<{name: string; embedding?: number[]; createdAt: string}>> {
+    await this.ready();
+    const [rows] = await this.pool.query(
+      `SELECT name, embedding, created_at FROM mg_slot_canonical ORDER BY name ASC`
+    ) as any;
+    return rows.map((row: any) => ({
+      name: row.name,
+      embedding: decodeEmbedding(row.embedding),
+      createdAt: row.created_at,
+    }));
+  }
+
+  async insertCanonicalSlot(name: string, embedding: number[]): Promise<void> {
+    await this.ready();
+    const buf = encodeEmbedding(embedding);
+    await this.pool.query(
+      `INSERT IGNORE INTO mg_slot_canonical (name, embedding) VALUES (?, ?)`,
+      [name, buf]
+    );
+  }
+
+  async findCanonicalSlotByName(name: string): Promise<{name: string; embedding?: number[]; createdAt: string} | null> {
+    await this.ready();
+    const [rows] = await this.pool.query(
+      `SELECT name, embedding, created_at FROM mg_slot_canonical WHERE name = ?`,
+      [name]
+    ) as any;
+    if (rows.length === 0) return null;
+    const row = rows[0];
+    return {
+      name: row.name,
+      embedding: decodeEmbedding(row.embedding),
+      createdAt: row.created_at,
+    };
   }
 
   // ---- Fact CRUD ----
@@ -369,6 +585,21 @@ export class MySQLStore implements Store {
       query += ` AND source_role IN (${filter.sourceRoles.map(() => '?').join(',')})`;
       args.push(...filter.sourceRoles);
     }
+    if (filter.unembeddedOnly) {
+      query += ` AND embedding IS NULL`;
+    }
+    if (filter.maxSignificance && filter.maxSignificance > 0) {
+      query += ` AND significance <= ?`;
+      args.push(filter.maxSignificance);
+    }
+    if (filter.referenceTimeAfter) {
+      query += ` AND reference_time IS NOT NULL AND reference_time >= ?`;
+      args.push(filter.referenceTimeAfter);
+    }
+    if (filter.referenceTimeBefore) {
+      query += ` AND reference_time IS NOT NULL AND reference_time <= ?`;
+      args.push(filter.referenceTimeBefore);
+    }
 
     query += ` ORDER BY created_at DESC`;
     if (limit > 0) {
@@ -417,7 +648,23 @@ export class MySQLStore implements Store {
       query += ` AND source_role IN (${filter.sourceRoles.map(() => '?').join(',')})`;
       args.push(...filter.sourceRoles);
     }
+    if (filter.unembeddedOnly) {
+      query += ` AND embedding IS NULL`;
+    }
+    if (filter.maxSignificance && filter.maxSignificance > 0) {
+      query += ` AND significance <= ?`;
+      args.push(filter.maxSignificance);
+    }
+    if (filter.referenceTimeAfter) {
+      query += ` AND reference_time IS NOT NULL AND reference_time >= ?`;
+      args.push(filter.referenceTimeAfter);
+    }
+    if (filter.referenceTimeBefore) {
+      query += ` AND reference_time IS NOT NULL AND reference_time <= ?`;
+      args.push(filter.referenceTimeBefore);
+    }
 
+    query += ` ORDER BY significance DESC, created_at DESC`;
     if (limit > 0) {
       query += ` LIMIT ?`;
       args.push(limit);
@@ -485,9 +732,34 @@ export class MySQLStore implements Store {
 
   async pruneExpiredFacts(entityUuid: string, now: string): Promise<number> {
     await this.ready();
+    let total = 0;
+    for (;;) {
+      let selectQuery: string;
+      let selectArgs: any[];
+      if (entityUuid) {
+        selectQuery = `SELECT uuid FROM mg_entity_fact WHERE entity_id = ? AND expires_at IS NOT NULL AND expires_at < ? LIMIT 1000`;
+        selectArgs = [entityUuid, now];
+      } else {
+        selectQuery = `SELECT uuid FROM mg_entity_fact WHERE expires_at IS NOT NULL AND expires_at < ? LIMIT 1000`;
+        selectArgs = [now];
+      }
+      const [rows] = await this.pool.query(selectQuery, selectArgs) as any;
+      if (rows.length === 0) break;
+      const uuids = rows.map((r: any) => r.uuid);
+      const placeholders = uuids.map(() => '?').join(',');
+      await this.pool.query(`DELETE FROM mg_entity_fact WHERE uuid IN (${placeholders})`, uuids);
+      total += uuids.length;
+      if (uuids.length < 1000) break;
+    }
+    return total;
+  }
+
+  async pruneStaleSummaries(days: number = 90): Promise<number> {
+    await this.ready();
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const [result] = await this.pool.query(
-      `DELETE FROM mg_entity_fact WHERE entity_id = ? AND expires_at IS NOT NULL AND expires_at < ?`,
-      [entityUuid, now]
+      `UPDATE mg_conversation SET summary = '', summary_embedding = NULL WHERE created_at < ? AND summary != ''`,
+      [cutoff]
     ) as any;
     return result.affectedRows ?? 0;
   }
@@ -525,7 +797,7 @@ export class MySQLStore implements Store {
     const nowStr = now.toISOString();
 
     const [rows] = await this.pool.query(
-      `SELECT uuid, entity_id, process_id, created_at, expires_at FROM mg_session WHERE entity_id = ? AND process_id = ? AND expires_at > ? ORDER BY created_at DESC LIMIT 1`,
+      `SELECT uuid, entity_id, process_id, created_at, expires_at, entity_mentions, message_count FROM mg_session WHERE entity_id = ? AND process_id = ? AND expires_at > ? ORDER BY created_at DESC LIMIT 1`,
       [entityUuid, processUuid, nowStr]
     ) as any;
 
@@ -536,6 +808,8 @@ export class MySQLStore implements Store {
         `UPDATE mg_session SET expires_at = ? WHERE uuid = ?`,
         [newExpiry, row.uuid]
       );
+      let mentions: string[] = [];
+      try { mentions = JSON.parse(row.entity_mentions ?? '[]'); } catch { mentions = []; }
       return {
         session: {
           uuid: row.uuid,
@@ -543,6 +817,8 @@ export class MySQLStore implements Store {
           processId: row.process_id,
           createdAt: row.created_at,
           expiresAt: newExpiry,
+          entityMentions: mentions,
+          messageCount: row.message_count ?? 0,
         },
         isNew: false,
       };
@@ -551,7 +827,7 @@ export class MySQLStore implements Store {
     const id = randomUUID();
     const expiresAt = new Date(now.getTime() + timeoutMs).toISOString();
     await this.pool.query(
-      `INSERT INTO mg_session (uuid, entity_id, process_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO mg_session (uuid, entity_id, process_id, created_at, expires_at, entity_mentions) VALUES (?, ?, ?, ?, ?, '[]')`,
       [id, entityUuid, processUuid, nowStr, expiresAt]
     );
 
@@ -562,6 +838,8 @@ export class MySQLStore implements Store {
         processId: processUuid,
         createdAt: nowStr,
         expiresAt,
+        entityMentions: [],
+        messageCount: 0,
       },
       isNew: true,
     };
@@ -574,8 +852,8 @@ export class MySQLStore implements Store {
     const id = randomUUID();
     const now = nowISO();
     await this.pool.query(
-      `INSERT INTO mg_conversation (uuid, session_id, entity_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
-      [id, sessionUuid, entityUuid, now, now]
+      `INSERT INTO mg_conversation (uuid, session_id, entity_id, summary, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, sessionUuid, entityUuid, '', now, now]
     );
     return id;
   }
@@ -583,7 +861,7 @@ export class MySQLStore implements Store {
   async activeConversation(sessionUuid: string): Promise<FactConversation | null> {
     await this.ready();
     const [rows] = await this.pool.query(
-      `SELECT uuid, session_id, entity_id, summary, created_at, updated_at FROM mg_conversation WHERE session_id = ? ORDER BY created_at DESC LIMIT 1`,
+      `SELECT uuid, session_id, entity_id, summary, summary_embedding_model, created_at, updated_at FROM mg_conversation WHERE session_id = ? ORDER BY created_at DESC LIMIT 1`,
       [sessionUuid]
     ) as any;
     if (rows.length === 0) return null;
@@ -597,6 +875,10 @@ export class MySQLStore implements Store {
     await this.pool.query(
       `INSERT INTO mg_message (uuid, conversation_id, role, content, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
       [msg.uuid, conversationUuid, msg.role, msg.content, msg.kind ?? 'text', msg.createdAt ?? now]
+    );
+    await this.pool.query(
+      `UPDATE mg_conversation SET updated_at = ? WHERE uuid = ?`,
+      [now, conversationUuid]
     );
   }
 
@@ -620,7 +902,7 @@ export class MySQLStore implements Store {
 
   async listConversationSummaries(entityUuid: string, limit: number): Promise<FactConversation[]> {
     await this.ready();
-    let query = `SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at FROM mg_conversation WHERE entity_id = ? AND summary != '' AND summary_embedding IS NOT NULL ORDER BY created_at DESC`;
+    let query = `SELECT uuid, session_id, entity_id, summary, summary_embedding, summary_embedding_model, created_at, updated_at FROM mg_conversation WHERE entity_id = ? AND summary != '' AND summary_embedding IS NOT NULL ORDER BY created_at DESC`;
     const args: any[] = [entityUuid];
     if (limit > 0) {
       query += ` LIMIT ?`;
@@ -633,15 +915,144 @@ export class MySQLStore implements Store {
   async updateConversationSummary(
     conversationUuid: string,
     summary: string,
-    embedding: number[]
+    embedding: number[],
+    embeddingModel: string = ''
   ): Promise<void> {
     await this.ready();
     const now = nowISO();
     const embBuf = encodeEmbedding(embedding);
     await this.pool.query(
-      `UPDATE mg_conversation SET summary = ?, summary_embedding = ?, updated_at = ? WHERE uuid = ?`,
-      [summary, embBuf, now, conversationUuid]
+      `UPDATE mg_conversation SET summary = ?, summary_embedding = ?, summary_embedding_model = ?, updated_at = ? WHERE uuid = ?`,
+      [summary, embBuf, embeddingModel, now, conversationUuid]
     );
+  }
+
+  // ---- Turn Summary ----
+
+  async insertTurnSummary(ts: TurnSummary): Promise<void> {
+    await this.ready();
+    if (!ts.uuid) ts.uuid = randomUUID();
+    const embedding = ts.summaryEmbedding ? encodeEmbedding(ts.summaryEmbedding) : null;
+    await this.pool.query(
+      `INSERT INTO mg_turn_summary (uuid, conversation_id, entity_id, start_turn, end_turn, summary, summary_embedding, is_overview, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        ts.uuid,
+        ts.conversationId,
+        ts.entityId,
+        ts.startTurn,
+        ts.endTurn,
+        ts.summary,
+        embedding,
+        ts.isOverview ? 1 : 0,
+        ts.createdAt ?? nowISO(),
+      ]
+    );
+  }
+
+  async listTurnSummaries(conversationId: string): Promise<TurnSummary[]> {
+    await this.ready();
+    const [rows] = await this.pool.query(
+      `SELECT uuid, conversation_id, entity_id, start_turn, end_turn, summary, summary_embedding, is_overview, created_at FROM mg_turn_summary WHERE conversation_id = ? ORDER BY is_overview ASC, start_turn ASC`,
+      [conversationId]
+    ) as any;
+    return rows.map(rowToTurnSummary);
+  }
+
+  async countTurnSummaries(conversationId: string): Promise<number> {
+    await this.ready();
+    const [rows] = await this.pool.query(
+      `SELECT COUNT(*) as cnt FROM mg_turn_summary WHERE conversation_id = ? AND is_overview = 0`,
+      [conversationId]
+    ) as any;
+    return rows[0]?.cnt ?? 0;
+  }
+
+  async deleteTurnSummaries(conversationId: string, uuids: string[]): Promise<void> {
+    await this.ready();
+    if (uuids.length === 0) return;
+    const placeholders = uuids.map(() => '?').join(',');
+    await this.pool.query(
+      `DELETE FROM mg_turn_summary WHERE conversation_id = ? AND uuid IN (${placeholders})`,
+      [conversationId, ...uuids]
+    );
+  }
+
+  // ---- Artifact ----
+
+  async insertArtifact(a: Artifact): Promise<void> {
+    await this.ready();
+    if (!a.uuid) a.uuid = randomUUID();
+    const embedding = a.descriptionEmbedding ? encodeEmbedding(a.descriptionEmbedding) : null;
+    await this.pool.query(
+      `INSERT INTO mg_artifact (uuid, conversation_id, entity_id, content, artifact_type, language, description, description_embedding, superseded_by, turn_number, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        a.uuid,
+        a.conversationId,
+        a.entityId,
+        a.content,
+        a.artifactType ?? 'code',
+        a.language ?? '',
+        a.description ?? '',
+        embedding,
+        a.supersededBy ?? null,
+        a.turnNumber ?? 0,
+        a.createdAt ?? nowISO(),
+      ]
+    );
+  }
+
+  async supersedeArtifact(oldUuid: string, newUuid: string): Promise<void> {
+    await this.ready();
+    await this.pool.query(
+      `UPDATE mg_artifact SET superseded_by = ? WHERE uuid = ?`,
+      [newUuid, oldUuid]
+    );
+  }
+
+  async listActiveArtifacts(entityId: string, conversationId: string): Promise<Artifact[]> {
+    await this.ready();
+    const [rows] = await this.pool.query(
+      `SELECT uuid, conversation_id, entity_id, content, artifact_type, language, description, description_embedding, superseded_by, turn_number, created_at FROM mg_artifact WHERE entity_id = ? AND conversation_id = ? AND superseded_by IS NULL ORDER BY created_at DESC`,
+      [entityId, conversationId]
+    ) as any;
+    return rows.map(rowToArtifact);
+  }
+
+  async listActiveArtifactsByEntity(entityId: string): Promise<Artifact[]> {
+    await this.ready();
+    const [rows] = await this.pool.query(
+      `SELECT uuid, conversation_id, entity_id, content, artifact_type, language, description, description_embedding, superseded_by, turn_number, created_at FROM mg_artifact WHERE entity_id = ? AND superseded_by IS NULL ORDER BY created_at DESC`,
+      [entityId]
+    ) as any;
+    return rows.map(rowToArtifact);
+  }
+
+  // ---- Session metadata ----
+
+  async updateSessionMentions(sessionUuid: string, mentions: string[]): Promise<void> {
+    await this.ready();
+    await this.pool.query(
+      `UPDATE mg_session SET entity_mentions = ? WHERE uuid = ?`,
+      [JSON.stringify(mentions), sessionUuid]
+    );
+  }
+
+  async incrementSessionMessageCount(sessionUuid: string): Promise<void> {
+    await this.ready();
+    await this.pool.query(
+      `UPDATE mg_session SET message_count = message_count + 1 WHERE uuid = ?`,
+      [sessionUuid]
+    );
+  }
+
+  async getSessionMentions(sessionUuid: string): Promise<string[]> {
+    await this.ready();
+    const [rows] = await this.pool.query(
+      `SELECT entity_mentions FROM mg_session WHERE uuid = ?`,
+      [sessionUuid]
+    ) as any;
+    if (rows.length === 0) return [];
+    try { return JSON.parse(rows[0].entity_mentions ?? '[]'); } catch { return []; }
   }
 
   // ---- Lifecycle ----
@@ -649,7 +1060,7 @@ export class MySQLStore implements Store {
   async findUnsummarizedConversation(entityUuid: string, excludeSessionUuid: string): Promise<FactConversation | null> {
     await this.ready();
     const [rows] = await this.pool.query(
-      `SELECT uuid, session_id, entity_id, summary, summary_embedding, created_at, updated_at
+      `SELECT uuid, session_id, entity_id, summary, summary_embedding, summary_embedding_model, created_at, updated_at
        FROM mg_conversation
        WHERE entity_id = ? AND session_id != ? AND (summary IS NULL OR summary = '')
        ORDER BY created_at DESC LIMIT 1`,

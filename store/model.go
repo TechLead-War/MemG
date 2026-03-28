@@ -159,13 +159,14 @@ type CanonicalSlot struct {
 
 // Conversation groups a sequence of messages within a session.
 type Conversation struct {
-	UUID             string
-	SessionID        string
-	EntityID         string
-	Summary          string
-	SummaryEmbedding []float32
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	UUID                  string
+	SessionID             string
+	EntityID              string
+	Summary               string
+	SummaryEmbedding      []float32
+	SummaryEmbeddingModel string
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 // Message is a single turn in a conversation.
@@ -178,13 +179,43 @@ type Message struct {
 	CreatedAt      time.Time
 }
 
+// TurnSummary is a condensed summary covering a range of conversation turns.
+type TurnSummary struct {
+	UUID             string
+	ConversationID   string
+	EntityID         string
+	StartTurn        int
+	EndTurn          int
+	Summary          string
+	SummaryEmbedding []float32
+	IsOverview       bool
+	CreatedAt        time.Time
+}
+
+// Artifact is a structured output (code, JSON, SQL, etc.) produced during a conversation.
+type Artifact struct {
+	UUID                 string
+	ConversationID       string
+	EntityID             string
+	Content              string
+	ArtifactType         string
+	Language             string
+	Description          string
+	DescriptionEmbedding []float32
+	SupersededBy         string
+	TurnNumber           int
+	CreatedAt            time.Time
+}
+
 // Session represents a bounded interaction window for an entity.
 type Session struct {
-	UUID      string
-	EntityID  string
-	ProcessID string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	UUID           string
+	EntityID       string
+	ProcessID      string
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
+	EntityMentions []string
+	MessageCount   int
 }
 
 // Process represents a tracked workflow or agent.

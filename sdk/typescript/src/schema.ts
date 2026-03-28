@@ -47,11 +47,13 @@ export const SCHEMA_DDL: string[] = [
     created_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS mg_session (
-    uuid       TEXT PRIMARY KEY,
-    entity_id  TEXT NOT NULL,
-    process_id TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL
+    uuid             TEXT PRIMARY KEY,
+    entity_id        TEXT NOT NULL,
+    process_id       TEXT NOT NULL DEFAULT '',
+    created_at       TEXT NOT NULL,
+    expires_at       TEXT NOT NULL,
+    entity_mentions  TEXT NOT NULL DEFAULT '[]',
+    message_count    INTEGER NOT NULL DEFAULT 0
   )`,
   `CREATE INDEX IF NOT EXISTS idx_mg_session_lookup ON mg_session(entity_id, process_id, expires_at)`,
   `CREATE TABLE IF NOT EXISTS mg_conversation (
@@ -60,6 +62,7 @@ export const SCHEMA_DDL: string[] = [
     entity_id         TEXT NOT NULL DEFAULT '',
     summary           TEXT NOT NULL DEFAULT '',
     summary_embedding BLOB,
+    summary_embedding_model TEXT NOT NULL DEFAULT '',
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
   )`,
@@ -78,6 +81,33 @@ export const SCHEMA_DDL: string[] = [
     embedding  BLOB NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
+  `CREATE TABLE IF NOT EXISTS mg_turn_summary (
+    uuid              TEXT PRIMARY KEY,
+    conversation_id   TEXT NOT NULL,
+    entity_id         TEXT NOT NULL,
+    start_turn        INTEGER NOT NULL,
+    end_turn          INTEGER NOT NULL,
+    summary           TEXT NOT NULL,
+    summary_embedding BLOB,
+    is_overview        INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_mg_turnsummary_conv ON mg_turn_summary(conversation_id, is_overview, created_at)`,
+  `CREATE TABLE IF NOT EXISTS mg_artifact (
+    uuid                  TEXT PRIMARY KEY,
+    conversation_id       TEXT NOT NULL,
+    entity_id             TEXT NOT NULL,
+    content               TEXT NOT NULL,
+    artifact_type         TEXT NOT NULL DEFAULT 'code',
+    language              TEXT NOT NULL DEFAULT '',
+    description           TEXT NOT NULL DEFAULT '',
+    description_embedding BLOB,
+    superseded_by         TEXT,
+    turn_number           INTEGER NOT NULL DEFAULT 0,
+    created_at            TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_mg_artifact_entity ON mg_artifact(entity_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_mg_artifact_conv ON mg_artifact(conversation_id, created_at)`,
   `CREATE TABLE IF NOT EXISTS mg_schema_version (
     id      INTEGER PRIMARY KEY DEFAULT 1,
     version INTEGER NOT NULL DEFAULT 1

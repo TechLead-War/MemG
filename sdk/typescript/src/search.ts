@@ -40,7 +40,7 @@ const STOP_WORDS: Set<string> = new Set([
 
 function tokenize(text: string): string[] {
   const lower = text.toLowerCase();
-  const words = lower.split(/[^a-z0-9\u00C0-\u024F]+/).filter(Boolean);
+  const words = lower.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
   return words.filter((w) => !STOP_WORDS.has(w));
 }
 
@@ -53,11 +53,10 @@ function containsTerm(doc: string[], term: string): boolean {
 
 function termFrequencies(doc: string[], terms: string[]): Map<string, number> {
   const tf = new Map<string, number>();
+  const termSet = new Set(terms);
   for (const w of doc) {
-    for (const t of terms) {
-      if (w === t) {
-        tf.set(t, (tf.get(t) ?? 0) + 1);
-      }
+    if (termSet.has(w)) {
+      tf.set(w, (tf.get(w) ?? 0) + 1);
     }
   }
   return tf;
@@ -148,37 +147,41 @@ function blendWeights(queryText: string): [number, number] {
 }
 
 /**
- * Kneedle algorithm to find the cutoff point in a sorted score curve.
+ * Finds the "knee" in sorted scores using the Kneedle algorithm
+ * (Satopaa et al., ICDCS 2011). Items must be sorted by score descending.
+ * Normalizes both axes to [0,1], draws a diagonal from the first point
+ * (highest score) to the last point (lowest score), and finds the point
+ * where the actual curve deviates most below the diagonal.
  * Returns the number of items to keep.
  */
 function kneedleCutoff(items: ScoredItem[]): number {
+  if (items.length <= 3) return items.length;
+
   const n = items.length;
-  if (n <= 2) return n;
+  const maxScore = items[0].score;
+  const minScore = items[n - 1].score;
+  const scoreRange = maxScore - minScore;
 
-  const yMin = items[n - 1].score;
-  const yMax = items[0].score;
-  const yRange = yMax - yMin;
-  if (yRange === 0) return n;
+  if (scoreRange < 1e-9) return n;
 
-  let maxDiff = 0;
-  let kneeIdx = 0;
+  let bestDeviation = 0;
+  let kneeIdx = n;
 
   for (let i = 0; i < n; i++) {
-    const xNorm = i / (n - 1);
-    const yNorm = (items[i].score - yMin) / yRange;
-    const diagonal = 1.0 - xNorm;
-    const diff = yNorm - diagonal;
+    const x = i / (n - 1);
+    const y = (items[i].score - minScore) / scoreRange;
+    const diagonal = 1.0 - x;
+    const deviation = diagonal - y;
 
-    if (diff > maxDiff) {
-      maxDiff = diff;
+    if (deviation > bestDeviation) {
+      bestDeviation = deviation;
       kneeIdx = i;
     }
   }
 
-  const minKneeStrength = 0.10;
-  if (maxDiff < minKneeStrength) return n;
-
-  return Math.max(1, kneeIdx + 1);
+  if (kneeIdx <= 0) return 1;
+  if (kneeIdx >= n) return n;
+  return kneeIdx;
 }
 
 export interface RankResult {
@@ -215,11 +218,11 @@ export class HybridEngine {
         score *= 0.85;
       }
 
-      if (c.confidence > 0 && c.confidence < 1.0) {
-        score *= 0.95 + 0.05 * c.confidence;
+      let conf = c.confidence;
+      if (conf <= 0) conf = 1.0;
+      if (conf < 1.0) {
+        score *= 0.95 + 0.05 * conf;
       }
-
-      score += c.significance * 0.001;
 
       return { idx: i, score };
     });
@@ -232,6 +235,12 @@ export class HybridEngine {
       above.push(s);
       if (above.length >= limit) break;
     }
+
+    // Add significance as tiebreaker for sort order only (after threshold filtering).
+    for (const s of above) {
+      s.score += candidates[s.idx].significance * 0.001;
+    }
+    above.sort((a, b) => b.score - a.score);
 
     const cutoff = kneedleCutoff(above);
 

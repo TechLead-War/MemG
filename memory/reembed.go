@@ -68,44 +68,51 @@ func ReEmbedFacts(
 		batchSize = 50
 	}
 
-	// Load all facts (we need their content to re-embed).
 	filter := store.FactFilter{ExcludeExpired: true}
-	facts, err := repo.ListFactsFiltered(ctx, entityUUID, filter, 100000)
-	if err != nil {
-		return 0, fmt.Errorf("reembed: load facts: %w", err)
-	}
-
 	updated := 0
-	for i := 0; i < len(facts); i += batchSize {
-		end := i + batchSize
-		if end > len(facts) {
-			end = len(facts)
-		}
-		batch := facts[i:end]
 
-		// Collect content for batch embedding.
-		contents := make([]string, len(batch))
-		for j, f := range batch {
+	for {
+		facts, err := repo.ListFactsFiltered(ctx, entityUUID, filter, batchSize)
+		if err != nil {
+			return updated, fmt.Errorf("reembed: load facts: %w", err)
+		}
+		if len(facts) == 0 {
+			break
+		}
+
+		// Filter out facts that already have the target embedding model.
+		var toProcess []*store.Fact
+		for _, f := range facts {
+			if f.EmbeddingModel != modelName {
+				toProcess = append(toProcess, f)
+			}
+		}
+		if len(toProcess) == 0 {
+			break
+		}
+
+		contents := make([]string, len(toProcess))
+		for j, f := range toProcess {
 			contents[j] = f.Content
 		}
 
-		// Embed the batch.
 		vectors, err := embedder.Embed(ctx, contents)
 		if err != nil {
-			return updated, fmt.Errorf("reembed: embed batch at %d: %w", i, err)
+			return updated, fmt.Errorf("reembed: embed batch at offset %d: %w", updated, err)
 		}
 
-		// Update each fact's embedding.
-		for j, f := range batch {
+		for j, f := range toProcess {
 			if j < len(vectors) {
-				f.Embedding = vectors[j]
-				f.EmbeddingModel = modelName
 				if err := repo.UpdateFactEmbedding(ctx, f.UUID, vectors[j], modelName); err != nil {
 					log.Printf("reembed: update fact %s: %v", f.UUID, err)
 					continue
 				}
 				updated++
 			}
+		}
+
+		if len(facts) < batchSize {
+			break
 		}
 	}
 
