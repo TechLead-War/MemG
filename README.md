@@ -452,6 +452,163 @@ MemG doesn't just store facts — it manages their lifecycle:
 
 See [MEMORY_ARCHITECTURE.md](MEMORY_ARCHITECTURE.md) for the full technical deep-dive.
 
+## Advanced Memory Features
+
+MemG includes six advanced subsystems that go beyond basic memory storage to deliver sharper recall, reduced token usage, and psychology-backed user retention. See [MEMORY_ARCHITECTURE.md](MEMORY_ARCHITECTURE.md) for the full technical deep-dive.
+
+### Hierarchical Memory (Subsystem 8)
+
+Three-tier memory inspired by the Atkinson-Shiffrin model and research from Memoria (2025), MemGPT (2023), and the Lost in the Middle phenomenon (Liu et al., 2023):
+
+| Tier | What It Holds | Token Budget | Persistence |
+|---|---|---|---|
+| **Semantic** | Identity facts, user profile, pinned facts | ~600 tokens | Never decays |
+| **Episodic** | Events, predictions, emotionally weighted memories | ~1400 tokens | Ebbinghaus decay curve |
+| **Working** | Current session turns (compressed) | ~2000 tokens | Session-scoped |
+
+Projected impact: **60-75% token reduction** vs. flat context injection, with better answer quality due to principled budget allocation and positional optimization (identity at start, recent context at end).
+
+### Relational Memory Graph (Subsystem 9)
+
+Promotes the existing `graph/` package to a first-class recall mechanism. Built on research from HippoRAG (NeurIPS 2024), AriGraph (IJCAI 2025), and A-MEM (NeurIPS 2025):
+
+- **Graph-augmented recall** — seed facts expand to connected subgraphs via 1-hop traversal
+- **Entity resolution** — "mom", "mother", "Priya" merge into one node using embedding similarity
+- **Knowledge cards** — structured entity summaries injected instead of disconnected fact snippets
+- **Anti-hallucination** — graph provides closed-world assumption for personal facts
+
+### Emotional Memory Scoring (Subsystem 10)
+
+Emotional annotation on facts based on flashbulb memory research (Brown & Kulik, 1977) and the peak-end rule (Kahneman et al., 1993):
+
+- Three new fact fields: `emotional_valence`, `emotional_arousal`, `emotional_category`
+- High-arousal memories decay slower (flashbulb effect)
+- Emotional relevance matching boosts recall for emotionally similar queries
+- Peak moment detection identifies the most impactful conversations
+- Empathetic annotations mark sensitive facts for careful handling
+
+### Proactive Memory Surfacing (Subsystem 11)
+
+Context surfacing without a user query, based on variable ratio reinforcement (Skinner), the Zeigarnik effect, and nostalgia research (Santini et al., 2023):
+
+| Trigger | What It Does | Frequency |
+|---|---|---|
+| Prediction follow-up | Revisits predictions whose dates have passed | High (70% base rate) |
+| Emotional callback | Checks in on emotionally significant past conversations | Moderate (30%) |
+| Milestone | Acknowledges conversation count milestones | Always (rare events) |
+| Nostalgia | References early conversations and growth | Low (15%) |
+| Pattern insight | Surfaces statistical patterns across conversations | Low (20%) |
+
+Triggers fire on a **variable schedule** — unpredictable timing creates the dopamine response that drives habit formation (Nir Eyal's Hook Model).
+
+### Confidence-Gated Generation (Subsystem 12)
+
+Anti-hallucination through confidence tiers, informed by Chain-of-Verification (ACL 2024), SelfCheckGPT (EMNLP 2023), and the Barnum/Forer effect:
+
+| Tier | Confidence | LLM Instruction |
+|---|---|---|
+| **Verified** | ≥ 0.8 | State as known fact |
+| **Inferred** | 0.5 – 0.79 | Frame as "it seems like..." |
+| **Uncertain** | < 0.5 | Never state as fact; ask to confirm |
+
+Key insight for astrology/tarot: the Barnum effect means vague readings are accepted — but getting specific remembered facts wrong destroys trust. Confidence gating ensures the AI is **vague by creative choice, not by confusion**.
+
+### User-Visible Memory (Subsystem 13)
+
+User-facing memory operations based on the IKEA effect (Norton et al., 2012), endowment effect (Thaler, 1980), and commitment/consistency (Cialdini, 1984):
+
+```typescript
+// Users can see, correct, confirm, pin, and contribute to their memory
+await memg.list(entityId, { userVisible: true });     // "What do you know about me?"
+await memg.correct(entityId, factId, { newContent }); // Fix wrong facts
+await memg.confirm(entityId, factId);                  // Verify correct facts
+await memg.pin(entityId, factId);                      // Prevent decay
+await memg.addUserNote(entityId, { content, tag });   // Tell the AI something
+await memg.exportMemory(entityId);                     // Data portability
+```
+
+The retention loop: extraction → visibility (endowment) → correction (IKEA effect) → investment (commitment) → accurate recall (reciprocity) → deeper bond → return.
+
+### Advanced Memory Features (v2) — TypeScript SDK
+
+The TypeScript SDK (`memg-core-js`) exposes all six advanced subsystems as first-class APIs. These run fully in-process (native mode) with no Go server required.
+
+| Feature | Description | API |
+|---|---|---|
+| Hierarchical Context | Three-tier memory (working/episodic/semantic) with structured sections | `buildHierarchicalMemoryContext()` |
+| Emotional Memory | Tracks emotional weight and valence of facts | Automatic in extraction |
+| Confidence Grading | Facts labeled verified/likely/inferred, LLM uses hedging | `confidenceFloor` option |
+| Open Thread Tracking | Detects and tracks unresolved life situations | `getOpenThreads()`, `resolveThread()` |
+| Verbatim Store | Stores user's exact words for self-reference mirroring | Automatic in extraction |
+| Temporal Memory | Tracks when states began, not just when discussed | `startedAt` field |
+| Proactive Surfacing | Re-engagement triggers (Zeigarnik, nostalgia, milestones) | `getProactiveContext()` |
+| Segment Extraction | Topic-level extraction instead of turn-level | `extractFromSegments()` |
+| Pin & Confirm | User-visible memory management | `pin()`, `confirm()` |
+| Personalization Throttle | Prevents over-personalization | `maxPersonalFacts` config |
+
+**Hierarchical context builder:**
+
+```typescript
+const m = new MemG({ dbPath: './memory.db', openaiApiKey: process.env.OPENAI_API_KEY });
+await m.init();
+
+// Build structured, confidence-graded memory context
+const ctx = await m.buildHierarchicalMemoryContext('user-123', 'How is my career looking?', {
+  includeProactive: true,
+  includeEmotional: true,
+  confidenceFloor: 0.5,
+});
+console.log(ctx.formatted);
+// Output:
+// [IDENTITY] Who this user is:
+// - Works at TCS (verified)
+// - Lives in Mumbai (verified)
+//
+// [EMOTIONAL STATE] Recent emotional context:
+// - Feeling anxious about career change (3 days ago)
+//   User said: "I feel stuck in this job"
+//
+// [OPEN THREADS] Unresolved topics to follow up on:
+// - Considering department transfer (still open, started 2 weeks ago)
+// ...
+
+// Individual tier text is also available:
+console.log(ctx.semantic);   // Identity section only
+console.log(ctx.emotional);  // Emotional section only
+console.log(ctx.totalTokens); // Token count across all tiers
+```
+
+**Pin, confirm, and thread management:**
+
+```typescript
+// List what the AI knows
+const memories = await m.list('user-123');
+
+// User confirms a fact is correct — boosts confidence to 1.0
+await m.confirm('user-123', memories[0].id);
+
+// Pin a fact so it never decays
+await m.pin('user-123', memories[0].id);
+
+// View and resolve open threads
+const threads = await m.getOpenThreads('user-123');
+console.log(threads); // [{ content: "Considering department transfer", threadStatus: "open", ... }]
+await m.resolveThread('user-123', threads[0].id);
+```
+
+**Proactive context surfacing:**
+
+```typescript
+// Get re-engagement triggers for session start
+const proactive = await m.getProactiveContext('user-123', { trigger: 'all', limit: 3 });
+for (const item of proactive) {
+  console.log(`[${item.type}] ${item.content}`);
+}
+// [open_thread] Considering department transfer (open since 5 days ago)
+// [emotional_checkin] You mentioned experiencing anxiety 3 days ago. How are you feeling about that now?
+// [milestone] This is a milestone — 100 memories stored together.
+```
+
 ## Configuration
 
 Configuration is resolved in this order: **CLI flags > environment variables > config file > defaults**. You can use any combination.

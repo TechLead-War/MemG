@@ -1,18 +1,8 @@
-# Binaries
-*.exe
-*.dll
-*.so
-*.dylib
-
-# Test artifacts
-*.test
-*.out
-coverage.html
-coverage.txt
-
-# Dependency cache
-vendor/
+# Dependencies
 node_modules/
+
+# Build output
+dist/
 
 # IDE
 .idea/
@@ -28,17 +18,9 @@ Thumbs.db
 # Environment
 .env
 
-# Local config (may contain API keys)
-/memg.json
-/memg.config.json
-
 # SQLite databases
 *.db
 *.db-journal
-
-# Build output
-/bin/
-/dist/
 
 # Sensitive files
 *.pem

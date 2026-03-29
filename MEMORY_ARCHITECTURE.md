@@ -1473,3 +1473,3048 @@ All three implementations share identical logic and identical function signature
 #### Why This Matters
 
 Any improvement to the recall pipeline — a new ranking signal, a better cutoff algorithm, an additional context layer — automatically propagates to every caller. The proxy, the library, benchmarks, and custom integrations all benefit without code changes. The alternative (each caller orchestrating the pipeline) means improvements must be manually wired into every integration point, and some will inevitably be missed.
+
+---
+
+### Subsystem 9: Hierarchical Memory Architecture
+
+#### The Problem
+
+The current context builder (Subsystem 1) assembles memory as a flat priority list: conscious facts, session summaries, recalled facts, artifacts, and conversation summaries. Each category is populated independently and packed into a single token budget (default: 4000). This is functional, but it treats memory as a homogeneous pool — a high-significance identity fact like "User is allergic to peanuts" competes for the same budget space as an episodic event fact like "User ate sushi on March 12" and a compressed session summary from 10 minutes ago. The system has no principled way to answer: *which memories must always be present, which should be recalled on demand, and which belong only to the current conversation?*
+
+This flat approach creates three concrete problems for applications with rich user profiles (astrology details, prediction history, character preferences, medical records):
+
+1. **Token waste under tight budgets.** When `MemoryTokenBudget` is constrained (mobile clients, cost-sensitive deployments, models with small effective context windows), the system packs facts by significance and recall score alone. A medium-significance episodic fact about last week's dinner can displace a lower-significance but always-relevant identity fact about the user's timezone. The budget is spent, but the context is wrong.
+
+2. **No separation between identity and episode.** The system already distinguishes fact types (`identity`, `event`, `pattern`) in the data model (Technique 4), but the context builder does not use this distinction for budget allocation. Conscious mode loads top-significance facts regardless of type. A user with 15 high-significance event facts and 5 medium-significance identity facts will see their identity crowded out of conscious mode — the events win on significance alone, even though identity facts are needed on every single request and events are only needed when relevant.
+
+3. **Temporal layer confusion.** The LLM receives a flat list that mixes "who the user is" (permanent), "what happened before" (historical), and "what is happening now" (session-scoped). The model must disambiguate these layers from content alone. Research shows this is precisely the wrong approach — positional attention patterns in transformer models mean the placement and grouping of context directly affects how well the model uses it.
+
+#### Research Foundation
+
+The hierarchical design is grounded in five bodies of work that collectively demonstrate why flat context injection is suboptimal and how structured memory tiers solve it.
+
+**Memoria** (Lee et al., 2025; arXiv:2512.12686) introduced Hebbian memory networks for LLM agents, achieving 81.95% accuracy on long-horizon tasks using only 1,294 tokens per query — 67% fewer tokens than competing approaches and over 20x savings compared to full-context baselines. The key insight: structured memory selection (choosing *which* memories to inject based on associative strength) dramatically outperforms brute-force context stuffing. Memoria's Hebbian learning rule — strengthening connections between co-activated memories — directly informs the reinforcement-weighted decay function described below.
+
+**Lost in the Middle** (Liu et al., 2023; published in TACL 2024; arXiv:2307.03172) demonstrated that LLM performance on multi-document question answering drops 15-47% as context length grows, with a characteristic U-shaped attention curve: models attend most strongly to information at the beginning and end of the context, and least to information in the middle. This is not a minor effect — on the 20-document setting, placing the relevant document at position 10 instead of position 1 reduced accuracy by over 20 percentage points across every model tested (GPT-3.5, GPT-4, Claude, MPT). The injection order described below (semantic memory first, working memory last, episodic memory in the middle) is a direct application of this finding.
+
+**LongLLMLingua** (Jiang et al., 2024; Microsoft Research; published at ACL 2024; arXiv:2310.06839) demonstrated that prompt compression using perplexity-guided token pruning achieves 94% cost reduction with a simultaneous 21.4% performance improvement at 4x compression ratios. The counterintuitive result — *less context producing better answers* — confirms that context quality dominates context quantity. LongLLMLingua's question-aware compression (prioritizing tokens relevant to the current query) parallels the episodic tier's relevance-gated retrieval: only facts that pass hybrid recall scoring enter the episodic budget, rather than loading all facts and hoping the model sorts them out.
+
+**MemGPT** (Packer et al., 2023; arXiv:2310.08560) proposed an operating-system-inspired memory architecture for LLMs with two tiers: a fixed-size "main context" (analogous to RAM) and an unbounded "external storage" (analogous to disk), with an LLM-driven controller that pages information between tiers. MemGPT demonstrated that agents with tiered memory sustain coherent multi-session conversations far beyond what flat context windows support. The architecture below adapts this insight — but replaces MemGPT's LLM-driven paging (which adds latency and unpredictability) with deterministic tier assignment based on fact metadata that MemG already tracks (type, significance, recency, reinforcement count).
+
+**The Atkinson-Shiffrin memory model** (Atkinson & Shiffrin, 1968) established the foundational cognitive science framework: human memory operates through three stores with distinct retention characteristics — a sensory register (sub-second, high-bandwidth), a short-term store (seconds to minutes, limited capacity), and a long-term store (indefinite, semantically organized). Information flows from sensory to short-term via attention, and from short-term to long-term via rehearsal (repetition). The three tiers below map directly: semantic memory is the long-term store (durable, identity-level), episodic memory is the associative recall path into long-term storage (relevance-gated), and working memory is the short-term store (session-scoped, capacity-limited, discarded on rollover).
+
+#### The Design — Three-Tier Memory
+
+The hierarchical architecture partitions the memory token budget into three tiers, each with a distinct role, retrieval strategy, and lifecycle. This replaces the flat priority list in `BuildContext` with a structured allocation that mirrors the cognitive distinction between knowing *who someone is*, *what happened to them*, and *what is happening right now*.
+
+##### Tier 1: Semantic Memory (Always-On Identity)
+
+Semantic memory contains the facts that define the entity across all contexts. These facts are injected into every request regardless of the current query — the LLM always knows who it is talking to.
+
+**What belongs here:**
+- Identity facts with significance >= 8 (name, location, occupation, timezone, allergies)
+- Pinned facts (user-confirmed via the `Pin` API or `pinned` field)
+- Slot-bearing identity facts in the canonical registry (Subsystem 2)
+- High-confidence pattern facts derived from consolidation (Subsystem 5) that describe stable behavioral traits
+
+**What does not belong here:**
+- Event facts, regardless of significance (events are episodic by nature)
+- Pattern facts below significance 6 (weak patterns are context-dependent, not identity)
+- Any fact with `temporal_status = historical` (historical facts are not current identity)
+
+**Retrieval strategy:** No query embedding required. Semantic memory is loaded by a filtered database query: `SELECT ... WHERE type IN ('identity', 'pattern') AND temporal_status = 'current' AND (significance >= 8 OR pinned = true) ORDER BY significance DESC, reinforced_count DESC`. This is a read path, not a search path — there is no ranking, no cosine similarity, no BM25. The facts are loaded unconditionally.
+
+**Token budget:** Configured via `SemanticTokenBudget` (default: 600 tokens). This is approximately 8-12 identity facts at typical fact lengths (50-75 tokens each). The budget is deliberately small — identity should be concise. If the semantic tier overflows its budget, facts are truncated by significance (lowest significance dropped first), then by reinforcement count (least reinforced dropped first). Overflow is a signal that the entity has too many high-significance identity facts and may benefit from consolidation.
+
+**Decay behavior:** None. Semantic memory does not decay. Facts in this tier persist until explicitly superseded (via slot-based conflict resolution), deleted, or reclassified to historical. The existing staleness demotion from Subsystem 5 does not apply within the semantic tier — if a fact qualifies for Tier 1, it stays there at full strength. The rationale: identity facts are true until they are not. "User is allergic to peanuts" does not become less true because the user hasn't mentioned it in 90 days. Staleness demotion remains active for identity facts that do not qualify for Tier 1 (significance < 8, not pinned) — those live in the episodic tier and are subject to decay.
+
+**Relationship to conscious mode:** Semantic memory is what conscious mode *becomes* — renamed, formalized, and given a dedicated budget. The existing `ConsciousLimit` setting is subsumed by `SemanticTokenBudget`. Applications that previously tuned `ConsciousLimit` to control profile injection now have a more precise lever: a token budget instead of a fact count, with explicit type and significance filtering instead of pure significance ordering.
+
+##### Tier 2: Episodic Memory (Context-Dependent Recall)
+
+Episodic memory contains facts and summaries that are relevant to the current query but are not permanent identity. These are the "what happened" memories — events, predictions, past interactions, contextual patterns, and conversation narratives.
+
+**What belongs here:**
+- Event facts retrieved by hybrid recall (cosine + BM25 + Kneedle cutoff)
+- Pattern facts below significance 8 that are query-relevant
+- Identity facts below significance 8 that are query-relevant but did not qualify for Tier 1
+- Conversation summaries from prior sessions (the existing summary recall path)
+- Historical facts that score above the recall threshold (the 15% penalty from Technique 4 still applies)
+
+**Retrieval strategy:** Identical to the current recall pipeline — the query is embedded, hybrid ranking scores every candidate, and the Kneedle cutoff determines which facts survive. The only change is that facts already loaded into Tier 1 are excluded from the candidate set (cross-tier deduplication). This prevents a high-significance identity fact from consuming budget in both tiers.
+
+**Token budget:** Configured via `EpisodicTokenBudget` (default: 1400 tokens). This is approximately 15-25 recalled facts and summaries depending on length. The budget covers both recalled facts and recalled summaries — summaries no longer have a separate `SummaryTokenBudget` within the episodic tier; they compete with facts on relevance score. If a conversation summary scores higher than an event fact, it takes the budget slot. This is a deliberate simplification: the old `SummaryTokenBudget` (Subsystem 1) created an artificial boundary between facts and summaries that sometimes left budget unused in one sub-pool while the other overflowed.
+
+**Decay behavior — the Ebbinghaus retention function:** Episodic memory introduces a time-weighted decay function inspired by the Ebbinghaus forgetting curve. Raw recall scores from hybrid ranking are multiplied by a retention factor that models how memory strength degrades over time:
+
+```
+memory_strength = base_significance
+                + (reinforcement_count * 0.5)
+                + (emotional_weight * 2.0)
+
+retention = e^(-days_since_access / memory_strength)
+
+episodic_score = hybrid_recall_score * retention
+```
+
+Where:
+- `base_significance` is the fact's significance (1-10)
+- `reinforcement_count` is how many times the fact has been re-extracted (Technique 4)
+- `emotional_weight` is a future field (default: 0.0, reserved for Subsystem 11)
+- `days_since_access` is the number of days since `MAX(last_recalled_at, reinforced_at, created_at)` — whichever is most recent
+- `memory_strength` determines the half-life of the memory in the exponential decay curve
+
+**What the decay function produces in practice:**
+
+| Fact profile | Significance | Reinforced | Emotional | Strength | Days since access | Retention | Effect |
+|---|---|---|---|---|---|---|---|
+| Important, frequently recalled | 8 | 6x | 0.0 | 11.0 | 30 | 0.066 | Retains 6.6% after a month — still meaningful |
+| Important, recently confirmed | 8 | 2x | 0.0 | 9.0 | 3 | 0.716 | Retains 71.6% after 3 days — strong |
+| Medium, never reinforced | 5 | 0x | 0.0 | 5.0 | 5 | 0.368 | Retains 36.8% after 5 days — fading |
+| Low, never reinforced | 2 | 0x | 0.0 | 2.0 | 5 | 0.082 | Retains 8.2% after 5 days — nearly gone |
+| Low, but emotionally weighted | 2 | 0x | 3.0 | 8.0 | 5 | 0.535 | Retains 53.5% — emotional weight preserves it |
+
+The decay function does not delete facts. It modulates their recall ranking within the episodic tier. A decayed fact with a high hybrid recall score may still surface if the query is highly relevant — decay reduces its effective score, but a strong relevance signal can overcome the penalty. Deletion remains the province of the TTL-based pruner (Technique 4) and the background consolidator (Subsystem 5).
+
+**Why Ebbinghaus and not linear decay:** Human forgetting follows an exponential curve, not a linear one. Memories decay rapidly at first, then stabilize. A linearly decaying score would treat a 10-day-old memory and a 100-day-old memory as having a proportional difference, when in reality the first few days after encoding are when most forgetting occurs. The exponential model captures this: the steepest decay happens immediately after last access, and the curve flattens as `days_since_access` grows relative to `memory_strength`. A strongly reinforced memory (high strength) has a flatter curve — it takes much longer to decay — while a weak memory (low strength) drops precipitously.
+
+**Interaction with existing recall scoring:** The Ebbinghaus retention factor is applied *after* hybrid ranking and *before* Kneedle cutoff. The pipeline becomes:
+
+```
+1. Embed query
+2. Score all candidates via cosine + BM25 (hybrid ranking)
+3. Exclude facts already in Tier 1 (cross-tier deduplication)
+4. Multiply each candidate's hybrid score by its retention factor (Ebbinghaus decay)
+5. Apply Kneedle cutoff to the decayed scores
+6. Fill episodic budget with surviving candidates, highest decayed score first
+```
+
+This ordering is important. Applying decay *before* Kneedle means the cutoff operates on scores that reflect both relevance and temporal freshness. A fact that is relevant but stale will have its score pulled below the Kneedle knee and be excluded, while a fact that is both relevant and fresh will survive. Applying decay *after* Kneedle would allow stale facts through the cutoff and then waste budget on them.
+
+##### Tier 3: Working Memory (Current Session)
+
+Working memory contains the immediate conversational context — what is happening *right now*. This is the most volatile tier: it is created when a session starts, grows as messages are exchanged, and is discarded entirely on session rollover.
+
+**What belongs here:**
+- Compressed turn-range summaries from the active conversation (Subsystem 7)
+- The overview summary if the conversation is long enough to have one
+- Raw recent messages from the adaptive token-aware window (Subsystem 7)
+- Artifacts from the current conversation (code, JSON, SQL)
+
+**What does not belong here:**
+- Facts from the entity's long-term memory (those are Tier 1 or Tier 2)
+- Summaries from prior conversations (those are Tier 2)
+- Anything that should persist beyond the current session
+
+**Retrieval strategy:** No search. Working memory is loaded directly from the active conversation: turn-range summaries via `ListTurnSummaries`, recent messages via `LoadRecentHistory` (with adaptive windowing), and artifacts via `ListActiveArtifacts`. This is the same retrieval path as the current system — the difference is that working memory now has its own dedicated budget that is not shared with identity or episodic recall.
+
+**Token budget:** Configured via `WorkingTokenBudget` (default: 2000 tokens). This is the largest tier by default, reflecting the importance of conversational continuity. Within the working tier, the allocation follows the existing priority: turn-range summaries first (they provide compressed context for the full conversation), then artifacts (structured outputs the user may reference), then raw recent messages (filling remaining space via adaptive windowing).
+
+**Lifecycle:** Session-scoped. When a session rolls over (inactivity timeout), working memory is discarded. Turn-range summaries are already persisted in `mg_turn_summary` and remain available for future episodic recall from new sessions. Artifacts are persisted in `mg_artifact`. Raw messages are persisted in the conversation log. The working tier itself is a *view* over these persisted structures, not a separate store — it exists only during context building and is reassembled from the database on every request.
+
+#### Token Budget Allocation
+
+The total memory budget is partitioned across tiers using configurable proportional caps:
+
+```
+TotalBudget = MemoryTokenBudget (default: 4000)
+
+SemanticBudget = min(SemanticTokenBudget, TotalBudget * 0.15)   // default: min(600, 600) = 600
+EpisodicBudget = min(EpisodicTokenBudget, TotalBudget * 0.35)   // default: min(1400, 1400) = 1400
+WorkingBudget  = TotalBudget - SemanticBudget - EpisodicBudget   // default: 4000 - 600 - 1400 = 2000
+```
+
+The proportional caps (`0.15`, `0.35`) prevent a single tier from consuming the entire budget even when configured with large per-tier values. If a caller sets `SemanticTokenBudget = 3000` and `MemoryTokenBudget = 4000`, the semantic tier is capped at `min(3000, 4000 * 0.15) = 600` — not 3000. This prevents misconfiguration from starving the other tiers.
+
+**Surplus flow:** When a tier uses fewer tokens than its budget, the surplus cascades to the next tier in priority order:
+
+```
+1. Semantic tier fills first (unconditional facts)
+2. Semantic surplus → Working tier (conversational continuity is next priority)
+3. Working tier fills second
+4. Working surplus → Episodic tier (recalled context gets remaining space)
+5. Episodic tier fills last with total remaining budget
+```
+
+The flow order is working-before-episodic, not episodic-before-working. This is deliberate: within-session continuity (working memory) is more important than cross-session recall (episodic memory) for answer quality. A user in an active conversation benefits more from seeing their recent turns than from seeing a recalled fact from last week. The episodic tier absorbs whatever budget remains after the session context is satisfied.
+
+**Example allocations:**
+
+| Scenario | Semantic used | Working used | Episodic gets | Why |
+|---|---|---|---|---|
+| New user, no facts, short session | 0 tokens | 400 tokens | 3600 tokens | No identity yet, few messages, most budget goes to any recalled facts from recent extraction |
+| Rich profile, long active session | 600 tokens | 2000 tokens | 1400 tokens | Full budgets, no surplus |
+| Rich profile, new session (first message) | 550 tokens | 0 tokens | 3450 tokens | No working memory yet (session just started), massive episodic budget |
+| Minimal profile, very long session | 150 tokens | 2450 tokens | 1400 tokens | Semantic surplus flows to working memory |
+
+#### Injection Order
+
+The physical ordering of memory tiers in the system prompt is not arbitrary. Based on the U-shaped attention curve documented in Lost in the Middle (Liu et al., 2023), transformer models attend most strongly to tokens at the **beginning** and **end** of the context window, with a significant attention trough in the **middle**. The injection order exploits this:
+
+```
+[System prompt preamble]
+
+--- Semantic Memory (beginning — highest attention) ---
+User profile:
+- User's name is Alice
+- User is a Scorpio, born November 3, 1992
+- User is allergic to peanuts and shellfish
+- User works as a backend engineer at Stripe
+- User lives in San Francisco
+
+--- Episodic Memory (middle — lowest attention, but still relevant) ---
+Relevant context from memory:
+- User's last astrology reading predicted a career change in Q2 2026
+- User discussed anxiety about switching teams on March 15
+- [Mar 20, 2026] Explored tarot reading for career guidance, drew The Tower card
+
+--- Working Memory (end — recency bias, high attention) ---
+Session context:
+- [Turns 1-5] Discussed today's horoscope, Scorpio rising in Venus
+- [Turns 6-10] Shifted to career advice, user considering a move to management
+[Recent messages from adaptive window]
+```
+
+**Why this order works:**
+
+- **Semantic memory at the beginning** ensures identity facts are always in the highest-attention region. The model never forgets who the user is, even in long contexts. This is the most critical placement — a model that forgets the user's name or allergies mid-conversation produces unacceptable errors.
+- **Working memory at the end** exploits the recency bias in transformer attention. The most recent conversation turns and session summaries are placed where the model naturally attends most strongly after the opening. This produces coherent, contextually grounded responses that follow the conversational flow.
+- **Episodic memory in the middle** occupies the attention trough. This is the correct placement for episodic recall because episodic facts are *supplementary* — they enrich the response when the model happens to attend to them, but the response should be coherent even if the model underweights them. A recalled event from last week is useful context, not critical identity.
+
+**What happens when the model misses middle-positioned episodic facts:** The response is still correct (identity is present, session context is present) but may be less rich. This is the right failure mode — a response that is correct but thin is better than a response that has rich episodic context but forgets the user's name because identity was placed in the middle.
+
+#### Interaction With Existing Subsystems
+
+The hierarchical architecture integrates with, rather than replaces, the existing subsystem chain:
+
+| Subsystem | Relationship to Hierarchical Memory |
+|---|---|
+| **Subsystem 1** (Chat Boundaries) | `BuildContext` is refactored from flat priority list to three-tier assembly. `MemoryTokenBudget` remains the master budget. `SummaryTokenBudget` is deprecated in favor of per-tier budgets. |
+| **Subsystem 2** (Memory Truth) | Slot-based conflict resolution and provenance tracking are unchanged. Semantic tier loading uses the same `temporal_status` and `significance` fields that Subsystem 2 maintains. |
+| **Subsystem 3** (Retrieval Correctness) | Full-memory search, Kneedle cutoff, and dimension mismatch safety apply to the episodic tier only. Semantic tier uses direct loading, not search. |
+| **Subsystem 5** (Memory Hygiene) | Recall usage tracking (`RecallCount`, `LastRecalledAt`) feeds the Ebbinghaus decay function via `days_since_access`. Staleness demotion is superseded by Ebbinghaus decay for episodic facts and disabled for semantic-tier facts. |
+| **Subsystem 6** (Concurrency) | No changes. Tier assembly runs synchronously in the request path; background work (extraction, summarization) remains in the bounded goroutine pool. |
+| **Subsystem 7** (Session Intelligence) | Turn-range summaries, artifacts, and adaptive windowing move entirely into Tier 3 (working memory). The adaptive window now fills within the `WorkingTokenBudget` rather than the global `MemoryTokenBudget`. |
+| **Subsystem 8** (Unified Recall) | `RecallAndBuildContext` orchestrates the three-tier assembly instead of the flat five-layer build. The seven-step pipeline gains a tier-assignment step between recall and context assembly. |
+
+#### Configuration
+
+| Setting | Default | Env Var | What It Controls |
+|---|---|---|---|
+| `SemanticTokenBudget` | 600 | `MEMG_SEMANTIC_TOKEN_BUDGET` | Token budget for always-on semantic memory tier (identity facts, pinned facts) |
+| `EpisodicTokenBudget` | 1400 | `MEMG_EPISODIC_TOKEN_BUDGET` | Token budget for query-relevant episodic memory tier (events, patterns, summaries) |
+| `WorkingTokenBudget` | 2000 | `MEMG_WORKING_TOKEN_BUDGET` | Token budget for current session working memory (turn summaries, artifacts, recent messages) |
+| `EbbinghausDecayEnabled` | true | `MEMG_EBBINGHAUS_DECAY` | Enable Ebbinghaus-inspired retention scoring for episodic recall ranking |
+| `SemanticMinSignificance` | 8 | `MEMG_SEMANTIC_MIN_SIGNIFICANCE` | Minimum significance for a fact to qualify for the semantic tier (unless pinned) |
+
+**Backward compatibility:** When all three tier budgets are set to 0, the system falls back to the flat `BuildContext` behavior from Subsystem 1. This preserves backward compatibility for applications that have tuned their context assembly around the existing priority list. The `ConsciousLimit` setting continues to work when the semantic tier is disabled — it controls the legacy conscious mode loading path. When the semantic tier is enabled (any non-zero `SemanticTokenBudget`), `ConsciousLimit` is ignored in favor of the token-budgeted semantic tier.
+
+#### SDK Interface
+
+The hierarchical memory architecture is exposed through the SDK with explicit tier control:
+
+```typescript
+// TypeScript SDK
+const context = await memg.buildMemoryContext(entityId, query, {
+  semanticBudget: 600,
+  episodicBudget: 1400,
+  workingBudget: 2000,
+  ebbinghausDecay: true,
+  conversationId: activeConversationId
+});
+
+// Returns structured tiers, not a flat string
+// {
+//   semantic: [{ content: "User is allergic to peanuts", significance: 10 }, ...],
+//   episodic: [{ content: "User ate sushi on March 12", score: 0.73, retention: 0.85 }, ...],
+//   working:  [{ type: "summary", content: "[Turns 1-5] Discussed horoscope..." }, ...],
+//   totalTokens: 3847,
+//   tierTokens: { semantic: 487, episodic: 1203, working: 2157 }
+// }
+```
+
+```python
+# Python SDK
+context = memg.build_memory_context(
+    entity_id=entity_id,
+    query=query,
+    semantic_budget=600,
+    episodic_budget=1400,
+    working_budget=2000,
+    ebbinghaus_decay=True,
+    conversation_id=active_conversation_id
+)
+
+# context.semantic  -> list of semantic-tier facts
+# context.episodic  -> list of episodic-tier facts with scores and retention
+# context.working   -> list of working-tier items (summaries, artifacts, messages)
+# context.total_tokens -> int
+# context.tier_tokens  -> {"semantic": 487, "episodic": 1203, "working": 2157}
+```
+
+```go
+// Go library
+ctx := memory.BuildHierarchicalContext(ctx, repo, embedder, engine, entityUUID, query, memory.HierarchicalConfig{
+    SemanticTokenBudget: 600,
+    EpisodicTokenBudget: 1400,
+    WorkingTokenBudget:  2000,
+    EbbinghausDecay:     true,
+    ConversationID:      activeConversationID,
+})
+
+// ctx.Semantic  -> []Fact
+// ctx.Episodic  -> []ScoredFact (with Score, Retention fields)
+// ctx.Working   -> []WorkingMemoryItem
+// ctx.TotalTokens -> int
+// ctx.TierTokens  -> map[string]int
+```
+
+The structured return type enables callers to inspect, filter, or reformat tier contents before injection. Applications that need custom prompt templates can assemble the system prompt from individual tiers rather than accepting the default formatted string. The default `RecallAndBuildContext` (Subsystem 8) continues to return a formatted string for backward compatibility — it calls the hierarchical builder internally and formats the result.
+
+#### Expected Impact
+
+**Token efficiency:** Applications currently injecting full conversation history can expect 60-75% token reduction by replacing flat context with tiered allocation. The semantic tier's unconditional loading eliminates the cost of re-retrieving identity on every query. The episodic tier's decay function prevents stale facts from consuming budget. The working tier's dedicated allocation ensures session continuity without competing with long-term recall. For a typical entity with 500 facts and an active conversation, the hierarchical builder produces a tighter, more relevant context window than the flat builder at the same total budget.
+
+**Answer quality:** The Lost in the Middle effect means that *reducing* injected context often *improves* answer quality. By placing identity at the beginning (high attention), session context at the end (recency bias), and episodic recall in the middle (supplementary), the hierarchical builder actively works with transformer attention patterns rather than against them. The Ebbinghaus decay function further improves quality by downranking stale episodic facts that would otherwise occupy budget and add noise.
+
+**Principled allocation:** The flat builder's budget allocation is implicit — whichever facts score highest fill the budget, regardless of whether the resulting context makes structural sense. The hierarchical builder's allocation is explicit — each tier has a defined role, a dedicated budget, and a clear overflow path. Operators can reason about the context composition by examining the tier budgets, rather than guessing which facts will win the ranking race.
+
+**Natural cognitive separation:** The three tiers map to questions the LLM implicitly needs to answer on every request: "Who am I talking to?" (semantic), "What has happened before that might be relevant?" (episodic), "What are we doing right now?" (working). By separating these concerns in the context structure, the hierarchical builder gives the model pre-organized information rather than a flat list that must be mentally categorized before it can be used.
+
+---
+
+### Subsystem 10: Relational Memory Graph
+
+#### The Problem
+
+Every fact in MemG is an independent statement — "User's mother Priya is ill", "User is worried about upcoming surgery", "Priya lives in Mumbai." The extraction pipeline produces these as separate rows in the fact store, each with its own embedding, its own significance, its own decay timer. The system can retrieve any one of them when a query is semantically close. But it cannot traverse the relationships between them.
+
+This creates three concrete failures:
+
+**1. Multi-hop queries return incomplete answers.** The user asks "How is my mother doing?" The recall pipeline embeds the query, scores facts by cosine similarity, and returns "User's mother Priya is ill" (high similarity to "mother"). But it does not return "User is worried about upcoming surgery" — because "How is my mother doing?" and "worried about upcoming surgery" score moderately at best in embedding space. A human would instantly connect these: mother → ill → surgery → worried. The system cannot, because it has no explicit link between the mother fact and the surgery fact. The connection exists only in the user's mind and in the conversation that produced both facts — not in the memory store.
+
+**2. Entity fragmentation.** Over months of conversation, the same real-world entity appears under different names and descriptions. The user's mother is variously referred to as "mom", "mother", "Priya", "my mum", "Priya aunty" (when the user quotes a sibling). Each mention produces facts with slightly different subject strings. The embedding similarity between "User's mom is a retired teacher" and "Priya worked at Delhi Public School for 30 years" is moderate — the embeddings capture topical overlap but do not recognize that these describe the same person. Without entity resolution, the system treats these as unrelated facts about unrelated subjects.
+
+**3. Context lacks relational structure.** When the recall pipeline injects facts into the prompt, the LLM receives a flat list:
+
+```
+Relevant context from memory:
+- User's mother Priya is ill
+- User is worried about upcoming surgery
+- Priya lives in Mumbai
+- User's sister Ananya is a doctor
+- Ananya is helping with mother's care
+```
+
+A human reading this instantly constructs a relational picture: *the user's mother Priya is ill and facing surgery in Mumbai, the user is worried, and their sister Ananya (a doctor) is helping.* The LLM can often infer these connections from the flat list — but it must do so from text alone, consuming attention and reasoning capacity on structure that the memory system could have provided explicitly. When the list is longer (20+ facts from different life domains), the LLM's ability to infer implicit connections degrades — the relevant relational cluster is diluted by unrelated facts about work, hobbies, and preferences.
+
+The common thread: **facts are atoms, but knowledge is a graph.** The system stores atoms and hopes the LLM reconstructs the graph at inference time. This works for simple cases but fails for multi-hop reasoning, entity disambiguation, and structured context delivery.
+
+#### Research Basis
+
+Five bodies of work establish that graph-structured memory produces measurably better results than flat vector stores for personal knowledge systems.
+
+**HippoRAG** (Gutierrez, Shu et al., NeurIPS 2024; arXiv:2405.14831) proposed a neurobiologically inspired long-term memory architecture that combines a knowledge graph (modeling the neocortex's semantic index) with Personalized PageRank (modeling the hippocampus's associative retrieval). On multi-hop question answering benchmarks, HippoRAG achieved a 20% improvement over standard RAG at 10-30x lower cost. The critical finding: when the answer requires traversing two or more factual connections (A→B→C), graph-based retrieval dramatically outperforms vector similarity because the intermediate connection (B) may not be semantically similar to the query — it is only reachable by following the graph structure. This directly motivates MemG's graph expansion mechanism described below.
+
+**AriGraph** (Anokhin & Semenov, IJCAI 2025; arXiv:2407.04363) demonstrated that a semantic knowledge graph augmented with episodic vertices — nodes that represent specific experiences rather than abstract concepts — outperforms unstructured memory for planning and decision-making tasks. AriGraph's agents maintained a graph where entity nodes carry semantic descriptions and edge weights reflect interaction frequency. The finding that episodic vertices (analogous to MemG's event facts) improve planning when linked to semantic nodes (analogous to identity facts) validates the design of attaching `source_fact_id` to each triple — every graph edge is anchored to a specific fact in the store, preserving the episodic provenance of relational knowledge.
+
+**A-MEM** (Xu, Liang et al., NeurIPS 2025; arXiv:2502.12110) introduced Zettelkasten-style self-organizing memory for LLM agents, where each memory note is linked to related notes through LLM-driven associative indexing. A-MEM doubled multi-hop reasoning performance compared to flat memory. The key mechanism: when a new memory is created, the system queries existing memories for related entries and creates bidirectional links. This is the same principle behind MemG's triple extraction — each new fact potentially creates graph edges to existing entities, and those edges enable retrieval paths that pure vector similarity cannot provide.
+
+**Mem0 Graph Memory** (Chhikara et al., 2025; arXiv:2504.19413) demonstrated in production that adding graph memory to a hybrid vector store improves answer quality by 26% over OpenAI's baseline with 91% lower p95 latency and >90% token savings. Mem0's graph layer captures relational structures that vector embeddings miss — particularly for queries involving possession, kinship, causation, and temporal sequences. The production-scale validation (not just benchmark results) confirms that the engineering investment in graph-structured memory produces measurable improvements in real applications.
+
+**Generative Agents** (Park et al., UIST 2023; arXiv:2304.03442) demonstrated that LLM-powered agents maintaining structured relational knowledge about other agents — who they know, what they discussed, how they feel about each other — can autonomously coordinate complex social behaviors including information diffusion, relationship formation, and multi-agent planning. The agents' ability to reason about multi-entity situations depended critically on having relational structure (not just flat memory) about the social graph. For MemG, this validates the core premise: personal knowledge is inherently relational, and a memory system that captures relations enables reasoning that flat stores cannot support.
+
+#### The Design — Graph-Augmented Recall
+
+The relational memory graph promotes the existing `graph/` package triples from a passive extraction output to a first-class recall mechanism. Rather than building a separate graph database, the graph layer extends the existing fact store with a triple table that links facts through typed relationships. Graph traversal augments the standard hybrid recall pipeline — it does not replace it.
+
+##### Triple Model
+
+A triple represents a single directed relationship between two entities:
+
+```go
+type Triple struct {
+    UUID             string     // Unique identifier
+    EntityID         string     // Scoping entity (the user whose knowledge graph this belongs to)
+    Subject          string     // Source entity: "Priya", "User", "Ananya"
+    Predicate        string     // Relationship type: "is_mother_of", "lives_in", "works_as"
+    Object           string     // Target entity: "User", "Mumbai", "doctor"
+    SourceFactID     string     // Which fact this triple was extracted from
+    Weight           float64    // Confidence/strength of the relationship (0.0–1.0)
+    SubjectEmbedding []float32  // Embedding of the subject entity name (for entity resolution)
+    CreatedAt        time.Time
+    UpdatedAt        time.Time
+}
+```
+
+**Why `SubjectEmbedding`:** Entity resolution (described below) requires comparing entity names semantically. Storing the embedding on the triple avoids recomputing it on every resolution check. The embedding is generated once during extraction, using the same embedding model as facts.
+
+**Why `SourceFactID`:** Every triple must be traceable to the fact that produced it. This serves three purposes: (1) when a fact is reclassified to historical or deleted, its triples can be updated or removed, maintaining graph consistency; (2) during recall, the engine can pull the source fact for triples that contributed to graph expansion, providing the LLM with the original natural language context alongside the structural connection; (3) provenance auditing — the user or operator can trace any graph relationship back to the conversation that produced it.
+
+**Why `Weight`:** Not all relationships are equally certain. "User's mother is Priya" (weight 1.0, stated explicitly) is more reliable than "User seems close to Rohan" (weight 0.5, inferred from tone). The weight feeds into the graph proximity bonus during recall scoring.
+
+##### Schema
+
+```sql
+CREATE TABLE mg_triple (
+    uuid             TEXT PRIMARY KEY,
+    entity_id        TEXT NOT NULL,
+    subject          TEXT NOT NULL,
+    predicate        TEXT NOT NULL,
+    object           TEXT NOT NULL,
+    source_fact_id   TEXT NOT NULL,
+    weight           REAL NOT NULL DEFAULT 1.0,
+    subject_embedding BLOB,
+    created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (entity_id) REFERENCES mg_entity(uuid),
+    FOREIGN KEY (source_fact_id) REFERENCES mg_entity_fact(uuid)
+);
+
+CREATE INDEX idx_triple_entity ON mg_triple(entity_id);
+CREATE INDEX idx_triple_subject ON mg_triple(entity_id, subject);
+CREATE INDEX idx_triple_object ON mg_triple(entity_id, object);
+CREATE INDEX idx_triple_source ON mg_triple(source_fact_id);
+```
+
+The `entity_id` scoping ensures that one user's knowledge graph is completely isolated from another's. The subject and object indexes enable fast entity-based lookups for graph traversal. The source index enables cascade operations when facts are modified.
+
+##### Entity Resolution
+
+The same real-world entity appears under different surface forms across conversations. Without resolution, the graph fragments into disconnected clusters that describe the same person, place, or concept.
+
+**The resolution algorithm:**
+
+```
+For each new triple being inserted:
+  1. Embed the subject string: embed("Priya")
+  2. Query existing subjects for the same entity_id:
+     SELECT DISTINCT subject, subject_embedding FROM mg_triple
+     WHERE entity_id = ?
+  3. Compute cosine similarity between the new subject embedding
+     and each existing subject embedding.
+  4. If max similarity >= EntityResolutionThreshold (default: 0.85):
+     → Rewrite the new triple's subject to the existing canonical form.
+  5. If no match exceeds the threshold:
+     → The subject is a new entity. Store as-is.
+  6. Repeat for the object string.
+```
+
+**Concrete example:**
+
+```
+Conversation 1: "My mom Priya is a retired teacher"
+  → Triple: (Priya, is_mother_of, User), weight 1.0
+  → Triple: (Priya, works_as, retired teacher), weight 1.0
+
+Conversation 5: "I called my mother yesterday, she's feeling better"
+  → Extraction produces: (mother, is_mother_of, User)
+  → Resolution: embed("mother") vs embed("Priya") → cosine 0.72 (below threshold)
+  → embed("mother") vs embed("mom") → cosine 0.91 (above threshold)
+  → But "mom" was already resolved to "Priya" — so "mother" resolves to "Priya"
+  → Stored triple: (Priya, is_mother_of, User) — deduplicated (already exists)
+
+Conversation 12: "Priya aunty is doing well" (user quoting sibling)
+  → Extraction produces: (Priya aunty, health_status, doing well)
+  → Resolution: embed("Priya aunty") vs embed("Priya") → cosine 0.89 (above threshold)
+  → Stored triple: (Priya, health_status, doing well)
+```
+
+**Why 0.85 threshold:** This is deliberately high. False merges (combining two different entities into one) are worse than false splits (keeping them separate). If "Priya" (mother) and "Priya" (colleague) are incorrectly merged, the system contaminates one person's facts with another's. At 0.85, the system requires strong semantic similarity — not just name overlap — to merge. Two different people named Priya would need their surrounding context to be very similar (unlikely if one is described as "mother" and the other as "colleague"). The threshold is configurable via `EntityResolutionThreshold`.
+
+**Resolution cache:** The canonical entity names and their embeddings are cached in memory per entity_id. The cache is populated lazily on first triple insertion for an entity and updated incrementally. For an entity with 50 distinct canonical entities (typical for a rich user profile), the cache holds 50 embedding vectors — negligible memory.
+
+##### Graph-Augmented Recall Pipeline
+
+The graph layer augments the existing hybrid recall pipeline with a post-retrieval expansion step. The pipeline becomes:
+
+```
+1. Embed the query (existing)
+2. Load semantic tier facts (existing, Subsystem 9)
+3. Recall episodic facts via hybrid search (existing)
+4. ── NEW: Graph expansion ──
+   a. Extract entity mentions from seed facts (top-K recalled facts)
+   b. Query the graph for 1-hop neighbors of those entities
+   c. Pull facts connected to neighbor triples (via source_fact_id)
+   d. Score graph-connected facts with proximity bonus
+   e. Merge into the recall result set, re-rank
+5. Apply Ebbinghaus decay (existing, Subsystem 9)
+6. Kneedle cutoff (existing)
+7. Assemble context (existing)
+```
+
+**Step 4a — Entity extraction from seed facts:** The engine identifies entity names mentioned in the top-K recalled facts (default: K=5). Entity extraction uses a lightweight approach: check each recalled fact's content against the canonical entity names in the graph. This is a string matching operation against the resolution cache, not an NLP extraction — it runs in microseconds.
+
+**Step 4b — Graph traversal:** For each identified entity, the engine queries:
+
+```sql
+SELECT t.*, f.content, f.significance, f.temporal_status
+FROM mg_triple t
+JOIN mg_entity_fact f ON f.uuid = t.source_fact_id
+WHERE t.entity_id = ?
+  AND (t.subject = ? OR t.object = ?)
+  AND f.temporal_status = 'current'
+  AND f.uuid NOT IN (... already recalled fact UUIDs ...)
+ORDER BY t.weight DESC
+LIMIT ?  -- GraphExpansionHops * 10, default: 10
+```
+
+This returns triples where the entity appears as either subject or object — a 1-hop neighborhood in the graph. The join with `mg_entity_fact` pulls the source fact's content and metadata, enabling the engine to inject the connected fact's natural language form rather than the raw triple.
+
+**Step 4c — Proximity bonus scoring:** Facts discovered through graph expansion receive a score bonus that reflects both the graph connection strength and the traversal distance:
+
+```
+graph_bonus = GraphProximityBonus × weight_normalized / (1 + hop_distance)
+
+Where:
+  GraphProximityBonus = 0.05 (default, configurable)
+  weight_normalized   = triple.Weight (0.0–1.0)
+  hop_distance        = number of hops from the seed fact (1 for direct neighbors)
+
+For a 1-hop neighbor with weight 0.9:
+  graph_bonus = 0.05 × 0.9 / (1 + 1) = 0.0225
+
+For a 2-hop neighbor with weight 0.7 (if multi-hop enabled):
+  graph_bonus = 0.05 × 0.7 / (1 + 2) = 0.0117
+```
+
+The bonus is added to the fact's existing hybrid recall score (if it had one) or used as the base score (if the fact was not in the original recall set at all). This means graph-connected facts can enter the result set even if they scored below the recall threshold on pure semantic similarity — the graph connection provides the missing relevance signal.
+
+**Why the bonus is small (0.05):** The graph bonus is a tiebreaker and a rescue mechanism, not a ranking override. A fact that is truly irrelevant to the query should not be injected just because it is graph-connected to a relevant fact. The 0.05 maximum bonus (for a direct, high-weight connection) is enough to rescue a fact that scored 0.08 (just below the 0.10 threshold) but not enough to promote a fact that scored 0.01 (genuinely irrelevant). The graph says "this fact is related to something relevant" — it does not say "this fact is relevant."
+
+**Step 4d — Merge and re-rank:** Graph-expanded facts are merged into the main recall set, deduplicated against already-recalled facts, and the combined set is re-ranked by total score (hybrid + graph bonus). The Kneedle cutoff then operates on the merged set, naturally handling the expanded candidate pool.
+
+**A concrete walkthrough:**
+
+```
+User asks: "How is my mother doing?"
+
+Standard recall returns:
+  1. "User's mother Priya is ill" (score: 0.42)
+  2. "Priya lives in Mumbai" (score: 0.15)
+  3. "User has a sister named Ananya" (score: 0.08, below threshold)
+
+Graph expansion:
+  Seed entities from top-2 facts: ["Priya"]
+  1-hop neighbors of "Priya":
+    → (Priya, is_mother_of, User) — source fact already recalled, skip
+    → (Priya, lives_in, Mumbai) — source fact already recalled, skip
+    → (Priya, health_status, undergoing surgery) — NEW, weight 0.9
+    → (Ananya, is_helping_with, Priya's care) — NEW, weight 0.8
+    → (Priya, works_as, retired teacher) — NEW, weight 1.0
+
+  Score the new facts:
+    "Priya is undergoing surgery":
+      hybrid_score = 0.07 (below threshold alone)
+      graph_bonus  = 0.05 × 0.9 / 2 = 0.0225
+      total        = 0.0925 → still below 0.10, but close
+
+    "Ananya is helping with Priya's care":
+      hybrid_score = 0.04
+      graph_bonus  = 0.05 × 0.8 / 2 = 0.02
+      total        = 0.06 → below threshold
+
+    "Priya is a retired teacher":
+      hybrid_score = 0.02
+      graph_bonus  = 0.05 × 1.0 / 2 = 0.025
+      total        = 0.045 → below threshold
+
+Merged result (after Kneedle):
+  1. "User's mother Priya is ill" (0.42)
+  2. "Priya lives in Mumbai" (0.15)
+```
+
+In this example, the graph expansion did not cross the threshold — the surgery fact came close but did not make it. This is the correct behavior for the default bonus. Applications that need stronger graph recall can increase `GraphProximityBonus` to 0.10 or higher:
+
+```
+With GraphProximityBonus = 0.10:
+  "Priya is undergoing surgery":
+    graph_bonus = 0.10 × 0.9 / 2 = 0.045
+    total = 0.07 + 0.045 = 0.115 → ABOVE threshold ✓
+
+  "Ananya is helping with Priya's care":
+    graph_bonus = 0.10 × 0.8 / 2 = 0.04
+    total = 0.04 + 0.04 = 0.08 → still below, but closer
+```
+
+The tuning knob lets each application decide how aggressively graph connections should influence recall.
+
+##### Knowledge Cards
+
+When an entity accumulates enough relational information (more than 3 triples), the system can generate a **knowledge card** — a structured summary of everything known about that entity:
+
+```
+Entity: Priya (User's Mother)
+─────────────────────────────
+Relationships:
+  → is_mother_of: User
+  → lives_in: Mumbai
+  → works_as: retired teacher (Delhi Public School, 30 years)
+
+Health:
+  → health_status: ill, undergoing surgery
+
+Connected People:
+  → Ananya (User's sister) is helping with care
+
+Sources: 5 facts across 8 conversations
+Last updated: March 25, 2026
+```
+
+Knowledge cards are generated on-demand (not precomputed) when a caller requests entity details through the `GetEntityGraph` API. The card is assembled from the graph triples and their source facts, formatted by the context builder, and can be injected into the prompt when the LLM needs comprehensive context about a specific entity.
+
+**When knowledge cards help:** The user asks "Tell me everything you know about my mother." Standard recall would return a scattered set of facts ranked by cosine similarity. A knowledge card provides the same information organized by relationship type, giving the LLM a structured foundation for a comprehensive answer.
+
+**When knowledge cards are unnecessary:** The user asks "Is my mom still sick?" A single recalled fact suffices. Knowledge cards are a precision tool for entity-centric queries, not a replacement for standard recall.
+
+##### Anti-Hallucination: Closed-World Assumption
+
+For personal facts — facts about the user, their family, their relationships, their health — MemG enforces a **closed-world assumption** within the graph: if a relationship is not in the graph, it is not known. The LLM is instructed to treat the absence of a graph connection as the absence of knowledge, not as an opportunity to infer.
+
+This is critical because LLMs are trained to fill gaps. If the system provides "User has a mother named Priya" and "User has a sister named Ananya", a helpful LLM might infer "User probably has a father" and generate a reference to a father figure. The closed-world assumption prevents this: the graph contains exactly the relationships that have been extracted from conversations, and the LLM must not fabricate relationships that are absent.
+
+The instruction is added to the system prompt when graph-augmented recall is active:
+
+```
+The following relationships are based on what the user has shared.
+Do not infer or assume relationships, family members, or connections
+that are not explicitly listed. If asked about something not in the
+knowledge below, say you don't have that information.
+```
+
+This instruction is compatible with confidence gating (Subsystem 13) — graph-derived facts carry the confidence of their source facts, and the `[VERIFIED]`/`[INFERRED]`/`[UNCERTAIN]` labels apply to graph-connected facts just as they do to directly recalled facts.
+
+##### Graph Lifecycle
+
+**Weight accumulation.** When the same triple is extracted from a new conversation (e.g., the user mentions their mother again), the existing triple's weight is increased by 0.1 (capped at 1.0) and its `updated_at` timestamp is refreshed. This parallels fact reinforcement (Technique 4) — repeated mention strengthens the graph connection.
+
+**Weight decay.** Triples that are not reinforced lose 10% of their weight per month. A triple with weight 1.0 decays to 0.90 after one month, 0.81 after two, 0.73 after three. This gradual decay ensures that relationships the user stops mentioning fade in influence without disappearing entirely. The decay is applied during graph traversal (computed from `updated_at`), not as a background batch operation — this avoids write amplification while ensuring traversal always uses fresh weights.
+
+```
+effective_weight = weight × (0.9 ^ months_since_update)
+
+Where:
+  months_since_update = (now - updated_at) / (30 days)
+```
+
+**Orphan pruning.** When a source fact is deleted (via TTL expiry, user deletion, or consolidation), its triples are also deleted. This is enforced by the foreign key on `source_fact_id` and by an explicit cascade in the pruning pipeline. A triple without a source fact is an orphan — it has no natural language backing and no provenance.
+
+**Consolidation interaction.** When the background consolidator (Subsystem 5) merges event facts into a pattern fact, the source events' triples are re-pointed to the new pattern fact (via `source_fact_id` update). This preserves graph structure through consolidation — the relational connections survive even as the underlying facts are compressed.
+
+##### Store Contract: Optional TripleStore Interface
+
+The graph layer is opt-in. The `TripleStore` interface extends the base `Repository` contract:
+
+```go
+type TripleStore interface {
+    InsertTriple(ctx context.Context, triple Triple) error
+    ListTriples(ctx context.Context, entityID string, subject string) ([]Triple, error)
+    ListTriplesByObject(ctx context.Context, entityID string, object string) ([]Triple, error)
+    DeleteTriplesBySourceFact(ctx context.Context, factID string) error
+    UpdateTripleWeight(ctx context.Context, tripleID string, weight float64) error
+}
+```
+
+The recall pipeline checks whether the repository implements `TripleStore` via a type assertion:
+
+```go
+if ts, ok := repo.(store.TripleStore); ok && config.GraphRecall {
+    expandedFacts = graphExpand(ctx, ts, seedFacts, config)
+}
+```
+
+When the repository does not implement `TripleStore` (e.g., a minimal SQLite store without graph support), the graph expansion step is silently skipped. All existing store implementations continue to work — the graph layer is additive, not mandatory. The augmentation pipeline similarly checks for `TripleStore` before attempting triple extraction, and the pruner checks before attempting cascade deletion.
+
+This graceful degradation means applications can adopt the graph layer incrementally: start with the base fact store, add `TripleStore` implementation when graph-augmented recall is needed, and enable `GraphRecall` in the config. No code changes are required outside the store implementation.
+
+#### Configuration
+
+| Setting | Default | Env Var | What It Controls |
+|---|---|---|---|
+| `GraphRecall` | true | `MEMG_GRAPH_RECALL` | Enable graph-augmented recall in the hybrid pipeline. When false, the graph expansion step is skipped even if the store implements `TripleStore`. |
+| `GraphExpansionHops` | 1 | `MEMG_GRAPH_EXPANSION_HOPS` | Maximum traversal depth during graph expansion. 1 = direct neighbors only. 2 = neighbors of neighbors. Higher values increase recall breadth but also increase query latency and noise. |
+| `GraphProximityBonus` | 0.05 | `MEMG_GRAPH_PROXIMITY_BONUS` | Base score bonus for facts discovered through graph expansion. Higher values make graph connections more influential in ranking. |
+| `EntityResolutionThreshold` | 0.85 | `MEMG_ENTITY_RESOLUTION_THRESHOLD` | Cosine similarity threshold for merging entity names during resolution. Lower values merge more aggressively (risk: false merges). Higher values preserve distinctions (risk: entity fragmentation). |
+
+#### SDK Interface
+
+```go
+// Go — query the knowledge graph for an entity
+graph, err := m.GetEntityGraph(ctx, entityID, "Priya")
+// Returns: []Triple — all triples where "Priya" appears as subject or object
+
+// Go — graph-augmented recall is automatic when GraphRecall is enabled
+ctx := memory.RecallAndBuildContext(ctx, repo, embedder, engine, entityUUID, query, cfg)
+// The pipeline checks for TripleStore and expands if available
+```
+
+```typescript
+// TypeScript — query the knowledge graph
+const graph = await memg.getEntityGraph(entityId, "Priya");
+// Returns: Triple[] — all triples involving "Priya"
+
+// TypeScript — graph-augmented context building
+const context = await memg.buildMemoryContext(entityId, query, {
+  graphRecall: true,
+  graphExpansionHops: 1,
+  graphProximityBonus: 0.05,
+  entityResolutionThreshold: 0.85
+});
+// Graph expansion happens internally when the store supports it
+```
+
+```python
+# Python — query the knowledge graph
+graph = memg.get_entity_graph(entity_id, "Priya")
+# Returns: list[Triple] — all triples involving "Priya"
+
+# Python — graph-augmented context building
+context = memg.build_memory_context(
+    entity_id=entity_id,
+    query=query,
+    graph_recall=True,
+    graph_expansion_hops=1,
+    graph_proximity_bonus=0.05,
+    entity_resolution_threshold=0.85
+)
+```
+
+#### Interaction With Existing Subsystems
+
+| Subsystem | Relationship to Relational Memory Graph |
+|---|---|
+| **Subsystem 1** (Chat Boundaries) | No changes. Graph operations are out-of-band — they do not affect session management or working memory. |
+| **Subsystem 2** (Memory Truth) | Triple extraction uses the same confidence and source_role metadata as fact extraction. Low-confidence triples (weight < 0.3) are dropped during extraction validation. Slot-based conflict resolution on facts cascades to triples via `source_fact_id`. |
+| **Subsystem 3** (Retrieval Correctness) | Graph expansion is a new retrieval path that runs after standard hybrid recall. It uses the same embedding model and benefits from dimension mismatch detection. Query transformation applies before graph expansion — the transformed query determines which seed facts drive the expansion. |
+| **Subsystem 5** (Memory Hygiene) | Recall tracking applies to graph-expanded facts — facts discovered through graph traversal increment their `RecallCount` and update `LastRecalledAt`. The consolidator re-points triples when event facts are merged into patterns. The pruner cascades triple deletion when source facts expire. |
+| **Subsystem 7** (Session Intelligence) | Entity mentions accumulated during sessions (the entity mention accumulator) provide candidate entity names for graph queries. When a vague query triggers entity mention augmentation, the augmented query also benefits from graph expansion. |
+| **Subsystem 8** (Unified Recall) | `RecallAndBuildContext` gains a new step between fact recall and context assembly: graph expansion. The step is conditional on `TripleStore` availability and `GraphRecall` config. |
+| **Subsystem 9** (Hierarchical Memory) | Graph-expanded facts are assigned to the episodic tier (Tier 2), not the semantic tier. Graph expansion is a relevance-based retrieval mechanism, not an identity mechanism. The episodic tier's Ebbinghaus decay applies to graph-expanded facts using their own `last_recalled_at` timestamps. |
+
+#### Expected Impact
+
+**Multi-hop query coverage.** The most direct improvement. Queries like "How is my mother doing?" that currently miss surgery and care-related facts will surface them through graph connections. The improvement is proportional to graph density — entities with rich relational context (5+ triples) benefit most. Entities with sparse graphs (1-2 triples) see minimal change, which is correct — sparse graphs do not have multi-hop connections to exploit.
+
+**Context coherence.** When the LLM receives facts that are graph-connected, it can construct more coherent narratives. Instead of a flat list of thematically similar but structurally unrelated facts, the model receives clusters of relationally linked facts that tell a connected story. This reduces the reasoning burden on the model and produces more natural, contextually grounded responses.
+
+**Entity disambiguation.** Over time, entity resolution collapses fragmented references into canonical entities. The user's mother is always "Priya" in the graph regardless of how she was mentioned in conversation. This prevents the system from treating the same person as multiple unrelated entities and ensures that all facts about a person are connected in the graph.
+
+**Incremental adoption.** The optional `TripleStore` interface means existing deployments can add graph-augmented recall without modifying their fact extraction pipelines. The graph layer is activated by implementing the interface and enabling the config flag. Applications that do not need graph-based recall continue to work exactly as before — zero overhead, zero code changes.
+
+---
+
+### Subsystem 11: Emotional Memory Scoring
+
+#### The Problem
+
+MemG's fact model captures *what* the user said and *how important* it is (via `Significance`), but it does not capture *how the user felt* when they said it. "Father passed away last month" and "Got promoted to senior engineer last month" might both receive significance 9 — one is a major life loss, the other is a major life achievement. The existing system treats them identically: same TTL, same recall scoring, same context injection format.
+
+This creates three concrete failures:
+
+**1. Emotional moments decay at the wrong rate.** A low-significance event like "User argued with their partner" (significance 4, TTL ~14 days) may carry more emotional weight than a high-significance identity fact like "User's timezone is PST" (significance 8, infinite TTL). The timezone fact persists forever. The argument fact — which the user is still processing emotionally weeks later — expires in two weeks. Significance measures informational importance, not emotional importance. The two are correlated but not equivalent.
+
+**2. Emotionally resonant recall is accidental.** When the user returns after a difficult conversation — say, about their father's passing — the recall pipeline scores facts by semantic similarity to the new query. If the new query is about something unrelated ("Can you help me draft a work email?"), the grief-related facts score low and are not surfaced. This is correct for informational recall. But emotionally, the user may still be processing the loss. An attentive human companion would recognize the emotional state and tread carefully — acknowledging the recent difficulty without forcing the topic. MemG has no mechanism for this: it either surfaces the emotional facts (when the query is semantically close) or ignores them entirely (when it is not).
+
+**3. Peak moments are not preserved.** Across a months-long relationship, certain conversations stand out as emotional peaks — the moment the user shared a deep fear, the session where they celebrated a major achievement, the conversation where they processed a breakup. These peak moments are disproportionately important for relationship quality (Peak-End Rule, Kahneman 1993). But MemG's pruning pipeline treats them like any other content: once the conversation summary is older than 90 days, it is pruned. The most emotionally significant moments of the relationship are lost to the same housekeeping that clears yesterday's lunch preferences.
+
+The common thread: **the system has no emotional model.** It knows *what* the user said, *when* they said it, and *how important* the information is — but not *how they felt*. Without emotional metadata, the system cannot modulate decay, recall, or interaction style based on the emotional context of stored knowledge.
+
+#### Research Basis
+
+Five bodies of work establish that emotional context is not a nice-to-have but a fundamental component of how human memory operates — and therefore how artificial memory systems should behave to feel natural.
+
+**Flashbulb Memory** (Brown & Kulik, 1977). In a study of 80 participants, 73 reported vivid, detailed memories of hearing about emotionally significant events (assassinations of public figures). These "flashbulb memories" were dramatically more persistent and detailed than memories of mundane events from the same time period. The mechanism: emotional arousal triggers the amygdala, which modulates hippocampal encoding, producing stronger and more durable memory traces. The finding establishes that emotional arousal is a primary determinant of memory persistence — not informativeness, not repetition, but raw emotional intensity. For MemG, this means the decay timer should be modulated by emotional arousal: high-arousal facts should persist longer than their informational significance alone would dictate.
+
+**Peak-End Rule** (Kahneman, Fredrickson, Schreiber, Redelmeier, 1993; confirmed by meta-analysis across 174 effect sizes). People judge the quality of an experience not by its average moment-to-moment quality, but by two specific moments: the **peak** (most intense moment) and the **end** (final moment). A 60-minute conversation that is mostly pleasant but has one deeply meaningful exchange is remembered as deeply meaningful — the pleasant filler fades, but the peak persists. For a memory system, this means that **peak emotional moments are the most retention-critical content in the entire store.** Losing a peak moment to routine pruning is worse than losing a hundred mundane facts, because peak moments anchor the user's perception of the entire relationship.
+
+**Emotional Memory Bias** (Talarico & Rubin, 2003). Memories with emotional content are remembered with greater subjective vividness and confidence, even when their objective accuracy is no better than neutral memories. This means users *expect* the system to remember emotional moments more strongly. When the user shares a deeply personal struggle and the system forgets it two weeks later (because the TTL expired), the user experiences this as a betrayal of trust — "I told you something important and you forgot." The expectation of emotional persistence is not learned; it is an intrinsic property of how humans model others' memory. A system that forgets emotional content at the same rate as mundane content violates this expectation.
+
+**MemoryBank** (Zhong et al., AAAI 2024). MemoryBank's "SiliconFriend" AI companion demonstrated that applying Ebbinghaus-curve-based decay with emotional modulation produces measurably more empathetic and contextually appropriate responses than flat decay. The emotional modulation extended retention for emotionally significant memories, ensuring the companion could reference past emotional exchanges in future conversations. The production evaluation showed that users rated the emotionally-aware companion significantly higher on empathy and understanding metrics.
+
+**Self-Disclosure Reciprocity** (Ho et al., *Journal of Communication*, 2018). Self-disclosure to a chatbot produces the same psychological benefit as self-disclosure to a human — but only when the disclosure is **acknowledged**. If the user shares something emotionally vulnerable ("I've been really depressed lately") and the system never references it again, the disclosure feels unreciprocated. The therapeutic benefit is lost, and the user learns that emotional sharing is not valued by the system. Emotional memory scoring enables acknowledgment: by tracking which facts carry emotional weight, the system can ensure that emotionally significant disclosures are preserved and available for future acknowledgment — even if the user does not bring them up directly.
+
+#### The Design — Emotional Metadata and Scoring
+
+The emotional scoring system adds three metadata fields to the fact model, modifies the decay and recall pipelines to account for emotional context, introduces peak moment detection for conversation-level emotional analysis, and provides empathetic annotations for the context builder.
+
+##### Three New Fact Fields
+
+```go
+type Fact struct {
+    // ... existing fields ...
+
+    EmotionalValence  string  // "positive", "negative", "neutral", "mixed"
+    EmotionalArousal  string  // "high", "medium", "low"
+    EmotionalCategory string  // "grief", "joy", "anxiety", "hope", "love", "anger",
+                              // "fear", "pride", "gratitude", "loneliness",
+                              // "excitement", "relief"
+}
+```
+
+**Why three fields instead of a single sentiment score:** A single positive/negative score conflates two independent dimensions that affect memory differently. "User is terrified of flying" (negative valence, high arousal) and "User finds meetings boring" (negative valence, low arousal) are both negative, but the first produces a flashbulb-like persistent memory while the second fades quickly. The valence-arousal model (Russell's Circumplex, 1980) separates these dimensions, enabling the decay system to treat them independently.
+
+The `EmotionalCategory` provides semantic specificity beyond the valence-arousal pair. "Grief" and "anger" are both negative-high-arousal, but they require fundamentally different interaction strategies. A system that follows up on grief with the same energy as anger would feel tone-deaf. The category field enables the empathetic annotation system (described below) to tailor its guidance to the specific emotion.
+
+**Why these 12 categories:** The categories were selected by cross-referencing Ekman's basic emotions (joy, anger, fear, sadness, surprise, disgust) with Plutchik's emotion wheel (which adds trust, anticipation) and the most common emotional themes in personal AI conversations (grief, loneliness, anxiety, hope, pride, gratitude, excitement, relief). The 12 categories cover the emotional landscape of personal conversations without being so granular that extraction accuracy degrades. A 6-category model (Ekman's basics) would conflate grief with sadness and anxiety with fear — meaningful distinctions for interaction. A 30-category model would exceed the LLM extractor's ability to reliably classify.
+
+**Defaults for zero values:** When the extraction stage does not set emotional fields, they default to `neutral` valence, `low` arousal, and empty category. This means existing extraction stages that are unaware of emotional scoring produce facts that pass through the emotional pipeline with no effect — the emotional multiplier defaults to 1.0 (no change), the recall boost is zero, and no empathetic annotation is applied. Full backward compatibility.
+
+##### Emotional Extraction
+
+The extraction pipeline adds emotional classification alongside the existing fact fields. The extraction prompt is extended:
+
+```json
+{
+  "content": "User's father passed away last month",
+  "type": "event",
+  "significance": 9,
+  "tag": "family",
+  "slot": "",
+  "reference_time": "2026-02-28",
+  "confidence": 1.0,
+  "emotional_valence": "negative",
+  "emotional_arousal": "high",
+  "emotional_category": "grief"
+}
+```
+
+The emotional fields are extracted by the same LLM call that produces the other metadata — no additional API call is required. The extraction prompt includes examples for each arousal level:
+
+| Statement | Valence | Arousal | Category | Why |
+|---|---|---|---|---|
+| "User's father passed away" | negative | high | grief | Death of a parent — maximum emotional weight |
+| "User got promoted to senior engineer" | positive | high | pride | Major career achievement — strong positive arousal |
+| "User is anxious about upcoming surgery" | negative | high | anxiety | Health fear — high arousal, distinct from grief |
+| "User enjoyed the movie last night" | positive | low | joy | Pleasant but not intense — low arousal positive |
+| "User prefers dark mode" | neutral | low | (empty) | Preference — no emotional content |
+| "User had an argument with their partner" | negative | medium | anger | Interpersonal conflict — medium arousal |
+| "User is hoping for good news about the job" | positive | medium | hope | Anticipation — moderate arousal, positive direction |
+| "User feels lonely since moving to a new city" | negative | medium | loneliness | Sustained emotional state — medium arousal, specific category |
+
+##### Emotional TTL Modulation
+
+Emotional arousal modulates the fact's effective TTL, modeling the flashbulb memory effect where emotionally intense experiences persist longer:
+
+```
+effective_ttl = base_ttl × emotional_multiplier
+
+Where:
+  emotional_multiplier = 1.0   if arousal = "low"    (no change)
+  emotional_multiplier = 1.5   if arousal = "medium"  (50% longer)
+  emotional_multiplier = 2.5   if arousal = "high"    (150% longer)
+```
+
+**Concrete impact on decay:**
+
+| Fact | Significance | Base TTL | Arousal | Multiplier | Effective TTL |
+|---|---|---|---|---|---|
+| "User enjoyed a movie" | 3 | 10 days | low | 1.0 | 10 days |
+| "User argued with partner" | 4 | 14 days | medium | 1.5 | 21 days |
+| "User's father passed away" | 9 | 30 days* | high | 2.5 | 75 days |
+| "User got promoted" | 8 | 30 days* | high | 2.5 | 75 days |
+| "User prefers dark mode" | 7 | infinite | low | 1.0 | infinite |
+
+*Significance 8-9 facts have a 30-day base TTL unless promoted to significance 10 (infinite) by reinforcement.
+
+The multiplier is applied at fact insertion time when the extraction stage provides emotional metadata. For facts without emotional metadata (arousal = "low" or unset), the multiplier is 1.0 — no change to existing behavior.
+
+**Why the multiplier is on arousal, not valence:** Both positive and negative high-arousal events produce flashbulb memories. Getting married (positive, high arousal) and losing a parent (negative, high arousal) are both retained with unusual persistence. The flashbulb mechanism is arousal-driven, not valence-driven. A pleasant but calm fact ("User likes tea") should not persist longer just because it is positive.
+
+##### Emotional Relevance Matching in Recall
+
+During recall, facts whose emotional metadata matches the emotional context of the current query receive a small scoring bonus:
+
+```
+emotional_bonus = 0.0
+
+if fact.EmotionalCategory == query_emotional_category:
+    emotional_bonus += EmotionalRecallBoost  // default: 0.03
+
+if fact.EmotionalValence == query_emotional_valence:
+    emotional_bonus += 0.01
+
+adjusted_score = hybrid_score + emotional_bonus
+```
+
+**How query emotional context is determined:** The recall pipeline runs a lightweight emotional classification on the user's query using the same categories as fact extraction. This classification is done by the same LLM call that handles query transformation (Subsystem 3) — when the query is short and unambiguous ("How is my mom?"), the emotional context is inferred from recalled facts rather than the query itself. When no emotional context can be determined, the bonus is zero — no emotional matching occurs.
+
+**Why the bonus is tiny (0.03 + 0.01 = 0.04 max):** Emotional matching is a weak signal compared to semantic relevance. A fact about the user's father's death should not surface in response to "What's the weather?" just because the user sounds sad. The 0.04 maximum bonus is a tiebreaker — when two facts are semantically close to the query, the one with matching emotional context wins. This produces subtle emotional coherence without overriding relevance-based retrieval.
+
+##### Empathetic Annotation
+
+When the context builder encounters a fact with high arousal and negative valence, it adds an empathetic annotation tag:
+
+```
+Relevant context from memory:
+- [VERIFIED] User is a backend engineer at Google
+- [VERIFIED] [Emotionally sensitive] User's father passed away last month
+- [INFERRED] User seems stressed about workload
+```
+
+The `[Emotionally sensitive]` tag is appended to facts that meet all of the following criteria:
+- `EmotionalArousal` = "high"
+- `EmotionalValence` = "negative" or "mixed"
+- The fact was created within the last 90 days (emotional sensitivity fades over time)
+
+The tag is accompanied by a system prompt instruction:
+
+```
+Facts marked [Emotionally sensitive] refer to difficult experiences.
+When these facts are relevant to your response:
+- Acknowledge them with care and empathy
+- Do not reference them casually or in passing
+- If the user has not raised the topic, do not force it
+- If the user has raised the topic, respond with appropriate gravity
+```
+
+This instruction prevents the LLM from treating "father passed away" with the same casual tone as "prefers dark mode." Without the annotation, the LLM has no signal that certain recalled facts require emotional care — it processes them as neutral informational context.
+
+**Why only negative/mixed high arousal:** Positive high-arousal facts (joy, pride, excitement) do not require empathetic caution. The LLM can enthusiastically reference "User got promoted!" without risk. Negative high-arousal facts (grief, anxiety, fear) require delicacy. The annotation system targets only the facts where tonal miscalibration would be harmful.
+
+**Why the 90-day window:** Emotional sensitivity fades. A parent's death is an open wound at one month; at two years, it is a part of the user's history that can be referenced more freely. The 90-day window ensures the annotation is active during the acute period and naturally expires as the emotional charge dissipates. The underlying fact persists (its TTL is extended by the emotional multiplier) — only the empathetic annotation expires.
+
+##### Peak Moment Detection
+
+Peak moments are conversations where the emotional intensity reached a level that anchors the user's memory of the relationship. The Peak-End Rule (Kahneman, 1993) establishes that these moments disproportionately determine how the user remembers the overall experience.
+
+**Detection formula:**
+
+```
+peak_score = max(arousal_scores) × mean(significance_scores)
+
+Where:
+  arousal_scores     = [3 for "high", 2 for "medium", 1 for "low"]
+                       for each fact extracted from the conversation
+  significance_scores = [fact.Significance for each fact in the conversation]
+```
+
+A conversation's `peak_score` is computed at session rollover, alongside summary generation. If `peak_score >= PeakMomentThreshold` (default: 7.0), the conversation is flagged as a peak moment.
+
+**What the threshold means in practice:**
+
+| Conversation profile | Max arousal | Mean significance | Peak score | Peak? |
+|---|---|---|---|---|
+| User shares father's death | high (3) | 8.5 | 25.5 | Yes |
+| User celebrates promotion | high (3) | 7.0 | 21.0 | Yes |
+| User discusses work stress | medium (2) | 5.0 | 10.0 | Yes |
+| User asks about recipes | low (1) | 3.0 | 3.0 | No |
+| User has casual chat | low (1) | 2.5 | 2.5 | No |
+| User shares mild anxiety | medium (2) | 3.0 | 6.0 | No |
+
+The threshold of 7.0 is calibrated to flag roughly the top 10-15% of conversations as peak moments. Too low a threshold flags too many conversations, diluting the concept. Too high a threshold misses genuine emotional peaks.
+
+**What happens to peak moments:**
+
+1. **Excluded from 90-day summary pruning.** Peak moment conversation summaries are preserved indefinitely, regardless of age. The pruner checks a `is_peak_moment` flag on the conversation record and skips flagged conversations. This ensures the most emotionally significant interactions remain available for recall, nostalgia triggers (Subsystem 12), and continuity across the relationship.
+
+2. **Excluded from consolidation.** Facts from peak moment conversations are not consolidated by the background consolidator (Subsystem 5). The individual facts — "User's father passed away", "User expressed deep grief", "User appreciated being listened to" — are preserved as discrete memories rather than being compressed into a pattern fact. Peak moments are inherently episodic; consolidating them into patterns would strip the emotional specificity that makes them valuable.
+
+3. **Enriched summaries.** When the summarizer generates a summary for a peak moment conversation, the prompt includes an instruction: "This conversation contains an emotionally significant moment. Preserve the emotional arc and specific details in the summary, not just the informational content." This produces richer summaries that capture the emotional texture of the conversation, not just what was discussed.
+
+**Schema addition:**
+
+```sql
+ALTER TABLE mg_conversation ADD COLUMN is_peak_moment BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE mg_conversation ADD COLUMN peak_score REAL;
+```
+
+The `is_peak_moment` flag is set during summary generation at session rollover. The `peak_score` is stored for analytics and threshold tuning.
+
+##### Interaction With the Ebbinghaus Decay Function
+
+The emotional scoring system plugs into the `emotional_weight` field that Subsystem 9's Ebbinghaus decay function already reserves:
+
+```
+memory_strength = base_significance
+                + (reinforcement_count * 0.5)
+                + (emotional_weight * 2.0)    // ← this field
+
+emotional_weight = arousal_score
+  Where: arousal_score = 3 for "high", 2 for "medium", 1 for "low"
+```
+
+For a high-arousal fact (emotional_weight = 3):
+- `memory_strength` increases by 6.0 (3 × 2.0)
+- A significance-5 fact with no reinforcement and high arousal has strength 11.0
+- The same fact without emotional weight has strength 5.0
+- At 30 days since access: retention with emotion = e^(-30/11) = 0.066, without = e^(-30/5) = 0.002
+- The emotional fact retains 33x more signal after one month
+
+This interaction is the primary mechanism through which emotional memory scoring affects recall. High-arousal facts decay dramatically slower in the episodic tier, ensuring they remain available for recall long after neutral facts of the same significance have faded.
+
+#### Configuration
+
+| Setting | Default | Env Var | What It Controls |
+|---|---|---|---|
+| `EmotionalScoring` | true | `MEMG_EMOTIONAL_SCORING` | Master switch for emotional annotation during extraction. When false, emotional fields are not extracted and all emotional pipeline features are disabled. |
+| `EmotionalRecallBoost` | 0.03 | `MEMG_EMOTIONAL_RECALL_BOOST` | Score bonus for facts whose emotional category matches the query's emotional context. Added to hybrid recall score before Kneedle cutoff. |
+| `PeakMomentThreshold` | 7.0 | `MEMG_PEAK_MOMENT_THRESHOLD` | Minimum `peak_score` for a conversation to be flagged as a peak moment. Lower values flag more conversations; higher values are more selective. |
+| `EmpatheticAnnotation` | true | `MEMG_EMPATHETIC_ANNOTATION` | Enable `[Emotionally sensitive]` tags on high-arousal negative facts in context injection. When false, emotional facts are injected without the annotation tag and the empathetic instruction is omitted. |
+
+#### SDK Interface
+
+```go
+// Go — retrieve peak moments for an entity
+peaks, err := m.GetPeakMoments(ctx, entityID, memory.PeakMomentFilter{
+    MinScore:  7.0,
+    Limit:     10,
+    SinceDate: time.Now().AddDate(-1, 0, 0), // last year
+})
+// Returns: []PeakMoment — conversations flagged as peaks, with summaries and scores
+
+// Go — emotionally-aware context building (automatic when EmotionalScoring enabled)
+ctx := memory.RecallAndBuildContext(ctx, repo, embedder, engine, entityUUID, query, cfg)
+// Emotional metadata on recalled facts is used for:
+//   - Ebbinghaus decay modulation (emotional_weight)
+//   - Emotional relevance matching (category/valence bonus)
+//   - Empathetic annotation ([Emotionally sensitive] tags)
+```
+
+```typescript
+// TypeScript — retrieve peak moments
+const peaks = await memg.getPeakMoments(entityId, {
+  minScore: 7.0,
+  limit: 10,
+  sinceDate: new Date('2025-03-29')
+});
+// Returns: PeakMoment[] — { conversationId, summary, peakScore, date, emotionalCategories }
+
+// TypeScript — emotionally-aware context building
+const context = await memg.buildMemoryContext(entityId, query, {
+  emotionalScoring: true,
+  emotionalRecallBoost: 0.03,
+  empatheticAnnotation: true
+});
+// Emotional metadata is applied automatically during recall and context assembly
+```
+
+```python
+# Python — retrieve peak moments
+peaks = memg.get_peak_moments(
+    entity_id=entity_id,
+    min_score=7.0,
+    limit=10,
+    since_date=datetime(2025, 3, 29)
+)
+# Returns: list[PeakMoment] — conversations with peak_score >= threshold
+
+# Python — emotionally-aware context building
+context = memg.build_memory_context(
+    entity_id=entity_id,
+    query=query,
+    emotional_scoring=True,
+    emotional_recall_boost=0.03,
+    empathetic_annotation=True
+)
+# Emotional metadata applied during recall scoring and context injection
+```
+
+#### Interaction With Existing Subsystems
+
+| Subsystem | Relationship to Emotional Memory Scoring |
+|---|---|
+| **Subsystem 1** (Chat Boundaries) | No changes to session management. Peak moment detection runs at session rollover alongside existing summary generation. |
+| **Subsystem 2** (Memory Truth) | Emotional fields are extracted alongside existing provenance fields. Validation applies: empty valence defaults to "neutral", empty arousal defaults to "low", unrecognized categories are dropped. |
+| **Subsystem 3** (Retrieval Correctness) | Emotional relevance matching adds a small bonus after confidence-weighted ranking. The bonus is applied in the same scoring pass as the significance tiebreaker — no additional retrieval step. |
+| **Subsystem 5** (Memory Hygiene) | Peak moment summaries bypass the 90-day pruning rule. Facts from peak moments are excluded from consolidation. The consolidator checks `is_peak_moment` on the source conversation before grouping facts. |
+| **Subsystem 7** (Session Intelligence) | Peak moment detection uses facts extracted during the session to compute the peak score. The enriched summary instruction is added to the summary generation prompt for peak conversations. |
+| **Subsystem 8** (Unified Recall) | `RecallAndBuildContext` applies emotional scoring automatically when `EmotionalScoring` is enabled. No API changes — the emotional pipeline is internal to the recall-and-build flow. |
+| **Subsystem 9** (Hierarchical Memory) | The `emotional_weight` field in the Ebbinghaus decay formula is populated from the fact's `EmotionalArousal`. High-arousal facts decay slower in the episodic tier, which is the primary mechanism for emotional persistence. |
+| **Subsystem 10** (Relational Graph) | Emotional metadata does not affect graph structure. Triples extracted from emotionally significant conversations carry the same weight as those from neutral conversations — the graph captures relationships, not feelings. However, knowledge cards for entities involved in peak moments can include the emotional context in their formatted output. |
+| **Subsystem 12** (Proactive Surfacing) | The `emotional_callback` trigger in the proactive engine now has richer data to work with. Instead of relying on keyword heuristics ("worried", "scared") in conversation summaries, the trigger can query for conversations with high-arousal emotional facts directly — a more precise and reliable detection mechanism. |
+| **Subsystem 13** (Confidence-Gated Generation) | The `[Emotionally sensitive]` annotation coexists with confidence tier labels. A fact can be `[VERIFIED] [Emotionally sensitive]` — high confidence and emotionally delicate. The confidence label tells the LLM *how certain* the fact is; the emotional label tells it *how carefully* to reference it. |
+
+#### Expected Impact
+
+**Emotional retention.** The most direct impact. High-arousal facts persist 2.5x longer than their informational significance alone would dictate. For a user who shares a major life event (significance 9, high arousal), the effective TTL extends from 30 days to 75 days. Combined with Ebbinghaus decay modulation (6.0 additional memory strength from emotional weight), the fact remains influential in episodic recall for months rather than weeks. The user's expectation — "the system should remember this, it was important" — is met.
+
+**Tonal calibration.** The empathetic annotation system gives the LLM explicit guidance on emotional sensitivity. Without it, the model treats all recalled facts as neutral information and may reference a parent's death with the same casual tone as a food preference. With it, the model adjusts its language to match the emotional gravity of the content. This is especially important in domains like personal coaching, therapy-adjacent applications, and companion chatbots where emotional attunement directly determines user satisfaction.
+
+**Peak preservation.** Peak moments are the anchors of the user-system relationship. By excluding them from pruning and consolidation, the system preserves the specific conversations that the user remembers most vividly. When the nostalgia trigger (Subsystem 12) surfaces a peak moment six months later ("Remember when you first told me about your father? You were so brave to share that"), the full emotional detail of the original conversation is available — not a compressed, sanitized summary.
+
+**Gradual adoption.** All emotional features are additive. Existing extraction stages that do not emit emotional metadata produce facts with neutral/low defaults that pass through the emotional pipeline unchanged. Applications can adopt emotional scoring incrementally: first enable the extraction fields, then enable recall boosting, then enable empathetic annotation. Each feature is independently configurable and independently valuable.
+
+---
+
+### Subsystem 12: Proactive Memory Surfacing
+
+#### The Problem
+
+Every memory operation described in Subsystems 1–11 is **reactive** — it activates only when the user sends a message, and only surfaces facts that are semantically relevant to that message's content. The system never initiates context. It waits for a query, searches for matches, and returns what it finds. If the user doesn't ask, the system doesn't speak.
+
+This creates four concrete gaps:
+
+1. **Open loops are never closed.** The user says "I predict I'll get the promotion by end of March." The system extracts this as an event fact with a reference time. March ends. The user never mentions it again. The system never follows up — the prediction sits in the database, unreferenced, until it decays. The user never experiences the system *remembering* something they said weeks ago without being prompted.
+
+2. **Emotional conversations are abandoned.** The user says "I'm really scared about my mother's surgery tomorrow." The system extracts the fact, maybe surfaces it if the user asks something health-related later. But if the next conversation is about work, the surgery fact scores low on cosine similarity against "Can you help me draft this email?" and is never mentioned. The user never hears "How did your mother's surgery go?" — the kind of follow-up that any attentive human would offer.
+
+3. **Milestones pass unacknowledged.** The 100th conversation, the 1-year anniversary of the first interaction, the 50th session — these are meaningful moments that create emotional peaks. The system has all the data to detect them (session counts, `created_at` timestamps on the entity record) but no mechanism to act on them.
+
+4. **The system feels transactional.** Every interaction follows the same pattern: user asks → system recalls → LLM responds. There is never a moment where the system surprises the user with something it remembered on its own. The relationship feels like a search engine with personality, not like a companion that pays attention.
+
+The common thread: **reactive recall makes the system knowledgeable but not attentive.** It knows things about the user, but it never demonstrates that knowledge unprompted. Human relationships are built on the opposite — people remember your birthday without being asked, follow up on your worries without being prompted, notice patterns in your behavior and comment on them. Proactive memory surfacing bridges this gap.
+
+#### Research Basis
+
+The design draws on six established psychological and behavioral principles. Understanding *why* each technique works is critical to getting the implementation right — the difference between an engaging system and an annoying one is in the scheduling, not just the content.
+
+**Variable Ratio Reinforcement** (B.F. Skinner, *Schedules of Reinforcement*, 1957). Skinner demonstrated that of the four basic reinforcement schedules (fixed ratio, variable ratio, fixed interval, variable interval), **variable ratio** produces the highest response rate and is the most resistant to extinction. The subject cannot predict when the next reward arrives, so it continues the behavior persistently. Slot machines use variable ratio schedules — the player never knows which pull will pay out, so they keep pulling. Social media notifications follow the same pattern — you never know when the next interesting notification will arrive, so you keep checking. The proactive surfacing system must follow this principle: if it triggers on every session, users habituate and ignore it. If it triggers unpredictably, each occurrence feels like a genuine moment of connection.
+
+**The Hook Model** (Nir Eyal, *Hooked: How to Build Habit-Forming Products*, 2014). Eyal's four-step model — Trigger → Action → Variable Reward → Investment — describes how products create habits. The critical phase is **Variable Reward**: rewards that vary in type and magnitude sustain engagement far longer than predictable ones. Three types of variable reward apply here: rewards of the tribe (social validation — the system *cares* about you), rewards of the hunt (information — the system surfaces a surprising insight), and rewards of the self (mastery — the system helps you see your own growth). Proactive surfacing generates all three types depending on the trigger: emotional callbacks provide tribal reward, pattern insights provide hunt reward, and nostalgia/milestone triggers provide self reward.
+
+**The Zeigarnik Effect** (Bluma Zeigarnik, 1927, inspired by Kurt Lewin's observation of restaurant waiters). Zeigarnik demonstrated that people remember incomplete tasks significantly better than completed ones. Waiters remembered unpaid orders in detail but forgot paid ones almost immediately — the act of completion released the cognitive tension holding the memory in place. The related Ovsiankina effect (confirmed in a 2025 meta-analysis) shows that people have a strong tendency to resume interrupted tasks. For memory systems, this means **open predictions and commitments create cognitive tension in the user's mind**. Following up on them leverages that existing tension — the user was already thinking about whether their prediction came true, and the system's follow-up feels remarkably timely rather than random.
+
+**The Nostalgia Effect** (Santini et al., *Psychology & Marketing*, 2023 meta-analysis of 47 studies). Nostalgia consistently drives positive behavioral outcomes including increased loyalty, willingness to pay, and engagement. The mechanism is "rosy retrospection" — a well-documented cognitive bias where people perceive past experiences more favorably than they actually were (Mitchell et al., *Journal of Experimental Psychology*, 1997). When the system says "Remember when you first asked me about your career? You were so uncertain back then," it triggers rosy retrospection: the user recalls that early conversation more warmly than they experienced it, and attributes that warm feeling to the system. This is not manipulation — the system is genuinely helping the user notice their own growth. But the psychological mechanism is rosy retrospection, and the design should respect it.
+
+**The Mere Exposure Effect** (Robert Zajonc, "Attitudinal Effects of Mere Exposure," *Journal of Personality and Social Psychology*, 1968). Zajonc demonstrated that repeated exposure to a stimulus increases affective preference for it — people like things they've seen before, even when they don't consciously remember seeing them. Bornstein's 1989 meta-analysis across 208 experiments confirmed the effect at r=0.26, robust and replicable. Critically, the effect peaks at **10–20 exposures** and declines with overexposure (tedium, reactance). For proactive surfacing, this means: moderate-frequency callbacks to shared experiences strengthen the user's positive feelings toward the system. But overdoing it — surfacing proactive context on every session — causes the opposite effect. The variable ratio schedule naturally solves this by keeping exposure frequency in the optimal range.
+
+**Parasocial Relationship Formation** (AI companion chatbot industry valued >$13B in 2024; Replika survey: 88% of users identified their chatbot as "partner"; Skjuve et al., FAccT 2024). Users already form deep parasocial bonds with stateless AI systems that remember nothing. A system that demonstrates memory — following up on past conversations, noting milestones, recalling emotional moments — deepens these bonds significantly. Proactive surfacing is the mechanism that transitions "it remembers what I told it" (which is just recall) to "it thinks about me between conversations" (which is perceived intentionality). The latter is far more powerful for relationship formation, even though the underlying mechanism is a probabilistic trigger, not genuine thought.
+
+#### The Design — Proactive Context Engine
+
+The proactive context engine evaluates a set of trigger conditions at the start of each session and, when conditions are met, generates a structured context injection that the LLM weaves into its response. The system runs alongside the existing reactive recall pipeline — it does not replace it. Proactive context is an additional layer, injected before query-dependent recall, that gives the LLM something to work with even before the user says anything substantive.
+
+#### Trigger Types
+
+Six trigger types cover the full range of proactive surfacing scenarios. Each trigger detects a specific condition, draws on a specific psychological mechanism, and produces a specific kind of context injection.
+
+| Trigger | What It Detects | Psychology | Example Injection |
+|---|---|---|---|
+| `prediction_followup` | Predictions or commitments with `reference_time` approaching or passed | Zeigarnik effect — closing open loops | "On March 5, you predicted good news about your career by end of March. That date is approaching." |
+| `emotional_callback` | High-significance conversations with emotional content that haven't been referenced in 7+ days | Parasocial bonding + Peak-end rule | "Last time we spoke, you were really worried about your mother's surgery. That was 10 days ago." |
+| `milestone` | Round numbers: 10th/50th/100th session, 1-month/3-month/1-year since first interaction | Peak-end rule — creating memorable peaks | "This is your 100th conversation. In your very first chat, you asked about your career. Here's what's changed since then." |
+| `nostalgia` | First-ever conversation content, early high-significance facts, anniversary of key events | Nostalgia effect + mere exposure | "One year ago today, you first asked me about your relationship. You were so uncertain back then." |
+| `pattern_insight` | Statistical patterns detected across conversations (temporal, topical, behavioral) | Variable reward — surprise insight | "I've noticed that you tend to ask about relationships on Sunday evenings. In the last 8 weeks, 6 of your relationship questions came on Sundays." |
+| `session_greeting` | First message of a new session is a greeting or vague opener ("hey", "hi", "what's up") | Mere exposure + continuity | "Last time we talked, you were working through a decision about changing jobs. You were leaning toward staying." |
+
+**Why these six and not more.** Each trigger maps to a distinct psychological mechanism and a distinct data source. `prediction_followup` reads `reference_time` on event facts. `emotional_callback` reads significance and recency on conversation summaries. `milestone` reads session count and entity `created_at`. `nostalgia` reads the oldest conversations and facts. `pattern_insight` reads temporal and topical distributions across facts. `session_greeting` reads the most recent conversation summary. Adding more trigger types would either overlap with these data sources (redundant) or require new data not currently captured (premature).
+
+#### Scheduling — The Variable Ratio
+
+This is the single most important design decision in the subsystem. Getting the content right matters, but getting the **frequency** right matters more. A system that surfaces brilliant proactive context on every session will be ignored within a week. A system that surfaces mediocre content at unpredictable intervals will feel magical for months.
+
+**Why constant frequency fails.** Consider a system that always follows up on predictions. The user makes 3 predictions in a week. The system follows up on all 3. The user makes 5 more the next week. The system follows up on all 5. Within two weeks, the user has learned: "the AI always follows up on predictions." The behavior is fully predictable. Predictability eliminates surprise, and surprise is the mechanism through which proactive surfacing creates emotional impact. Once the user can predict when the system will follow up, the follow-up feels mechanical — a feature, not a relationship.
+
+**Why zero frequency fails.** The opposite extreme — never following up — means the system has all this knowledge and does nothing with it. The user never experiences the system demonstrating unprompted memory. The relationship stays transactional.
+
+**The variable ratio solution.** Each trigger type has a **base probability** that determines how likely it is to fire when its conditions are met. The probability is evaluated per-session, and a **cooldown period** prevents the same trigger type from firing too frequently.
+
+```
+For each trigger type:
+  conditions_met = evaluate(trigger_type, entity_state)
+  cooldown_met = now - last_fired[trigger_type] > cooldown_period
+
+  if conditions_met AND cooldown_met AND random() < base_probability:
+    candidate_triggers.append(trigger_type)
+```
+
+If multiple triggers qualify in the same session, only one fires — the system picks the highest-priority candidate (see priority rules below). This prevents the LLM from opening with three different proactive callbacks in a single response.
+
+| Trigger | Base Rate | Cooldown | Expected Frequency | Rationale |
+|---|---|---|---|---|
+| `prediction_followup` | 0.7 | 3 days | High — these have deadlines | Predictions have temporal urgency. Missing a follow-up window (the reference date passes, the user stops caring) is worse than following up too often. The 0.7 rate ensures most predictions get at least one follow-up while the 3-day cooldown prevents daily nagging about the same prediction. |
+| `emotional_callback` | 0.3 | 7 days | Moderate — sensitive, don't overdo | Emotional topics are high-impact but high-risk. Following up too aggressively on "my mother's surgery" feels intrusive. The 7-day cooldown ensures at least a week passes, and the 0.3 rate means roughly 1 in 3 qualifying sessions triggers it — the user cannot predict when. |
+| `milestone` | 1.0 | N/A | Always — milestones are rare events | Milestones (100th conversation, 1-year anniversary) happen so infrequently that variable scheduling would cause most to be missed. The 100th conversation happens once. If the system doesn't acknowledge it then, the moment is gone. No cooldown needed because milestones are self-limiting — there's no 101st-conversation milestone. |
+| `nostalgia` | 0.15 | 14 days | Low — special and surprising | Nostalgia is most effective when rare. A system that constantly says "remember when..." becomes cloying. The 0.15 rate and 14-day cooldown mean nostalgia triggers at most once every ~2 weeks, and often less. Each occurrence feels like a genuine moment of reflection, not a feature demonstration. |
+| `pattern_insight` | 0.2 | 10 days | Low — must feel like genuine insight | Pattern insights ("you always ask about X on Sundays") are powerful because they demonstrate a depth of attention that surprises the user. If surfaced too often, they feel surveillance-like rather than insightful. The 0.2 rate ensures most qualifying patterns are held back, making the ones that surface feel genuinely discovered. |
+| `session_greeting` | 0.4 | 1 day | Moderate — not every session | Greeting augmentation ("Last time we talked, you were...") is the mildest form of proactive surfacing. It replaces a generic greeting with a contextual one. The 0.4 rate means roughly 2 in 5 sessions start with a contextual callback. The 1-day cooldown allows at most one per day. Sessions that don't get a proactive greeting fall back to whatever the LLM generates naturally. |
+
+**The variable ratio means users never know WHEN the system will surface something personal.** The user opens a session — will the system mention that prediction from last week? Maybe. Will it acknowledge the 3-month anniversary? Maybe. This unpredictability is exactly what Skinner's research predicts will produce the strongest engagement response. The user keeps coming back partly because each session might contain a moment of genuine surprise — the system remembering something they forgot they said, noticing a pattern they didn't see, or simply following up on something that mattered to them.
+
+#### Priority Rules
+
+When multiple triggers qualify in the same session evaluation, the engine selects one using a fixed priority:
+
+```
+1. milestone           (rarest — if it qualifies, it wins)
+2. prediction_followup (time-sensitive — deadlines don't wait)
+3. emotional_callback  (high relationship impact)
+4. pattern_insight     (high surprise value)
+5. nostalgia           (warm but not urgent)
+6. session_greeting    (lowest priority — replaced by any of the above)
+```
+
+This ordering reflects urgency and rarity. Milestones are one-time events that cannot be deferred. Predictions have deadlines. Emotional callbacks address something the user may be actively thinking about. The remaining triggers are valuable but not time-bound — they can wait for a future session.
+
+#### Proactive Context Generation
+
+When a trigger fires, the engine generates a structured context block and injects it into the system prompt as a new layer in the context builder, **between** the user profile (Priority 1) and session context (Priority 2):
+
+```
+User profile:
+- User is allergic to peanuts
+- User is a backend engineer at Google
+- User lives in Seattle
+
+Proactive context:
+- [Prediction Follow-up] On March 5, you predicted positive career news by end
+  of March. The date is approaching. Consider checking in about this.
+
+Session context:
+- [Turns 1-5] Discussed weekend plans...
+
+Relevant context from memory:
+- User prefers PostgreSQL over MySQL
+```
+
+The context block follows a consistent format across all trigger types:
+
+```
+[Trigger Type — Human-Readable Label]
+Factual summary of the triggering data.
+Suggested framing for the LLM.
+```
+
+The LLM is instructed via the system prompt preamble: "If proactive context is present, weave it naturally into your response. Do not announce it mechanically or read it verbatim. Treat it as something you genuinely remember and care about." This instruction prevents the LLM from saying "According to my proactive memory system, I should follow up on..." and instead produces natural responses like "By the way, you mentioned a few weeks ago that you were expecting some good career news by end of March — how's that going?"
+
+**At most ONE proactive trigger fires per session.** This is a hard cap, not a soft guideline. Multiple proactive injections in a single response would overwhelm the user and dilute the impact of each one. The system selects the single highest-priority qualifying trigger and discards the rest. Discarded triggers are not remembered — they are re-evaluated on the next session. This means a prediction follow-up that was suppressed by a milestone trigger will get another chance next session (assuming its conditions still hold and the random draw succeeds).
+
+#### Trigger Condition Evaluation
+
+Each trigger type has specific conditions beyond the base probability and cooldown check. These conditions determine whether the trigger is **eligible** before the random draw occurs.
+
+**`prediction_followup`** — The engine queries for event facts with `tag: "prediction"` and a non-nil `reference_time`. A prediction is eligible when:
+
+- `reference_time` is within 3 days in the future (approaching), OR
+- `reference_time` is in the past and the fact has not been recalled since `reference_time` (never followed up on)
+
+The engine also checks that the prediction fact's `temporal_status` is `current` — a prediction that was already resolved (reclassified to `historical` by a later extraction) is not eligible. This prevents the system from asking "How did the promotion go?" after the user already said "I got the promotion!" and the extraction stage recorded it.
+
+```
+eligible_predictions = SELECT * FROM mg_entity_fact
+  WHERE entity_uuid = ?
+    AND type = 'event'
+    AND tag = 'prediction'
+    AND temporal_status = 'current'
+    AND reference_time IS NOT NULL
+    AND (
+      reference_time BETWEEN now() AND now() + INTERVAL 3 DAY
+      OR (reference_time < now() AND (last_recalled_at IS NULL OR last_recalled_at < reference_time))
+    )
+  ORDER BY reference_time ASC
+  LIMIT 1
+```
+
+The `ORDER BY reference_time ASC` ensures the most time-sensitive prediction (the one whose deadline is soonest) is selected first. The `LIMIT 1` means the trigger evaluates a single prediction per session — if the user has 5 open predictions, the system follows up on the most urgent one, not all of them. The remaining predictions will be eligible in future sessions.
+
+**`emotional_callback`** — The engine queries conversation summaries that scored above a significance threshold during their original extraction and have not been referenced in recall for at least 7 days. "Emotional" is determined by the presence of emotional marker words in the summary text (`worried`, `scared`, `excited`, `devastated`, `thrilled`, `anxious`, `heartbroken`, `terrified`, `overjoyed`, `furious`, `grief`, `panic`) — a simple heuristic rather than a sentiment model, because false negatives (missing an emotional conversation) are acceptable while false positives (following up on a non-emotional conversation as if it were emotional) are jarring.
+
+Additionally, the engine checks that no facts extracted from the same session have been recalled in the last 7 days. If the user's emotional topic came up organically in a recent conversation (via standard reactive recall), the proactive follow-up is redundant and would feel repetitive.
+
+**`milestone`** — The engine loads the entity's `created_at` timestamp and the current session count (derived from session history for the entity). Milestones are pre-defined:
+
+| Session Count Milestones | Duration Milestones |
+|---|---|
+| 10, 25, 50, 100, 200, 500, 1000 | 1 month, 3 months, 6 months, 1 year, 2 years |
+
+A milestone is eligible if the entity's current state matches any of these thresholds and the milestone has not been previously acknowledged (tracked in `mg_proactive_state` via `last_fact_uuid` containing the milestone identifier, e.g., `"session_100"` or `"duration_1y"`).
+
+When a milestone is detected, the engine loads the entity's **first conversation summary** (the very first session's summary, if available) and the entity's current top-significance facts. This gives the LLM material to contrast "then vs now" — a powerful nostalgia-plus-growth narrative. For session count milestones, the engine also computes a tag frequency distribution across all facts, providing a topical summary of the relationship: "You've discussed relationships (35 times), career (28 times), and health (15 times)."
+
+**`nostalgia`** — The engine checks whether the current date is within 3 days of the anniversary of a significant early event. "Significant early event" is defined as: any fact created within the first 7 days of the entity's existence with `significance >= 7`. The anniversary check uses month-and-day matching, ignoring year:
+
+```
+eligible_nostalgia = SELECT * FROM mg_entity_fact
+  WHERE entity_uuid = ?
+    AND created_at < (SELECT created_at FROM mg_entity WHERE uuid = ?) + INTERVAL 7 DAY
+    AND significance >= 7
+    AND ABS(
+      DAYOFYEAR(CURRENT_DATE) - DAYOFYEAR(created_at)
+    ) <= 3
+  ORDER BY significance DESC
+  LIMIT 1
+```
+
+If no anniversary match is found, the nostalgia trigger is ineligible for this session. This makes nostalgia triggers inherently rare — they can only fire near the anniversary of early interactions, which happens at most a few times per year. The rarity is a feature, not a limitation — nostalgia is most powerful when it surprises.
+
+**`pattern_insight`** — The engine runs a lightweight statistical analysis over the entity's recent facts:
+
+1. **Temporal pattern detection.** Group facts by day-of-week and hour-of-day (using `created_at`). If any single day-of-week accounts for >40% of a specific tag's facts in the last 60 days, that's a temporal pattern. Example: 6 out of 8 "relationship"-tagged facts were created on Sundays.
+
+2. **Topical frequency detection.** Count facts by tag over the last 90 days. If any tag has >10 facts and represents >25% of all facts in that period, it's a topical pattern. Example: 35 out of 120 facts are tagged "career" — the user thinks about their career a lot.
+
+3. **Behavioral trajectory detection.** Compare the tags of facts from the last 30 days against the 30 days before that. If a tag's frequency increased by >2x, it's an emerging interest. If it decreased by >2x, it's a fading interest.
+
+The engine selects the most statistically significant pattern (highest ratio or largest change) and formats it as a concrete observation with numbers. Vague insights ("you seem to think about career stuff") are worthless — concrete insights ("6 of your last 8 relationship questions were on Sundays, and 5 of those were after 8pm") are surprising and feel genuinely observed.
+
+**Minimum data thresholds.** Pattern detection requires a minimum sample size to be meaningful. Temporal patterns require at least 8 facts for the target tag in the analysis window. Topical patterns require at least 30 total facts. Behavioral trajectories require at least 5 facts per tag per 30-day window. Below these thresholds, the pattern trigger is ineligible — the system will not announce "I've noticed a pattern" based on 3 data points.
+
+**`session_greeting`** — This trigger is evaluated only when the user's first message in the session matches the trivial-turn heuristic (the same set used by the trivial-turn gate in Subsystem 4: greetings, single-word openers, vague questions like "what's up"). If the first message is substantive ("Can you help me with a Python script?"), the greeting trigger does not fire — the user has a clear intent, and proactive surfacing would derail it.
+
+When eligible, the engine loads the most recent conversation summary and includes it as continuity context. This replaces the LLM's generic "How can I help you today?" with something like "Last time we talked, you were deciding between two job offers. Have you made a decision?"
+
+#### Prediction Tracking
+
+Proactive prediction follow-up requires that predictions are identified and stored during extraction. This adds a specific responsibility to the extraction stage:
+
+**Identification.** The extraction prompt is extended with an instruction: "If the conversation contains a prediction, commitment, deadline, or plan with a future date, extract it as an event fact with `tag: "prediction"` and set `reference_time` to the expected date. Examples: 'I think I'll get the promotion by March' → event fact, tag: prediction, reference_time: 2026-03-31. 'I'll finish the project next Friday' → event fact, tag: prediction, reference_time: 2026-04-03."
+
+**Storage.** Predictions use the existing fact model with no schema changes. The `type: event` + `tag: "prediction"` + `reference_time: <future date>` combination is sufficient to identify them. The proactive engine queries this combination directly. No new columns, no new tables (beyond `mg_proactive_state`), no new interfaces on the `Fact` struct.
+
+**Lifecycle.** When the user reports the outcome of a prediction ("I got the promotion!"), the extraction stage should extract a new event fact describing the outcome and reclassify the original prediction to `historical` via slot-based conflict resolution (the prediction and its resolution occupy the same semantic slot). This prevents the proactive engine from following up on already-resolved predictions.
+
+**What happens when the extraction stage misses a prediction.** The proactive engine can only follow up on predictions that were correctly identified and tagged during extraction. If the stage extracts "User expects promotion by March" as a generic identity fact without the `prediction` tag, the proactive engine will never find it. This is an acceptable failure mode — the system silently misses a follow-up opportunity rather than incorrectly following up. The extraction prompt's examples and instruction are the primary mechanism for improving prediction identification accuracy.
+
+#### Integration With Message Classification
+
+Applications that classify incoming messages (e.g., a tarot reading app that distinguishes `GREETING`, `PREDICTION`, `QUESTION`, `CARDS`) can integrate proactive surfacing more precisely:
+
+| Classification | Proactive Behavior | Rationale |
+|---|---|---|
+| `GREETING` or `FIRST_QUESTION_OF_DAY` | Evaluate all proactive triggers | The user hasn't stated an intent yet — proactive context enhances the opening without derailing anything |
+| `PREDICTION` | Register prediction for future follow-up (no proactive injection now) | The user is actively making a prediction — store it, don't surface old ones |
+| `QUESTION` or domain-specific action | Standard reactive recall only — no proactive injection | The user has a clear intent. Injecting "By the way, last week you were worried about..." before answering their question feels dismissive of their current need |
+
+The key principle: **proactive surfacing should only activate in intent-ambiguous moments.** When the user's intent is clear, the system should serve that intent. Proactive context is for the moments when the user hasn't yet said what they want — the opening of a session, a vague greeting, a pause in conversation.
+
+Applications without message classification default to the `session_greeting` trigger's trivial-message heuristic, which approximates intent-ambiguity detection using the same word list as the trivial-turn gate.
+
+#### Proactive Trigger State
+
+The engine must track per-entity, per-trigger-type state to enforce cooldowns and avoid repeating the same proactive content:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `entity_uuid` | string | Which entity this state belongs to |
+| `trigger_type` | string | Which trigger type (`prediction_followup`, `emotional_callback`, etc.) |
+| `last_fired_at` | *time.Time | When this trigger type last fired for this entity |
+| `last_fact_uuid` | string | Which fact/summary was used in the last firing (prevents re-surfacing the same content) |
+| `fire_count` | int | Total times this trigger has fired for this entity (useful for analytics and rate monitoring) |
+
+**Schema:** `mg_proactive_state` table with `entity_uuid`, `trigger_type`, `last_fired_at`, `last_fact_uuid`, `fire_count`, composite primary key `(entity_uuid, trigger_type)`.
+
+This state is stored in the `mg_proactive_state` table, scoped per entity. The table is small — at most 6 rows per entity (one per trigger type). Reads happen once per session start; writes happen only when a trigger fires. The storage overhead is negligible — even with 100,000 entities, the table contains at most 600,000 rows of lightweight metadata.
+
+When evaluating a trigger, the engine checks `last_fact_uuid` to ensure the same fact or summary is not surfaced twice in a row. If the only eligible prediction is the same one that was already followed up on, the trigger does not fire — the system waits for a new prediction or for the user to provide an update that resolves the existing one.
+
+#### The Proactive Evaluation Pipeline
+
+Putting it all together, here is the complete evaluation flow that runs at the start of each session (or on the first message if session start is not a distinct event):
+
+```
+User sends first message of session: "hey"
+
+PROACTIVE EVALUATION (before standard recall):
+├── Step 1 — Check feature gate:
+│   if !config.ProactiveRecall: skip entire pipeline
+│
+├── Step 2 — Load proactive state:
+│   SELECT * FROM mg_proactive_state WHERE entity_uuid = ?
+│   → last_fired timestamps and fact UUIDs for all 6 trigger types
+│
+├── Step 3 — Evaluate each trigger type:
+│   ├── milestone:
+│   │   session_count = 100? entity_age = 1 year? → YES, qualifies
+│   │   base_rate = 1.0, no cooldown → FIRES
+│   │   priority = 1 (highest)
+│   │
+│   ├── prediction_followup:
+│   │   eligible predictions with approaching reference_time? → YES, 1 found
+│   │   cooldown_met (last fired > 3 days ago)? → YES
+│   │   random() = 0.45 < base_rate 0.7? → YES
+│   │   priority = 2
+│   │
+│   ├── emotional_callback:
+│   │   high-significance unreferenced emotional conversations? → NO
+│   │   → SKIP
+│   │
+│   ├── pattern_insight:
+│   │   statistically significant patterns? → YES (Sunday evening pattern)
+│   │   cooldown_met (last fired > 10 days ago)? → YES
+│   │   random() = 0.81 < base_rate 0.2? → NO (random draw failed)
+│   │   → SKIP
+│   │
+│   ├── nostalgia:
+│   │   anniversary of early significant event within 3 days? → NO
+│   │   → SKIP
+│   │
+│   └── session_greeting:
+│       first message is trivial? → YES ("hey")
+│       cooldown_met (last fired > 1 day ago)? → YES
+│       random() = 0.35 < base_rate 0.4? → YES
+│       priority = 6 (lowest)
+│
+├── Step 4 — Select highest-priority winner:
+│   Candidates: milestone (p1), prediction_followup (p2), session_greeting (p6)
+│   Winner: milestone (priority 1)
+│
+├── Step 5 — Generate context:
+│   Load entity's first conversation summary.
+│   Load entity's current top-significance facts.
+│   Compute tag frequency distribution across all facts.
+│   Format: "[Milestone — 100th Conversation] This is your 100th conversation.
+│            Your first conversation was on March 29, 2025, when you asked about
+│            your career prospects. Since then, you've discussed relationships
+│            (35 times), career (28 times), and health (15 times)."
+│
+├── Step 6 — Update proactive state:
+│   INSERT OR UPDATE mg_proactive_state
+│     SET last_fired_at = now(), last_fact_uuid = 'session_100',
+│         fire_count = fire_count + 1
+│     WHERE entity_uuid = ? AND trigger_type = 'milestone'
+│
+└── Step 7 — Inject into context builder:
+    Proactive context added between Priority 1 (user profile) and Priority 2
+    (session context). Standard recall pipeline proceeds normally with
+    remaining token budget.
+
+THE LLM RECEIVES:
+System: "User profile:
+         - User is a backend engineer at Google
+         - User lives in Seattle
+
+         Proactive context:
+         - [Milestone] This is your 100th conversation. Your very first chat
+           was on March 29, 2025, when you asked about your career. Since then,
+           you've explored relationships (35 times), career changes (28 times),
+           and health goals (15 times).
+
+         Session context: ...
+         Relevant context from memory: ..."
+
+THE LLM RESPONDS:
+"Hey! You know what — this is actually our 100th conversation. I just
+ realized that. Your very first question to me was about your career,
+ almost exactly a year ago. You were so uncertain about your direction
+ back then, and look at you now — you've worked through a job change,
+ figured out what you want from relationships, and started taking your
+ health seriously. That's a lot of growth in 100 conversations. So —
+ what's on your mind today?"
+```
+
+The user never asked for this. The system noticed it, surfaced it, and the LLM wove it into a natural response. This is the kind of moment that transforms a tool into a relationship.
+
+#### Failure Modes And Safety
+
+**False positive emotional callbacks.** The emotional marker word heuristic is intentionally conservative (high-specificity, low-sensitivity). Words like "worried", "scared", "devastated" are strong emotional signals. Words like "interesting", "frustrated", "annoyed" are not included — they are common in non-emotional contexts and would produce too many false positives. The system will miss some emotional conversations (false negatives), which is acceptable. Following up on a conversation the user didn't consider emotional (false positive) feels tone-deaf and is far worse.
+
+**Stale predictions.** A prediction whose `reference_time` passed more than 30 days ago is no longer eligible for follow-up. The user has likely forgotten about it or moved on, and surfacing it feels out-of-touch rather than attentive. The 30-day staleness window ensures the system follows up promptly (within days of the reference date) or not at all.
+
+**Overexposure to nostalgia.** The mere exposure effect peaks at 10–20 exposures and declines after that. The 14-day cooldown and 0.15 base rate limit nostalgia triggers to roughly once per month. Over a year, that's approximately 12 nostalgia moments — well within the optimal exposure range. The system will not feel like it's "living in the past."
+
+**Privacy sensitivity.** The proactive engine surfaces facts that the user may have shared in a vulnerable moment. The emotional callback trigger specifically targets high-arousal, potentially sensitive topics. The LLM instruction includes: "When referencing emotional topics proactively, be gentle and offer the user an easy out. Do not assume the user wants to discuss it — ask, don't assert." This prevents the system from saying "Let's talk about your mother's surgery" and instead produces "I've been thinking about what you shared last time about your mother. Only if you'd like to — how did it go?"
+
+**Token budget impact.** Proactive context consumes tokens from the total `MemoryTokenBudget`. A typical proactive injection is 50–100 tokens — 1.25%–2.5% of the default 4000-token budget. This is small enough that it does not meaningfully displace recalled facts or summaries. The context builder enforces the budget regardless — if proactive context is present, other layers have slightly less space, which the adaptive token window (Subsystem 7) handles gracefully.
+
+**No proactive context for programmatic callers.** The proactive engine only fires when the system is interacting with a conversational user. API callers who use `Chat()` or `RecallAndBuildContext` programmatically (e.g., for batch processing or automated pipelines) should disable `ProactiveRecall` to avoid injecting conversational proactive content into non-conversational contexts.
+
+#### Configuration
+
+| Setting | Default | Env Var | What It Controls |
+|---|---|---|---|
+| `ProactiveRecall` | false | `MEMG_PROACTIVE_RECALL` | Master switch — enables the proactive surfacing engine. Disabled by default because the feature requires extraction stages that tag predictions and sufficient conversation history to be meaningful. |
+| `ProactiveMaxPerSession` | 1 | `MEMG_PROACTIVE_MAX_PER_SESSION` | Maximum proactive triggers per session. The hard cap that prevents multiple proactive injections from overwhelming the user. Values above 1 are not recommended. |
+| `PredictionFollowupRate` | 0.7 | `MEMG_PREDICTION_FOLLOWUP_RATE` | Base probability for prediction follow-up triggers. Higher values mean predictions are followed up more reliably; lower values increase unpredictability. |
+| `EmotionalCallbackRate` | 0.3 | `MEMG_EMOTIONAL_CALLBACK_RATE` | Base probability for emotional check-in triggers. Keep this moderate — emotional topics require a light touch. |
+| `NostalgiaRate` | 0.15 | `MEMG_NOSTALGIA_RATE` | Base probability for nostalgia triggers. Keep this low — nostalgia is most effective when rare and surprising. |
+| `PatternInsightRate` | 0.2 | `MEMG_PATTERN_INSIGHT_RATE` | Base probability for pattern insight triggers. Keep this low — pattern insights must feel genuinely discovered, not manufactured. |
+| `SessionGreetingRate` | 0.4 | `MEMG_SESSION_GREETING_RATE` | Base probability for contextual greeting triggers. Higher than others because greetings are the mildest form of proactive surfacing. |
+
+**Why disabled by default.** Proactive surfacing depends on two prerequisites that not all applications provide: (1) an extraction stage that tags predictions with `tag: "prediction"` and sets `reference_time`, and (2) conversations of sufficient depth and duration to generate meaningful patterns and emotional content. Enabling it for a simple Q&A bot with short, factual conversations would produce either no triggers (no predictions, no emotional content) or awkward ones (pattern insights over a handful of sessions are not statistically meaningful). Applications that want proactive surfacing must opt in after ensuring their extraction stage supports it.
+
+#### SDK Interface
+
+The proactive engine is exposed through three SDK methods that mirror the Go library's internal functions:
+
+```go
+// Go — evaluate proactive triggers at session start
+func (m *MemG) GetProactiveContext(ctx context.Context, entityID string, opts ...ProactiveOption) (*ProactiveResult, error)
+
+// ProactiveResult contains the output of a proactive evaluation.
+type ProactiveResult struct {
+    Triggered bool              // Whether a trigger fired
+    Type      string            // Trigger type that fired (e.g. "milestone", "prediction_followup")
+    Context   string            // Formatted context string for injection
+    Metadata  map[string]any    // Trigger-specific metadata (e.g. session_count, prediction content)
+}
+
+// Go — register a prediction for future follow-up (alternative to extraction-stage tagging)
+func (m *MemG) TrackPrediction(ctx context.Context, entityID string, p Prediction) error
+
+// Prediction describes a user commitment or forecast with a future date.
+type Prediction struct {
+    Content              string     // What was predicted: "Career improvement by end of March"
+    TargetDate           time.Time  // When the prediction should be evaluated
+    SourceConversationID string     // Which conversation produced this prediction
+}
+
+// Go — RecallAndBuildContext checks config.ProactiveRecall internally
+// and includes proactive context in the unified pipeline when enabled.
+// No separate call needed for callers using Chat() or Stream().
+```
+
+```typescript
+// TypeScript — evaluate proactive triggers
+const proactive = await memg.getProactiveContext(entityId, {
+  trigger: 'session_start',
+  currentDate: new Date(),
+  sessionCount: 47
+});
+// Returns: { triggered: boolean, type: string, context: string, metadata: {...} } | null
+
+// TypeScript — register a prediction
+await memg.trackPrediction(entityId, {
+  content: "Career improvement by end of March",
+  targetDate: new Date('2026-03-31'),
+  sourceConversationId: 'conv-uuid'
+});
+
+// TypeScript — include proactive context in unified recall
+const context = await memg.buildMemoryContext(entityId, query, {
+  proactiveRecall: true,
+  sessionCount: 47,
+  currentDate: new Date()
+});
+```
+
+```python
+# Python — evaluate proactive triggers
+proactive = await memg.get_proactive_context(entity_id,
+    trigger="session_start",
+    current_date=datetime.now(),
+    session_count=47
+)
+# Returns: ProactiveResult(triggered=True, type="milestone", context="...", metadata={...}) or None
+
+# Python — register a prediction
+await memg.track_prediction(entity_id,
+    content="Career improvement by end of March",
+    target_date=datetime(2026, 3, 31),
+    source_conversation_id="conv-uuid"
+)
+
+# Python — include proactive context in unified recall
+context = await memg.build_memory_context(entity_id, query,
+    proactive_recall=True,
+    session_count=47,
+    current_date=datetime.now()
+)
+```
+
+`GetProactiveContext` is designed to be called **once** at the start of a session, before the first `Chat()` or `Stream()` call. When `ProactiveRecall` is enabled in the config, `RecallAndBuildContext` calls it internally as a step between conscious fact loading and query-dependent recall. Callers who use `RecallAndBuildContext` (or `Chat()`/`Stream()`, which call it) do not need to invoke `GetProactiveContext` separately — it is integrated into the unified pipeline.
+
+`TrackPrediction` is an explicit API for registering predictions outside the extraction pipeline. This is useful when the application identifies predictions through its own logic (e.g., a tarot reading app that knows every reading contains predictions) rather than relying on the extraction stage's LLM-based detection. Internally, `TrackPrediction` creates an event fact with `tag: "prediction"`, `reference_time: targetDate`, and `temporal_status: current` — the same structure the extraction stage would produce.
+
+#### Interaction With Existing Subsystems
+
+Proactive surfacing integrates with the existing architecture without modifying any core interfaces:
+
+| Subsystem | Interaction |
+|---|---|
+| **Subsystem 1 (Chat Boundaries)** | Proactive evaluation runs when `EnsureSession` returns `isNew = true` (new session) or on the first message of an existing session. The sliding session expiry is unchanged. |
+| **Subsystem 2 (Truth & Provenance)** | Proactive triggers read `temporal_status`, `tag`, `reference_time`, `significance`, and `confidence` from the existing fact model. No new fields are needed on the fact itself. Prediction lifecycle uses the existing slot-based conflict resolution. |
+| **Subsystem 3 (Retrieval)** | Proactive context is injected before query-dependent recall. The token budget consumed by proactive context reduces the space available for recalled facts, handled by the existing adaptive token window. |
+| **Subsystem 4 (Runtime Efficiency)** | Proactive evaluation adds at most 2 database queries per session start (load proactive state + load eligible trigger data). For sessions that occur every 30+ minutes, this is negligible. The trigger evaluation itself is pure computation — no LLM calls. |
+| **Subsystem 5 (Memory Hygiene)** | Recall tracking (`RecallCount`, `LastRecalledAt`) applies to facts surfaced through proactive triggers, just as it does for reactively recalled facts. A prediction that was proactively surfaced gets its recall count incremented, which feeds into staleness demotion. |
+| **Subsystem 7 (Session Intelligence)** | Proactive evaluation reads conversation summaries (for `emotional_callback` and `session_greeting`) and turn summaries (for continuity context). The artifact store and entity mention accumulator are not involved in proactive surfacing. |
+| **Subsystem 8 (Unified Recall)** | `RecallAndBuildContext` is extended with an optional proactive step between Steps 2 and 3. When `ProactiveRecall` is enabled, the function calls `evaluateProactiveTriggers()` and passes the result to `BuildContext` as a new `ProactiveContext` field on `ContextInput`. |
+| **Subsystem 9 (Hierarchical Memory)** | Proactive context is injected into the semantic tier (the "always present" layer) alongside conscious facts. This aligns with the hierarchical builder's design — proactive context is identity-adjacent information that should always be visible to the LLM when present, regardless of query relevance. |
+
+---
+
+### Subsystem 13: Confidence-Gated Generation
+
+#### The Problem
+
+MemG already tracks `Confidence` (0.0--1.0) and `SourceRole` (`"user"` or `"assistant"`) on every fact (Subsystem 2). The hybrid ranking engine applies a small confidence penalty during recall scoring (Subsystem 3) -- a maximum 5% reduction for the lowest-confidence facts. This penalty helps rank ordering, but it does not solve the fundamental problem: **the LLM cannot see confidence metadata.**
+
+When facts are injected into the system prompt, they appear as a flat list of equally authoritative statements:
+
+```
+Relevant context from memory:
+- User is vegetarian
+- User seems to prefer Italian food
+- User may have a sister
+```
+
+The LLM has no way to distinguish between:
+
+- **"User is vegetarian"** -- confidence 1.0, stated by the user directly, reinforced 4 times across conversations.
+- **"User seems to prefer Italian food"** -- confidence 0.6, inferred by the assistant from a pattern of restaurant choices.
+- **"User may have a sister"** -- confidence 0.3, extracted from a single ambiguous mention ("I might visit my sister this weekend" -- but "sister" could be a close friend, a religious title, or the user may have been speaking hypothetically).
+
+When all three appear identically in the prompt, the LLM treats them as equally true. It confidently states "your sister" to someone who may not have a sister. It recommends Italian food as though the user requested it. The confidence signal that MemG tracked through extraction, validation, and ranking is discarded at the exact moment it matters most -- when the LLM decides how to phrase its response.
+
+**Why this matters most in personalization-heavy domains:** In domains like astrology, tarot, personal coaching, and concierge services, the user expects the AI to "know" them. When it gets a verified fact right -- "Since you're a Scorpio..." -- the user feels understood. When it gets an uncertain fact wrong -- "How is your sister doing?" to someone without a sister -- the illusion of personalized intelligence collapses instantly. The user trusted the AI *because* it demonstrated knowledge, and a factual error betrays that trust far more severely than if the AI had never referenced personal details at all.
+
+The existing 5% ranking penalty from Subsystem 3 is the wrong tool for this problem. Ranking determines *which* facts are recalled. Confidence gating determines *how* recalled facts are communicated. A fact with confidence 0.3 that scores high on relevance will survive recall (it is topically relevant), but it must be communicated with appropriate hedging -- not stated as known truth.
+
+#### Research Basis
+
+Five bodies of work establish why confidence metadata must be visible to the generation model, not just the retrieval pipeline.
+
+**Chain-of-Verification (CoVe)** (Dhuliawala et al., ACL Findings 2024; arXiv:2309.11495) demonstrated a draft-then-verify-then-regenerate pipeline that reduces hallucinations across list-based questions, closed-book QA, and longform text generation. The key insight: when the model is given an explicit verification step -- an opportunity to check its claims against evidence before finalizing -- hallucination rates drop significantly. CoVe operates on the model's own generated claims. Confidence gating adapts this insight to *injected* context: by labeling each fact with its verification status, the model receives pre-verified evidence with explicit trust signals, eliminating the need for a separate verification pass.
+
+**SelfCheckGPT** (Manakul et al., EMNLP 2023; arXiv:2303.08896) showed that when an LLM has genuine knowledge of a fact, sampled responses are consistent -- the same fact appears across multiple independent generations. Hallucinated facts show high variability: different samples produce different "facts" because the model is fabricating rather than recalling. This zero-resource detection method works because hallucinated outputs are stochastic noise while grounded outputs are deterministic signal. Confidence gating leverages the same principle from the opposite direction: rather than detecting hallucination after generation, it *prevents* hallucination by constraining what the model can state as fact. A `[VERIFIED]` label tells the model "this is grounded, state it." An `[UNCERTAIN]` label tells the model "this is not grounded, do not fabricate certainty."
+
+**RAG Grounding** (Google Research, December 2024) measured that retrieval-augmented generation reduces hallucinations by 2--10% compared to ungrounded generation. The limitation they identified is critical: models can still override retrieved context with internal "Knowledge FFNs" -- feed-forward network layers that store parametric knowledge from pretraining. When the model's internal knowledge conflicts with the injected context, the model sometimes ignores the context and generates from its parameters. Confidence labels directly address this: a `[VERIFIED]` prefix on a fact is an explicit instruction to trust the retrieved context over internal knowledge, while `[UNCERTAIN]` signals that the model should not rely on either source without confirmation.
+
+**Context-Aware Decoding** (Shi et al., 2023) introduced a decoding strategy that suppresses the model's internal knowledge in favor of "Copying Heads" -- attention heads that attend to injected context tokens. This increases faithfulness to the provided context at the cost of reduced fluency. Confidence gating achieves a similar outcome through prompting rather than decoding manipulation: instead of modifying the attention mechanism, it gives the model explicit natural-language instructions for how to weight each piece of context. This is less invasive (no decoding changes required) and more granular (per-fact instructions vs. a global decoding parameter).
+
+**The Barnum/Forer Effect** (Forer, 1948; Gauquelin, 1979) is the empirical finding that people accept vague, positive personality descriptions as uniquely accurate. In Forer's original study, 39 students rated identical "personalized" personality sketches at 4.30 out of 5 for accuracy. Gauquelin replicated this at scale: 90% of respondents found an identical horoscope description to resonate as personally accurate. Three conditions maximize the effect: statements are mainly positive, delivered by a perceived authority, and the subject believes the description was created specifically for them. This research is not about AI -- but it defines the operating environment for astrology, tarot, and personality-based applications where MemG is deployed. Understanding the Barnum effect is essential for understanding why confidence gating is not optional in these domains (discussed in detail below).
+
+**Mem0** (Chhikara et al., 2025; arXiv:2504.19413) demonstrated that grounded memory -- constraining the model's output to known facts stored externally rather than relying on parametric knowledge -- reduces hallucinations by moving the source of truth from model weights to an external, auditable store. MemG already implements this architecture. Confidence gating extends it by making the *degree* of groundedness visible: not all external facts are equally grounded, and the model needs to know which ones to trust absolutely vs. which ones to treat as hypotheses.
+
+#### The Design -- Confidence Tiers in Context Injection
+
+##### Three Confidence Tiers
+
+Every recalled fact already carries a `Confidence` score (0.0--1.0) and a `SourceRole` (`"user"` or `"assistant"`). Confidence gating maps these into three discrete tiers, each with a distinct label and a distinct instruction for how the LLM should reference the fact:
+
+| Tier | Confidence Range | Typical Source | Label | LLM Instruction |
+|---|---|---|---|---|
+| **Verified** | >= 0.8 | User stated directly, or user-confirmed inference | `[VERIFIED]` | State as fact. Reference directly. "You mentioned you're vegetarian." |
+| **Inferred** | 0.5 -- 0.79 | Pattern across multiple conversations, or assistant inference confirmed by moderate evidence | `[INFERRED]` | Frame as observation. "From what I understand..." or "It seems like..." |
+| **Uncertain** | < 0.5 | Single ambiguous mention, weak inference, assistant-sourced with no reinforcement | `[UNCERTAIN]` | Do NOT state as fact. If relevant, ask to confirm. "I recall something about a sister -- is that right?" Never reference as known. |
+
+**Why three tiers and not a continuous scale:** The LLM is a language model, not a probability calculator. Giving it `confidence: 0.73` as a number does not reliably produce appropriately hedged language -- the model has no calibrated mapping from a decimal probability to a linguistic certainty level. But the model understands categorical instructions extremely well. "State as fact" vs. "frame as observation" vs. "ask to confirm" are unambiguous behavioral directives that produce consistent output across models and prompt lengths. Three tiers are the minimum to capture the meaningful distinction (certain / likely / uncertain) without overcomplicating the instruction space.
+
+**Why the boundaries are at 0.8 and 0.5:** These thresholds are derived from the extraction validation rules in Subsystem 2. The validation gate already drops assistant-sourced facts below 0.7 confidence -- so any fact that survives extraction with confidence >= 0.8 has either been stated by the user (source_role = "user", confidence assigned by the LLM extractor) or has been reinforced to >= 0.8 (each reinforcement adds 0.1). The 0.5 lower bound for the inferred tier is set because facts below 0.5 are more likely wrong than right -- a coin flip -- and the LLM should never present a coin-flip as an observation. These boundaries are configurable (see Configuration below) but the defaults are designed to be conservative.
+
+##### Context Injection Format
+
+With confidence gating enabled, the context builder annotates each fact with its tier label and optional provenance metadata:
+
+**Without provenance (default):**
+
+```
+User profile:
+- [VERIFIED] User is vegetarian
+- [VERIFIED] User lives in Mumbai
+- [INFERRED] User prefers quiet restaurants
+
+Relevant context from memory:
+- [VERIFIED] User's mother is named Priya
+- [UNCERTAIN] User may have a sister
+- [INFERRED] User seems stressed about work
+```
+
+**With provenance enabled (`SourceProvenance: true`):**
+
+```
+User profile:
+- [VERIFIED] User is vegetarian (stated by user, 2026-01-15, reinforced 4x)
+- [VERIFIED] User lives in Mumbai (stated by user, 2026-02-20)
+- [INFERRED] User prefers quiet restaurants (inferred from 3 conversations, last: 2026-03-20)
+
+Relevant context from memory:
+- [VERIFIED] User's mother is named Priya (stated by user, 2026-03-05)
+- [UNCERTAIN] User may have a sister (single mention, 2026-03-01)
+- [INFERRED] User seems stressed about work (inferred from 2 conversations, last: 2026-03-25)
+```
+
+Provenance gives the LLM additional calibration information. A fact stated by the user and reinforced 4 times deserves much stronger language than a single inference from two weeks ago. The LLM uses this metadata to modulate its phrasing -- "You've mentioned several times that you're vegetarian" vs. "It seems like you might prefer quiet places." Without provenance, the tier label alone guides the phrasing. With provenance, the LLM can be more precise.
+
+**Token cost:** The tier labels add 10--15 characters per fact (~3--5 tokens). Provenance adds 30--60 characters per fact (~10--20 tokens). For a typical recall of 10 facts, this is 30--200 additional tokens -- well within the existing `MemoryTokenBudget` margins. The token estimator in `BuildContext` accounts for the labels when checking budget limits.
+
+##### Interaction With the Context Builder
+
+Confidence gating modifies `BuildContext` (and the hierarchical `BuildHierarchicalContext` from Subsystem 9) at two points:
+
+**1. Annotation during assembly.** When building the context string, each fact's `Confidence` is mapped to a tier, and the tier label is prepended. This replaces the existing logic that only prepends `[historical]` for historical facts. Both annotations can coexist:
+
+```
+- [VERIFIED] User lives in Seattle
+- [historical] [INFERRED] User previously preferred New York-style pizza
+- [UNCERTAIN] User may have visited Japan
+```
+
+The tier label always appears first, followed by the temporal annotation if applicable. This ordering is deliberate -- the confidence tier is the primary behavioral directive (how to reference the fact), while the temporal status is a secondary qualifier (is the fact still current).
+
+**2. System prompt instruction injection.** When confidence gating is enabled, `BuildContext` prepends a confidence handling instruction block to the assembled context. This instruction tells the LLM how to interpret the tier labels:
+
+```
+When referencing user memories:
+- [VERIFIED] facts: State directly as known truth. "You mentioned you're vegetarian."
+- [INFERRED] facts: Frame as observation. "From our conversations, it seems like..."
+- [UNCERTAIN] facts: NEVER state as fact. If relevant, ask to confirm:
+  "I recall something about a sister -- is that right?"
+- If asked about something with NO memory: Say "I don't have that information"
+  -- do NOT fabricate.
+```
+
+This instruction is injected once, before the fact sections. It is not repeated per fact. The instruction's token cost is fixed (~80 tokens) regardless of how many facts are recalled.
+
+**Why an explicit instruction block instead of relying on the labels alone:** Labels like `[VERIFIED]` and `[UNCERTAIN]` are suggestive but not directive. Without an explicit instruction, the model might treat `[UNCERTAIN]` as a quality note and still reference the fact assertively -- "Your sister mentioned..." Models follow explicit behavioral instructions far more reliably than they infer behavior from metadata annotations. The instruction block bridges the gap between annotation (what the label means) and behavior (what the model should do).
+
+##### Confidence Floor Filter
+
+Not every application wants uncertain facts in the prompt at all. A medical assistant should never surface `[UNCERTAIN]` facts about medication -- the risk of the LLM referencing an incorrect medication despite hedging language is too high. A casual chat assistant benefits from uncertain facts because the LLM can naturally confirm them through conversation.
+
+The confidence floor is a minimum threshold applied at recall time, before facts enter the context builder:
+
+```
+ConfidenceFloor = 0.0   // Include everything (default). Uncertain facts appear with labels.
+ConfidenceFloor = 0.5   // Exclude uncertain facts. Only verified and inferred survive.
+ConfidenceFloor = 0.8   // Only verified facts. Maximum safety, minimum coverage.
+```
+
+The floor is applied in `RecallWithVector` as a candidate filter, alongside the existing `ExcludeExpired` and dimension mismatch checks. Facts below the floor never enter the ranking pipeline -- they are excluded at the database query level, not post-ranking. This is both a precision improvement (the ranker only scores facts the caller trusts) and a performance optimization (fewer candidates to embed and score).
+
+```
+Before ranking:
+  1. Load candidates with significance ordering (existing)
+  2. Exclude expired facts (existing)
+  3. Filter by dimension match (existing, Subsystem 3)
+  4. Filter by confidence floor (new)
+  5. Score via cosine + BM25 (existing)
+  6. Apply Ebbinghaus decay (Subsystem 9)
+  7. Kneedle cutoff (existing)
+```
+
+The floor filter is applied to both the recall pipeline and conscious/semantic tier loading. A floor of 0.5 means uncertain facts are invisible everywhere -- they do not appear in the user profile, in recalled context, or in any memory layer. They remain in the database and can be promoted above the floor through reinforcement or user confirmation (see below).
+
+##### The Barnum Paradox in Astrology and Tarot
+
+The Barnum/Forer effect defines a paradox specific to astrology, tarot, and personality-based applications that makes confidence gating not just useful but essential.
+
+**The paradox:** Users *expect and accept* vague, positive statements as personally accurate (4.3/5 accuracy rating for identical descriptions in Forer's study; 90% resonance for identical horoscopes in Gauquelin's replication). This is a feature of the domain, not a bug. A tarot reading *should* be somewhat general and open to interpretation -- "The Tower card suggests upheaval in your routine" is the correct level of specificity for a tarot character. The Barnum effect means users find this satisfying and personally relevant even when it is deliberately vague.
+
+**But:** Getting specific *remembered* facts wrong is catastrophic. If the AI says "your husband" to someone who is single, or "your job at TCS" to someone who works at Infosys, the user's trust collapses immediately. The user trusted the AI *because* it demonstrated personal knowledge (memory-grounded context), and a factual error in that personal knowledge is a much more severe trust violation than a generic response would be. The vague reading was accepted because the user perceived it as personalized. The wrong fact proves it was not.
+
+**The resolution: be vague by creative choice, not by confusion.**
+
+Confidence gating separates these two concerns cleanly:
+
+| Behavior | Source | Confidence Gate Role |
+|---|---|---|
+| Mystical, general readings ("The stars suggest a period of transformation...") | The tarot/astrology character's creative voice | Not controlled by confidence gating. This is the LLM's persona, not its memory. |
+| Specific personal references ("Since you're a Scorpio..." / "Given your sister's situation...") | MemG's recalled facts | Directly controlled by confidence gating. Only `[VERIFIED]` facts are stated. `[UNCERTAIN]` facts are confirmed or avoided. |
+
+The optimal experience for astrology/tarot applications:
+
+1. **Barnum-style readings** (vague, positive, open-ended) -- this is the character's job. The model generates mystical, interpretive language naturally. Confidence gating does not interfere with this.
+2. **Grounded personal references** -- when the model weaves in personal details ("As a Scorpio with Venus rising..." or "Considering your recent stress about work..."), those details come from memory and must be correct.
+3. **Never fabricated personal details** -- the model does not invent facts about the user's life. If it has no memory of the user's relationship status, it does not guess. It either asks or stays vague.
+
+Without confidence gating, the model has no way to distinguish between (2) and (3). It receives a flat list of facts and treats them all as ground truth. With confidence gating, the model knows which facts are grounded enough to reference directly, which to frame tentatively, and which to avoid entirely.
+
+**A concrete example:**
+
+Without confidence gating:
+```
+LLM receives: "User may have a sister"
+LLM generates: "The cards suggest your sister is going through a difficult time.
+                You should reach out to her this week."
+
+User has no sister. Trust destroyed.
+```
+
+With confidence gating:
+```
+LLM receives: "[UNCERTAIN] User may have a sister (single mention, 2026-03-01)"
+LLM instruction: "[UNCERTAIN] facts: NEVER state as fact. Ask to confirm if relevant."
+LLM generates: "The Tower card often relates to family dynamics.
+                I recall you may have mentioned a sibling -- is that right?
+                If so, this reading might have particular relevance for
+                that relationship."
+
+User can confirm or deny. Trust preserved either way.
+```
+
+The gated version is still mystical, still open-ended (Barnum effect intact), but it does not assert an unverified fact as truth. The user who does have a sister says "yes" and the conversation deepens. The user who does not says "no" and the model adapts. Both outcomes preserve trust.
+
+##### Confidence Calibration Over Time
+
+Confidence is not static. A fact's confidence score evolves through the lifecycle mechanisms already built into MemG (Technique 4, Subsystem 2, Subsystem 5). Confidence gating introduces two additional calibration paths that interact with the existing reinforcement and mutation systems.
+
+**Existing calibration paths (unchanged):**
+
+| Event | Confidence Effect | Source |
+|---|---|---|
+| Initial extraction | Set by the LLM extractor (0.0--1.0), clamped by validation (Subsystem 2) | Extraction pipeline |
+| Reinforcement (same fact re-extracted) | No direct change to confidence. Reinforcement count increments, TTL resets. | Deduplication pipeline (Technique 4) |
+| Slot conflict (new fact supersedes old) | Old fact reclassified to historical. New fact gets its own confidence from extraction. | Slot-based resolution (Subsystem 2) |
+
+**New calibration paths (confidence gating):**
+
+| Event | Confidence Effect | Mechanism |
+|---|---|---|
+| Reinforcement with confidence boost | Each reinforcement increases confidence by 0.1, capped at 1.0 | Modified reinforcement handler in the pipeline |
+| User confirmation | Confidence set to 1.0 | `ConfirmFact(entityID, factID)` API |
+| User correction | Old fact reclassified to historical. New fact created with confidence 1.0, source_role = "user" | `CorrectFact(entityID, factID, newContent)` API |
+
+**Reinforcement-based promotion:** The existing reinforcement mechanism (Technique 4) resets TTL and increments `ReinforcedCount`. Confidence gating extends this: when a fact is reinforced (re-extracted from a new conversation), its confidence score is increased by 0.1, clamped to a maximum of 1.0. This means a fact that starts at confidence 0.6 (inferred) and is reinforced twice rises to 0.8, crossing the threshold into the `[VERIFIED]` tier. The logic is straightforward -- if the extraction pipeline independently derives the same fact from multiple separate conversations, the probability that the fact is correct increases with each independent confirmation.
+
+```
+Extraction 1:  confidence = 0.6, tier = INFERRED
+Reinforced:    confidence = 0.7, tier = INFERRED
+Reinforced:    confidence = 0.8, tier = VERIFIED    (promoted)
+Reinforced:    confidence = 0.9, tier = VERIFIED
+User confirms: confidence = 1.0, tier = VERIFIED
+```
+
+The 0.1 increment is deliberately conservative. A fact needs at least 3 independent reinforcements to cross from the inferred floor (0.5) to the verified threshold (0.8). This prevents a single ambiguous re-mention from promoting an uncertain fact to verified status.
+
+**User confirmation:** The `ConfirmFact` API allows the user (or an application acting on the user's behalf) to explicitly mark a fact as correct. This sets confidence to 1.0 and, if the fact's source_role was `"assistant"`, updates it to `"user"` -- because the user's confirmation is itself a user-sourced affirmation. This is the fastest path from uncertain to verified: one user action bypasses the multi-reinforcement promotion ladder.
+
+User confirmation is the bridge to user-visible memory (referenced as Subsystem 14 in future work). When users can see their stored facts and mark them as correct or incorrect, the `ConfirmFact` API is the backend mechanism that updates confidence.
+
+**User correction:** The `CorrectFact` API replaces a wrong fact with the correct version. The old fact is reclassified to historical (preserving the timeline), and a new fact is created with the user-provided content, confidence 1.0, and source_role = `"user"`. This handles the case where a fact is not just uncertain but actively wrong: the user did not merely confirm "I have a sister" -- they corrected "I have a sister" to "I don't have a sister" or "That's my colleague, not my sister."
+
+**Confidence decay (optional):** When `ConfidenceDecay` is enabled, facts that are not reinforced or recalled lose 0.01 confidence per month. This is a slow, gentle degradation that only matters over very long timescales. A verified fact at 0.8 would take 30 months of zero reinforcement and zero recall to drop below 0.5 and enter the uncertain tier. The decay is applied by the background pruner on each cycle, alongside TTL-based expiry and stale summary pruning. Confidence decay is disabled by default because the existing significance-based decay (Technique 4) and Ebbinghaus retention (Subsystem 9) already handle staleness for most applications. Confidence decay is useful for applications with very long-lived entities (years of accumulated facts) where old inferences should gradually lose authority.
+
+##### The Hallucination Prevention Chain
+
+Confidence gating completes a six-layer defense-in-depth pipeline against hallucination. No single layer is sufficient -- each addresses a different failure mode, and together they cover the full path from extraction to generation.
+
+| Layer | Subsystem | What It Prevents | Failure Mode Without It |
+|---|---|---|---|
+| **1. Extraction gating** | Subsystem 2 | Low-confidence assistant inferences (< 0.7) are dropped before storage | The LLM's own guesses become durable facts |
+| **2. Confidence-weighted ranking** | Subsystem 3 | Low-confidence facts are penalized during recall scoring (up to 5%) | Uncertain facts rank equally with verified ones |
+| **3. Confidence labeling** | Subsystem 13 (this) | Each recalled fact carries a visible tier label in the prompt | The LLM treats all facts as equally authoritative |
+| **4. LLM instruction** | Subsystem 13 (this) | Explicit behavioral directives for each tier | The LLM acknowledges labels but does not change behavior |
+| **5. Confidence floor** | Subsystem 13 (this) | Callers exclude facts below a minimum confidence entirely | High-risk domains (medical, financial) cannot suppress uncertain facts |
+| **6. User correction** | Subsystem 13 (this) | Users fix wrong facts, setting confidence to 1.0 on corrections | Wrong facts persist indefinitely with no remediation path |
+
+**What each layer catches that the others miss:**
+
+- Layer 1 (extraction gating) stops bad facts at the source but cannot catch facts that were confidently extracted yet still wrong -- the LLM extractor is imperfect.
+- Layer 2 (ranking) demotes uncertain facts in search results but does not change how they appear in the prompt -- a demoted fact that still survives the Kneedle cutoff is presented as if verified.
+- Layers 3+4 (labeling + instruction) tell the model how to handle each fact, but cannot help if the caller's domain requires zero tolerance for uncertainty -- the fact is still in the prompt.
+- Layer 5 (confidence floor) removes uncertain facts entirely for high-risk callers, but is too aggressive for conversational domains where uncertain facts can be naturally confirmed through dialogue.
+- Layer 6 (user correction) is the only mechanism that fixes the ground truth itself, but it requires user action and cannot operate proactively.
+
+Together, the six layers create a pipeline where:
+
+1. Bad facts are filtered at extraction (Layer 1).
+2. Surviving uncertain facts are penalized in ranking (Layer 2).
+3. Facts that survive ranking are labeled with their confidence tier (Layer 3).
+4. The LLM is instructed how to handle each tier (Layer 4).
+5. High-risk callers can exclude uncertain facts entirely (Layer 5).
+6. Users can correct the ground truth when errors are discovered (Layer 6).
+
+No single layer handles all cases. The combination does.
+
+##### Interaction With Existing Subsystems
+
+| Subsystem | Relationship to Confidence Gating |
+|---|---|
+| **Subsystem 2** (Memory Truth) | Provides the `Confidence` and `SourceRole` fields that confidence gating reads. Extraction validation (max 500 chars, confidence clamping, assistant inference filtering) remains unchanged. The 0.7 confidence floor for assistant-sourced facts in the extraction pipeline is independent of the per-call `ConfidenceFloor` in recall. |
+| **Subsystem 3** (Retrieval Correctness) | The existing 5% confidence ranking penalty coexists with confidence gating. Ranking determines *which* facts are recalled; gating determines *how* they are presented. Both are useful. The ranking penalty reduces noise in the candidate set; the tier labels shape generation behavior. |
+| **Subsystem 5** (Memory Hygiene) | Recall usage tracking (`RecallCount`, `LastRecalledAt`) is unaffected. Confidence gating does not change which facts are tracked as recalled -- all injected facts, regardless of tier, increment their recall count. Staleness demotion operates on significance, not confidence, and is unaffected. |
+| **Subsystem 7** (Session Intelligence) | Turn-range summaries, artifacts, and entity mentions are not confidence-gated. These are session-scoped constructs with no `Confidence` field -- they are always injected without tier labels. Only long-term facts (identity, event, pattern) carry confidence metadata. |
+| **Subsystem 8** (Unified Recall) | `RecallAndBuildContext` applies the confidence floor during recall and passes the `ConfidenceLabeling` flag to `BuildContext`. No separate API call is needed -- confidence gating is wired into the existing unified entry point. |
+| **Subsystem 9** (Hierarchical Memory) | Confidence gating applies across all three tiers. Semantic memory facts (Tier 1) are labeled despite being always-on -- a semantic-tier fact at confidence 0.85 is labeled `[VERIFIED]`, and one that was promoted via reinforcement from 0.6 to 0.8 is also labeled `[VERIFIED]` with the same behavioral directive. Episodic memory facts (Tier 2) carry labels as expected. Working memory (Tier 3) items are not labeled (they are session-scoped, not confidence-scored). |
+
+##### Configuration
+
+| Setting | Default | Env Var | What It Controls |
+|---|---|---|---|
+| `ConfidenceLabeling` | true | `MEMG_CONFIDENCE_LABELING` | Add confidence tier labels (`[VERIFIED]`, `[INFERRED]`, `[UNCERTAIN]`) to injected facts and prepend the LLM instruction block |
+| `ConfidenceFloor` | 0.0 | `MEMG_CONFIDENCE_FLOOR` | Minimum confidence for a fact to be recalled. Facts below this threshold are excluded at the database level before ranking. |
+| `ConfidenceVerifiedThreshold` | 0.8 | `MEMG_CONFIDENCE_VERIFIED_THRESHOLD` | Minimum confidence for a fact to be labeled `[VERIFIED]`. Facts between this and the inferred threshold are `[INFERRED]`. |
+| `ConfidenceInferredThreshold` | 0.5 | `MEMG_CONFIDENCE_INFERRED_THRESHOLD` | Minimum confidence for a fact to be labeled `[INFERRED]`. Facts below this are `[UNCERTAIN]`. |
+| `ConfidenceDecay` | false | `MEMG_CONFIDENCE_DECAY` | Enable monthly confidence decay for facts that are not reinforced or recalled |
+| `ConfidenceDecayRate` | 0.01 | `MEMG_CONFIDENCE_DECAY_RATE` | Monthly confidence reduction for unreinforced, unrecalled facts (only applies when `ConfidenceDecay` is true) |
+| `SourceProvenance` | false | `MEMG_SOURCE_PROVENANCE` | Include source attribution and date metadata alongside confidence labels |
+| `ConfidenceReinforcementBoost` | 0.1 | `MEMG_CONFIDENCE_REINFORCEMENT_BOOST` | Amount by which confidence increases on each reinforcement (capped at 1.0) |
+
+**Backward compatibility:** When `ConfidenceLabeling` is false (or when upgrading from a version that predates this subsystem), the context builder produces output identical to the pre-gating format -- no tier labels, no instruction block. Facts with zero-value confidence (pre-existing facts that were never assigned a confidence score) default to 1.0 and are labeled `[VERIFIED]`, matching the existing behavior where all facts are treated as authoritative. This ensures that applications upgrading to a version with confidence gating see no behavior change until they opt in.
+
+##### SDK Interface
+
+The confidence gating configuration is exposed through the SDK as part of the existing recall and context-building APIs:
+
+```typescript
+// TypeScript SDK
+const context = await memg.buildMemoryContext(entityId, query, {
+  confidenceLabeling: true,
+  confidenceFloor: 0.5,
+  sourceProvenance: true,
+  confidenceVerifiedThreshold: 0.8,
+  confidenceInferredThreshold: 0.5
+});
+// Each fact in the result includes:
+// { content, confidence, tier, sourceRole, lastReinforced, reinforcedCount }
+
+// Promote fact confidence via user confirmation
+await memg.confirmFact(entityId, factId);
+// Sets confidence to 1.0, source_role to "user"
+
+// Replace a wrong fact with the correct version
+await memg.correctFact(entityId, factId, "User does not have a sister");
+// Old fact reclassified to historical
+// New fact created with confidence 1.0, source_role "user"
+```
+
+```python
+# Python SDK
+context = memg.build_memory_context(
+    entity_id=entity_id,
+    query=query,
+    confidence_labeling=True,
+    confidence_floor=0.5,
+    source_provenance=True
+)
+# context.facts -> list of facts with .confidence, .tier, .source_role
+
+memg.confirm_fact(entity_id, fact_id)
+memg.correct_fact(entity_id, fact_id, "User does not have a sister")
+```
+
+```go
+// Go library
+ctx := memory.RecallAndBuildContext(ctx, repo, embedder, engine, entityUUID, query, memory.RecallConfig{
+    ConfidenceLabeling: true,
+    ConfidenceFloor:    0.5,
+    SourceProvenance:   true,
+})
+
+// Confirm a fact
+memory.ConfirmFact(ctx, repo, entityUUID, factUUID)
+
+// Correct a fact
+memory.CorrectFact(ctx, repo, embedder, entityUUID, factUUID, "User does not have a sister")
+```
+
+##### Expected Impact
+
+**Trust preservation in personalization domains:** The primary impact is in applications where memory-grounded personalization creates an implicit trust contract with the user. By ensuring that only verified facts are stated as truth, inferred facts are framed tentatively, and uncertain facts are confirmed through natural dialogue, the system maintains the illusion of personalized intelligence that drives user engagement -- without the catastrophic trust failures that occur when the model asserts incorrect personal details.
+
+**Reduced hallucination surface:** The six-layer defense chain reduces the surface area for memory-sourced hallucination to a narrow failure mode: a fact that was extracted with high confidence, reinforced multiple times, labeled as `[VERIFIED]`, and still turns out to be wrong. This is possible (the user might have said something sarcastic that was extracted literally) but rare, and it is addressable through user correction (Layer 6). All other failure modes -- low-confidence guesses, single ambiguous mentions, assistant inferences, stale facts -- are handled by earlier layers.
+
+**Natural fact discovery:** Uncertain facts that are labeled and hedged in conversation create opportunities for organic fact confirmation. When the model says "I recall something about a sister -- is that right?", the user's response either confirms the fact (promoting it to verified) or corrects it (replacing it with the truth). Either outcome improves the fact store. Without confidence gating, the same fact would be stated as truth, the user would lose trust, and the correction would never happen because the user would not know the system had a wrong fact to correct.
+
+**Domain-appropriate safety tuning:** The `ConfidenceFloor` configuration gives operators a single lever to control the tradeoff between coverage and safety. Medical and financial applications set a high floor (0.8) and accept lower coverage in exchange for zero uncertain facts. Conversational and entertainment applications set a low floor (0.0) and accept some uncertainty in exchange for richer, more engaging interactions. The default (0.0 with labeling enabled) is the balanced choice: all facts are available, but the LLM knows which ones to hedge.
+
+---
+
+### Subsystem 14: User-Visible Memory And Co-Creation
+
+#### The Problem
+
+Memory in MemG is a black box to end users. Facts are extracted automatically from conversations, recalled silently into prompts, corrected only indirectly (by restating information and hoping the extraction pipeline catches the update), and never surfaced in a form the user can inspect, verify, or shape. The user has no way to:
+
+1. **See what the AI "knows" about them.** A user who told the AI "I work at TCS" three months ago has no way to confirm that fact is still stored, still current, and still being recalled. For all the user knows, the system forgot it, garbled it, or hardened an assistant guess into "works at Tata Steel" and has been confidently injecting that into every prompt since.
+2. **Correct wrong facts before they cause errors.** If the extraction pipeline misinterprets "I'm visiting my sister in Delhi" as "User lives in Delhi" (misclassifying a visit as a relocation), that error persists indefinitely. The user only discovers it when the AI says "Since you live in Delhi..." in an unrelated conversation. By then, the wrong fact has been reinforced, promoted in significance, and possibly displaced the correct one.
+3. **Contribute information the AI should know but hasn't extracted.** A user preparing for a job change might want the AI to keep that context in mind across all conversations. But the user has never explicitly said "I am preparing for a job change" in a conversation — they have discussed it obliquely, asked about resume formatting, and researched companies. The extraction pipeline may or may not have synthesized this into a coherent fact. The user cannot simply tell the system "here is something important about me" outside of conversational flow.
+4. **Feel ownership over the memory.** The memory profile is something that happened *to* the user, not something the user *built*. The user is a passive subject of extraction, not an active participant in knowledge creation.
+
+This passivity creates two concrete problems. The first is **correctness** — wrong facts persist undetected because there is no review surface. The extraction pipeline operates at 70-90% accuracy depending on the domain; the remaining 10-30% of errors accumulate silently, each one degrading every future response that recalls it. The second is **engagement** — the user has no investment in the system beyond chatting. The memory is the AI's memory, not the user's. There is no reason to prefer this AI over any other, because the user contributed nothing they would lose by switching.
+
+#### Research Basis
+
+The design of user-visible memory is grounded in behavioral economics research on ownership psychology, and in empirical observations from production AI companion systems that have experimented with different memory visibility models.
+
+**The IKEA Effect** (Norton, Mochon, Ariely, 2012; Journal of Consumer Psychology, 22(3), 453-460). In four experiments, participants who assembled IKEA furniture, folded origami, or built Lego sets valued their creations 63% higher than identical pre-assembled items, as measured by willingness-to-pay in incentive-compatible auctions. The effect is not mere exposure or endowment — participants who assembled an item and then had it disassembled (unsuccessful completion) showed no valuation premium. The mechanism is **effectance motivation** — a fundamental human drive, identified by White (1959), to produce desired outcomes in one's environment. When that drive is satisfied (successful assembly), the resulting object carries the psychological residue of competence.
+
+The digital application is direct: a user who corrects a wrong fact in their memory profile and then sees the AI use the corrected fact in its next response has experienced successful completion. They produced a desired outcome (the AI now knows the right thing). The IKEA effect predicts they will value that memory profile — and by extension, the AI system that hosts it — more than an equivalent profile they did not help build. Critically, the effect requires that the correction *actually works*. A correction that is silently ignored or overwritten by the next extraction cycle would constitute unsuccessful completion, producing no valuation premium and potentially negative sentiment.
+
+**The Endowment Effect** (Thaler, 1980; Journal of Economic Behavior and Organization, 1(1), 39-60). People demand approximately twice as much to give up an object they own as they would pay to acquire an identical object they do not own. This was demonstrated most famously with Cornell coffee mugs (Kahneman, Knetschel, and Thaler, 1990) — the median selling price ($5.25) was more than double the median buying price ($2.25) for the same mug, with the only difference being whether the participant currently possessed it.
+
+Applied to memory: once a user has built a memory profile over weeks or months — correcting facts, pinning important ones, adding notes, confirming inferences — that profile becomes *theirs* in a psychological sense. They would demand far more value from a competing system to justify abandoning it than they would require from the current system to keep using it. The endowment effect converts accumulated personalization into a natural retention mechanism. The key insight is that the effect applies to digital artifacts, not just physical objects — Shu and Peck (2011) demonstrated endowment effects for virtual objects that participants had customized, with effect sizes comparable to physical goods.
+
+**Commitment and Consistency** (Cialdini, 1984; "Influence: The Psychology of Persuasion"). Cialdini's principle states that humans have a deep drive to be consistent with their past commitments, and that this drive is strongest when the commitment is **active** (the person did something, not just agreed passively), **public** (others are aware of it), **effortful** (it required work), and **freely chosen** (not coerced). Evidence: patients who wrote down their own appointment times on the card (active, effortful) had 18% lower no-show rates than those whose appointments were written by the receptionist (passive).
+
+In the memory context, each user correction, pin, or note is an active, effortful, freely chosen commitment. The user is not merely chatting — they are explicitly telling the system "this is true about me." Consistency pressure means they are more likely to continue engaging with a system they have made these commitments to. More importantly, the commitment is to their *own identity description* — perhaps the most psychologically potent commitment possible. Contradicting your own stated identity ("I told the AI I work at Infosys, but actually I'll just use this other AI that thinks I work at TCS") creates cognitive dissonance that users naturally avoid.
+
+**Self-Disclosure Reciprocity in Human-Computer Interaction** (Ho, Hancock, and Miner, 2018; Journal of Communication, 68(4), 712-733). Across two studies, participants who self-disclosed personal information to a chatbot reported emotional benefits comparable to those who disclosed to a human confederate. The critical finding: the benefit was mediated by perceived reciprocity — participants needed to feel that the chatbot *acknowledged and used* their disclosure, not merely received it. A chatbot that asked a personal question and then ignored the answer produced no benefit.
+
+This maps directly to the correction and confirmation flow. When a user corrects "Works at TCS" to "Works at Infosys" and the AI subsequently says "Since you're at Infosys...", that is perceived reciprocity — the system acknowledged the correction by using it. The self-disclosure benefit (emotional value, willingness to continue disclosing) is activated. Conversely, a correction that is ignored or overwritten destroys perceived reciprocity and produces a worse outcome than never showing the user the fact at all.
+
+**Empirical Evidence from AI Companion Systems** (AI Companion Guides, 2025; comparative analysis of memory implementations). Three production AI companion systems have shipped user-visible memory with materially different designs, providing a natural experiment:
+
+| System | Memory Model | User Visibility | User Editing | Observed Behavior |
+|---|---|---|---|---|
+| **Replika** | Explicit "Facts about me" list | Full — users can see all stored facts | Limited — can view and delete, cannot add | Users report checking facts regularly; deletion of wrong facts is the most common action |
+| **Nomi** | Shared notes where AI actively logs facts | Full — AI writes notes in a shared space the user can see | Full — user can edit, add, and delete notes | Users co-create notes; engagement with the notes feature is second only to the chat itself |
+| **Kindroid** | Hybrid — auto-extraction plus manual notes | Full for notes, partial for auto-extracted facts | Full for notes, limited for auto-extracted | Manual notes outperform auto-extracted facts in user satisfaction surveys; users describe notes as "the thing that makes my AI feel like mine" |
+
+The consistent pattern across all three: **hybrid memory (auto-extraction + user-visible editing) outperforms pure auto-extraction**. The pure auto-extraction model (MemG's current approach) produces the weakest user engagement because users have no surface to verify or contribute to the system's knowledge. The hybrid model — where the system extracts automatically but the user can see, correct, and supplement — produces both better factual accuracy (users fix extraction errors) and higher engagement (users invest effort in building their profile).
+
+#### The Design — User-Facing Memory Operations
+
+User-visible memory introduces a new category of operations that expose the internal fact store to end users through controlled interfaces. These operations do not change how facts are stored, extracted, or recalled — they add a read/write surface on top of the existing fact lifecycle.
+
+##### Memory Visibility API
+
+Six new SDK operations give users direct access to their memory profile. Each operation maps to existing store interfaces and fact lifecycle mechanisms, requiring no changes to the core data model.
+
+**List visible memories.** Returns the user's stored facts, grouped by category (derived from the `tag` field), with confidence and status indicators. This is the primary "show me what you know" operation.
+
+```typescript
+const memories = await memg.list(entityId, {
+  userVisible: true,
+  groupBy: 'category'
+});
+// Returns memories grouped by tag/category:
+// {
+//   personal: [{ content: "Name is Priya", confidence: 1.0, source: "user", ... }],
+//   work: [{ content: "Works at TCS", confidence: 0.8, source: "extracted", ... }],
+//   preferences: [{ content: "Likes quiet restaurants", confidence: 0.6, source: "inferred", ... }]
+// }
+```
+
+The implementation uses `ListFactsMetadata` (Subsystem 4) to avoid loading embedding blobs — the user-facing view never needs vector data. Facts are filtered by the visibility rules described below (Fact Visibility Filtering) and grouped by tag. Within each group, facts are sorted by confidence descending, then by creation date descending. The `source` field in the response is derived from `SourceRole` and `Confidence`: user-stated facts (source_role = "user", confidence >= 0.9) are labeled "user", pipeline-extracted facts are labeled "extracted", and lower-confidence inferences are labeled "inferred". This three-level source labeling gives users an intuitive sense of how the AI acquired each piece of knowledge.
+
+**Correct a fact.** Replaces an incorrect fact with a corrected version, preserving the original as historical.
+
+```typescript
+await memg.correct(entityId, factId, {
+  newContent: "Works at Infosys, not TCS"
+});
+// Old fact -> temporal_status = "historical"
+// New fact -> confidence = 1.0, source_role = "user_explicit", temporal_status = "current"
+```
+
+The correction operation is a two-step atomic write:
+
+1. The existing fact's `TemporalStatus` is changed to `historical` via `UpdateTemporalStatus`. Its content, embedding, and all metadata are preserved — nothing is deleted. The historical fact remains available for timeline queries ("Have I ever worked at TCS?" can still be answered).
+2. A new fact is inserted with the corrected content, `confidence: 1.0`, `source_role: "user_explicit"`, and `temporal_status: "current"`. If the original fact had a `slot` (e.g., `"job"`), the new fact inherits it, ensuring future slot-based conflict resolution works correctly. The new fact is embedded using the configured embedding model before insertion.
+
+The `source_role` value `"user_explicit"` is distinct from `"user"` (extracted from user utterances) and `"assistant"` (extracted from assistant utterances). It signals that this fact was directly authored by the user outside of conversational flow. User-explicit facts receive the highest trust level in the system — they are never subject to low-confidence filtering (Subsystem 2), and their confidence is always 1.0 regardless of what the extraction pipeline might assign.
+
+If both steps succeed, the conscious context cache is invalidated via `OnFactStatusChanged` (Subsystem 4) so the corrected fact appears in the user profile immediately rather than waiting for the 30-second cache TTL.
+
+**Confirm a fact.** Validates an uncertain fact as correct, boosting its confidence and reinforcement count.
+
+```typescript
+await memg.confirm(entityId, factId);
+// confidence -> 1.0
+// reinforcement_count += 1
+// reinforced_at -> now
+```
+
+Confirmation is semantically equivalent to the user restating the fact in conversation — it triggers the same reinforcement mechanism (Technique 4). The fact's confidence is set to 1.0 (the user has verified it), its `reinforced_count` is incremented, its `reinforced_at` is set to the current time, and its TTL is reset based on its significance level. If the reinforcement count crosses the promotion threshold (5), the fact is promoted to `SignificanceHigh` and its TTL is cleared (never expires), just as it would be through conversational reinforcement.
+
+The key difference from conversational reinforcement is the confidence boost. When a duplicate extraction reinforces a fact, the confidence stays at whatever the extraction pipeline assigned. When a user confirms a fact, the confidence is set to 1.0 unconditionally — the user is the authoritative source. This distinction matters for confidence-weighted ranking (Subsystem 3): a user-confirmed fact receives no ranking penalty, while an extraction-confirmed fact retains its original confidence.
+
+**Pin a fact.** Marks a fact as permanently important, preventing decay and ensuring it remains in the semantic memory tier.
+
+```typescript
+await memg.pin(entityId, factId);
+// significance -> SignificanceHigh (10)
+// expires_at -> nil (never expires)
+// Qualifies for Tier 1 (Semantic Memory) regardless of original significance
+```
+
+Pinning is the user's override of the system's significance assessment. The extraction pipeline assigned the fact significance 3 ("User is preparing for a job change" — the pipeline treated it as a low-significance transient note), but the user considers it critically important. Pinning sets significance to `SignificanceHigh` (10), clears the TTL (the fact never expires), and ensures it qualifies for Tier 1 semantic memory (Subsystem 9) on every request. The existing `UpdateSignificance` store method handles the significance change; TTL clearing uses the same mechanism as significance-based expiry but sets `ExpiresAt` to nil.
+
+A pinned fact is annotated in the user-facing memory profile and in the system prompt:
+
+```
+User profile:
+- User is allergic to peanuts
+- User works at Infosys
+- [Pinned] Preparing for job change -- keep in mind across conversations
+```
+
+The `[Pinned]` annotation tells the LLM that this fact has special user-designated importance. Without annotation, the LLM would treat a pinned medium-significance fact the same as any other high-significance fact — which is correct for recall ranking but loses the user's intent signal. The annotation conveys: "the user specifically asked me to remember this."
+
+**Unpin** reverses the operation, restoring the fact's original significance and recalculating its TTL. The original significance is stored in a `pre_pin_significance` metadata field set at pin time, preventing information loss.
+
+**Add a user note.** Stores a user-authored fact that did not originate from conversational extraction.
+
+```typescript
+await memg.addUserNote(entityId, {
+  content: "I'm preparing for a job change, keep this in mind",
+  tag: "work"
+});
+// Stored as: type = "identity", confidence = 1.0, source_role = "user_explicit"
+// Embedded using the configured embedding model
+// Available for both semantic and episodic recall immediately
+```
+
+User notes bypass the extraction pipeline entirely. The user provides the content directly; the system embeds it, assigns it the default metadata (`type: identity`, `temporal_status: current`, `significance: SignificanceMedium`), and inserts it. The user can optionally specify a `tag` for categorization and a `significance` override for importance.
+
+Notes are the most direct expression of the user's intent. They are not filtered, validated, or modified by the extraction pipeline — the user said it, so it is stored as-is. The only processing is embedding generation (necessary for recall) and content key computation (necessary for deduplication if the user adds the same note twice). If the user adds a note that conflicts with an existing slotted fact, normal slot-based conflict resolution (Subsystem 2) applies — the existing fact is reclassified to historical, the note becomes current.
+
+**Delete a fact.** Permanently removes a fact from the system.
+
+```typescript
+await memg.delete(entityId, factId);
+// Fact is permanently removed from all stores
+// Not reclassified to historical -- deleted entirely
+```
+
+Deletion is the nuclear option. Unlike correction (which preserves the original as historical) or unpinning (which restores original significance), deletion removes the fact from the database entirely. It is not recoverable. This operation exists for two reasons: GDPR Article 17 (right to erasure) requires the ability to permanently delete personal data on request, and some facts are simply wrong in a way that historical preservation does not serve — a hallucinated fact like "User has three children" (when the user has none) should not persist as historical because it was never true.
+
+The `DeleteFact` store method (already present in `FactManager`) handles the deletion. The conscious context cache is invalidated after deletion.
+
+##### User Memory Profile
+
+The memory profile is the user-facing view of their AI's accumulated knowledge. It is not a new data structure — it is a read projection over the existing fact store, organized for human comprehension rather than machine recall.
+
+The profile is organized by category (derived from fact `tag` values), with visual indicators for confidence level, source, and user-designated status:
+
+```
+About You:
+  [verified] Name: Priya (verified by you)
+  [verified] Lives in: Mumbai (verified by you)
+  [verified] Works at: Infosys (corrected by you on Mar 15)
+  [uncertain] Might have a sister (uncertain, confidence 0.55 -- tap to confirm or deny)
+
+Your Preferences:
+  [verified] Vegetarian (verified, mentioned in 5 conversations)
+  [confident] Likes quiet restaurants (inferred from 3 conversations)
+  [pinned] Preparing for job change (pinned by you)
+
+Your History:
+  Previously worked at TCS (historical, corrected Mar 15)
+  Previously lived in Delhi (historical)
+  Asked about career change on March 5 (event)
+```
+
+The profile exposes four distinct confidence tiers to the user:
+
+| Tier | Indicator | Criteria | User Action Available |
+|---|---|---|---|
+| **Verified** | [verified] | `confidence = 1.0` AND (`source_role = "user_explicit"` OR `reinforced_count >= 3`) | Edit, pin, delete |
+| **Confident** | (none) | `confidence >= 0.8` AND `source_role = "user"` | Confirm, edit, pin, delete |
+| **Uncertain** | [uncertain] | `confidence < 0.8` OR `source_role = "assistant"` | Confirm, deny, edit, pin, delete |
+| **Historical** | (dimmed) | `temporal_status = "historical"` | Delete |
+
+The "deny" action on uncertain facts is a delete that also records the denial — the system does not re-extract a denied fact from the same conversation. This is implemented by inserting the denied fact's content key into a per-entity deny list (stored in the `mg_entity_deny` table). The extraction pipeline checks this list before inserting new facts; if a content key match is found within the deny list, the fact is silently dropped. The deny list prevents the frustrating loop where a user denies a wrong fact, the extraction pipeline re-extracts it from the same conversation on the next turn, and the fact reappears.
+
+##### The Retention Loop
+
+User-visible memory creates a self-reinforcing psychological retention loop where each step increases the user's investment in the system, making the next step more likely:
+
+```
+1. User chats naturally
+   -> AI extracts memories automatically (existing pipeline)
+        |
+        v
+2. User sees memory profile growing
+   -> ENDOWMENT EFFECT activates ("this is MY AI, it knows me")
+        |
+        v
+3. User corrects a wrong fact, adds a note, pins something important
+   -> IKEA EFFECT activates ("I built this, I shaped it")
+   -> COMMITMENT made (active, effortful, freely chosen)
+        |
+        v
+4. AI uses the correction in its next response
+   -> SELF-DISCLOSURE RECIPROCITY activates ("it actually listened")
+   -> IKEA Effect reinforced (successful completion confirmed)
+        |
+        v
+5. User has invested effort they cannot transfer
+   -> COMMITMENT AND CONSISTENCY pressure ("I can't switch, I'd lose all this")
+   -> ENDOWMENT increases with each correction (accumulated value)
+        |
+        v
+6. User returns more often, chats more, contributes more
+   -> More memories extracted, more corrections made, deeper profile
+   -> Loop restarts at step 2 with a stronger base
+```
+
+Each step reinforces the next. The critical transition is step 4 — the AI must *visibly use* the user's correction. If the correction is silently absorbed but never manifests in a response, the IKEA effect collapses (unsuccessful completion) and reciprocity fails (the chatbot acknowledged but did not use the disclosure). The system achieves this naturally: corrected facts have confidence 1.0 and source_role "user_explicit", making them the highest-trust facts in the store. They rank at the top of conscious mode, at the top of the semantic tier, and they receive no confidence penalty in hybrid ranking. The LLM sees them first and uses them preferentially.
+
+The loop compounds over time. A user who has been through the cycle 50 times (50 corrections, pins, or notes over several months) has accumulated a qualitatively different relationship with the system than a user who has only chatted. The first user has a co-created memory profile — a jointly authored description of who they are. The second user has a conversation history. The distinction is not just psychological; the first user's AI actually performs better because its fact store contains fewer errors and more deliberate knowledge.
+
+##### Switching Cost as Retention
+
+Traditional digital products retain users through four mechanisms: content libraries (Netflix), social graphs (Facebook), habitual engagement patterns (Instagram), and workflow integration (Slack). Memory-based AI applications introduce a fifth: **accumulated personalization**.
+
+A user who has:
+- Corrected 15 facts over 3 months
+- Pinned 5 important long-term contexts
+- Added 8 explicit notes about preferences and goals
+- Had 100 conversations produce extracted knowledge
+- Confirmed 20 uncertain facts as accurate
+- Denied 6 wrong inferences
+
+...has invested dozens of deliberate actions in training their AI. The resulting memory profile is not transferable — it exists within this system's fact store, shaped by this system's extraction pipeline, organized by this system's slot and tag taxonomy. Switching to a competitor means starting from a blank slate. The user loses not just the data (which is exportable) but the *curation effort* — the hours spent reviewing, correcting, and shaping the AI's understanding. That effort cannot be exported.
+
+The endowment effect predicts that users will overvalue this accumulated personalization relative to its objective worth. A user whose AI knows 200 facts about them (of which they personally shaped 50) will perceive that profile as worth more than an equivalent 200-fact profile offered by a competitor — even if the competitor's profile were objectively identical. The difference is ownership: "I built this one."
+
+**This is not a dark pattern if done ethically.** Three conditions distinguish legitimate switching costs from manipulative lock-in:
+
+1. **The value is genuine.** The AI actually performs better with user corrections. A corrected fact store produces more accurate recall, which produces better responses. The user's effort creates real value, not artificial friction.
+2. **Data is exportable.** Users can export their complete memory profile in standard JSON format (see Memory Export below). The switching cost is the curation effort, not the data itself. A competing system that accepts MemG's export format would receive the raw facts — though not the user's subjective investment in them.
+3. **The switching cost is proportional to value received.** A user who made 50 corrections received 50 improvements to their AI's accuracy. The switching cost (losing those 50 corrections) is proportional to the value received (50 better responses). This is the natural relationship between effort and value, not an artificial barrier.
+
+##### User Corrections Improve System Quality
+
+User corrections are not merely a retention mechanism — they are the highest-quality training signal available to the system. Every correction is explicit (the user stated what is true), intentional (the user chose to make the correction), and authoritative (the user is the ground truth about themselves). No extraction pipeline, regardless of sophistication, can match this signal quality.
+
+When a user corrects "Works at TCS" to "Works at Infosys", the following cascade occurs:
+
+**1. Immediate fact store improvement.** The wrong fact is reclassified to historical, the correct fact is inserted with confidence 1.0. Every future recall query that touches this slot now returns the correct answer. This is a permanent improvement — the error is fixed, not papered over.
+
+**2. Conscious mode improvement.** If the old fact was in the semantic tier (Subsystem 9), the cache invalidation ensures the corrected fact replaces it within the current request. The LLM immediately starts using the correct fact in its identity context. There is no delay — the next response the user receives will reflect the correction.
+
+**3. Downstream extraction improvement.** The correct fact is now in the conscious set, which means it is injected into every prompt. When the extraction pipeline processes future conversations, the LLM performing extraction sees "User works at Infosys" in its context. If the user mentions work in a future conversation, the extraction LLM is less likely to produce a conflicting fact because the correct fact is already visible in the prompt. This is not fine-tuning — it is context-driven self-correction. The extraction model's behavior improves because its input (the prompt) now contains better information.
+
+**4. Slot conflict prevention.** The corrected fact occupies the `"job"` slot. If a future extraction produces "Works at TCS" again (from an old conversation being reprocessed, or from an ambiguous reference), the slot-based conflict resolution (Subsystem 2) will detect the conflict and reclassify the newly extracted fact as historical, preserving the user's correction. The user's explicit correction takes precedence over extraction because it has confidence 1.0 and is the current slot occupant.
+
+**5. Aggregate quality signal.** Across all users, correction patterns reveal systematic extraction failures. If many users correct the same type of fact (e.g., "visiting X" misinterpreted as "lives in X"), this is a signal that the extraction prompt or the slot assignment logic needs improvement. While MemG does not currently aggregate correction signals across entities, the data is available: facts with `source_role = "user_explicit"` that share a slot with a historical fact that has `source_role = "user"` represent corrections of extraction errors. An operator can query this pattern to identify systematic extraction weaknesses.
+
+The virtuous cycle is clear: more users correcting facts means a more accurate fact store per user, which means better recall, which means better LLM responses, which means more user trust, which means more willingness to correct future errors. This is the opposite of the current silent-error cycle, where extraction mistakes accumulate undetected and progressively degrade response quality.
+
+##### Privacy and Control
+
+User-visible memory creates a transparency surface that addresses four privacy requirements simultaneously:
+
+**Full visibility.** Users can see everything the AI knows about them. There is no hidden knowledge — every fact that has ever been injected into a prompt is visible in the memory profile (subject to the visibility filtering rules below). This satisfies the principle of transparency: the user is never surprised by what the AI knows, because they can always check.
+
+**Right to deletion.** Users can delete any individual fact. Deletion is permanent — the fact is removed from the database, not reclassified to historical. This satisfies GDPR Article 17 (right to erasure) and equivalent privacy regulations. The `DeleteFact` operation is already present in the `FactManager` interface; the user-visible memory API exposes it through the SDK.
+
+**Extraction preferences.** Users can configure which categories of knowledge the extraction pipeline is allowed to extract and retain. For example, a user might say "don't remember my financial details" — this is implemented as a per-entity tag exclusion list stored in the `mg_entity_preferences` table:
+
+```typescript
+await memg.setExtractionPreferences(entityId, {
+  excludeTags: ['financial', 'medical'],
+  patternVisibility: false
+});
+```
+
+When the extraction pipeline produces a fact tagged as "financial" for this entity, the fact is silently dropped before insertion. The exclusion list is checked after extraction validation (Subsystem 2) and before storage. Existing facts with excluded tags are not retroactively deleted — the user must delete them manually via the memory profile. This prevents the dangerous scenario where a user changes their preferences and unknowingly triggers mass deletion of previously consented knowledge.
+
+**Data export.** Users can export their complete memory profile in a standard JSON format:
+
+```typescript
+const exported = await memg.exportMemory(entityId);
+// Returns:
+// {
+//   facts: [
+//     { content: "Works at Infosys", type: "identity", tag: "work",
+//       confidence: 1.0, source_role: "user_explicit", created_at: "...",
+//       temporal_status: "current", significance: 8, reinforced_count: 3 },
+//     ...
+//   ],
+//   summaries: [
+//     { conversation_date: "2026-03-15", summary: "Discussed trip to Japan...", ... },
+//     ...
+//   ],
+//   graph: [
+//     { subject: "User", predicate: "works_at", object: "Infosys", ... },
+//     ...
+//   ],
+//   preferences: {
+//     excludeTags: ["financial"],
+//     patternVisibility: false
+//   },
+//   metadata: {
+//     entity_id: "...",
+//     exported_at: "2026-03-29T12:00:00Z",
+//     fact_count: 247,
+//     summary_count: 32,
+//     format_version: "1.0"
+//   }
+// }
+```
+
+The export includes facts (without embeddings — those are model-specific and non-portable), conversation summaries (the narrative layer), knowledge graph triples (if the graph module is enabled), extraction preferences, and metadata. Embeddings are excluded because they are tied to the specific embedding model used by the exporting system — a different system would need to re-embed the text content using its own model. The `format_version` field enables future schema evolution without breaking importers.
+
+##### Fact Visibility Filtering
+
+Not all facts should be shown to users. Some facts are system-internal (embedding model metadata, content key hashes) and would be meaningless to a human. Others are derived from behavioral analysis and could be sensitive or unsettling ("User tends to be most emotional on Sundays" or "User's language complexity decreases in evening conversations").
+
+The visibility model uses a three-category classification:
+
+| Category | Visibility | Examples | Rationale |
+|---|---|---|---|
+| **Identity facts** | Always visible | "Name is Priya", "Works at Infosys", "Vegetarian" | These are about who the user is — hiding them violates transparency |
+| **Event facts** | Always visible | "Ate sushi on March 12", "Had job interview on March 10" | These are about what happened — the user was there, they know |
+| **Pattern facts** | Visible only when `PatternVisibility` is enabled | "Tends to eat pasta for breakfast", "Usually asks about Python" | These are derived inferences that may feel surveillance-like; opt-in |
+
+The default is: identity and event facts visible, pattern facts hidden. This errs on the side of showing too little rather than too much. A user who sees "Tends to be most emotional on Sundays" in their memory profile may feel monitored rather than understood — even if the pattern is accurate and useful for response calibration. The `PatternVisibility` configuration flag (default: `false`) allows applications that want full transparency to enable it.
+
+Within visible categories, additional filtering rules apply:
+
+- Facts with empty content are never shown (extraction artifacts).
+- Facts with `source_role = "assistant"` and `confidence < 0.5` are never shown (low-confidence assistant guesses that survived validation but are too uncertain to present as knowledge).
+- System-internal facts (if any exist — currently none do, but the filter is future-proof) are identified by a reserved tag prefix (`"_system"`) and are never shown.
+
+The visibility filter runs in the SDK layer, not the store layer. The store returns all facts matching the query; the SDK filters based on visibility rules before presenting them to the user. This keeps the store interface unchanged and allows different SDK integrations to apply different visibility policies (a developer debugging tool might show everything; a consumer-facing app might show only verified facts).
+
+##### The Deny List — Preventing Re-Extraction of Rejected Facts
+
+When a user denies an uncertain fact ("No, I do not have a sister"), the system must ensure that fact does not reappear. Without intervention, the extraction pipeline may re-extract the same inference from the same conversation on a future processing pass, or from a similar conversational pattern in a new session.
+
+The deny list is a per-entity set of content keys stored in the `mg_entity_deny` table:
+
+```
+mg_entity_deny
+  uuid          TEXT PRIMARY KEY
+  entity_uuid   TEXT NOT NULL
+  content_key   TEXT NOT NULL
+  denied_at     TIMESTAMP NOT NULL
+  original_content TEXT NOT NULL   -- human-readable record of what was denied
+```
+
+When the user denies a fact:
+
+1. The fact is deleted from the fact store (permanent removal, not reclassification).
+2. The fact's content key is inserted into the deny list with the current timestamp and the original content text.
+3. On all future extraction jobs for this entity, the pipeline checks each candidate fact's content key against the deny list before insertion. Matches are silently dropped.
+
+The deny list uses content keys (normalized hashes), not raw content matching. This means "User has a sister" and "user has a sister" (different capitalization) produce the same content key and are both caught by a single deny entry. However, "User has a sister named Priya" would produce a different content key and would not be caught — the deny is for the specific factual claim, not for any mention of the concept. This is deliberate: the user denied having a sister, not the concept of sisters. If the user later says "My friend's sister visited," that should extract normally.
+
+The deny list has no TTL — denied facts stay denied indefinitely. If the user's situation changes (they discover they have a half-sister), they can add a new note via `addUserNote` that overrides the denial with fresh, user-authored knowledge. The deny list prevents re-extraction; it does not prevent deliberate user-authored facts.
+
+##### Configuration
+
+| Setting | Default | Env Var | What It Controls |
+|---|---|---|---|
+| `UserVisibleMemory` | false | `MEMG_USER_VISIBLE_MEMORY` | Master switch for user-facing memory operations. When false, all user-visible endpoints return 403. |
+| `UserCorrections` | true | `MEMG_USER_CORRECTIONS` | Allow users to correct facts. Requires `UserVisibleMemory = true`. |
+| `UserPinning` | true | `MEMG_USER_PINNING` | Allow users to pin facts (prevent decay, promote to semantic tier). Requires `UserVisibleMemory = true`. |
+| `UserNotes` | true | `MEMG_USER_NOTES` | Allow users to add explicit notes that bypass the extraction pipeline. Requires `UserVisibleMemory = true`. |
+| `PatternVisibility` | false | `MEMG_PATTERN_VISIBILITY` | Show pattern-type facts in the user memory profile. When false, only identity and event facts are visible. |
+| `MemoryExport` | true | `MEMG_MEMORY_EXPORT` | Allow users to export their complete memory profile as JSON. Required for GDPR Article 20 (data portability) compliance. |
+| `DenyListEnabled` | true | `MEMG_DENY_LIST_ENABLED` | Maintain a per-entity deny list that prevents re-extraction of user-rejected facts. |
+
+`UserVisibleMemory` defaults to `false` because user-visible memory requires UI integration — enabling it without a corresponding interface would expose raw API endpoints with no user-facing context. Applications that build a memory profile UI should enable this flag at deployment time.
+
+All sub-settings (`UserCorrections`, `UserPinning`, `UserNotes`) default to `true` but are gated by the master switch. This means enabling `UserVisibleMemory` immediately enables the full feature set. Applications that want a read-only memory view (users can see but not edit) set `UserCorrections = false`, `UserPinning = false`, `UserNotes = false` — the list endpoint works, but all mutation endpoints return 403.
+
+##### SDK Interface (Complete)
+
+```typescript
+// TypeScript SDK
+
+// List memory profile
+const profile = await memg.list(entityId, { userVisible: true, groupBy: 'category' });
+
+// Correct a fact
+await memg.correct(entityId, factId, { newContent: "Works at Infosys" });
+
+// Confirm a fact (boost confidence to 1.0, reinforce)
+await memg.confirm(entityId, factId);
+
+// Pin a fact (never decays, always in semantic tier)
+await memg.pin(entityId, factId);
+
+// Unpin a fact (restore original significance and TTL)
+await memg.unpin(entityId, factId);
+
+// Add user note (bypass extraction pipeline)
+await memg.addUserNote(entityId, { content: "...", tag: "work" });
+
+// Deny a fact (delete and prevent re-extraction)
+await memg.deny(entityId, factId);
+
+// Delete a fact (permanent removal, no deny list entry)
+await memg.delete(entityId, factId);
+
+// Export all memories
+const exported = await memg.exportMemory(entityId);
+// Returns: { facts: [...], summaries: [...], graph: [...], preferences: {...}, metadata: {...} }
+
+// Configure extraction preferences
+await memg.setExtractionPreferences(entityId, {
+  excludeTags: ['financial'],
+  patternVisibility: false
+});
+```
+
+```python
+# Python SDK
+
+profile = memg.list_memory(entity_id, user_visible=True, group_by="category")
+
+memg.correct_fact(entity_id, fact_id, new_content="Works at Infosys")
+
+memg.confirm_fact(entity_id, fact_id)
+
+memg.pin_fact(entity_id, fact_id)
+
+memg.unpin_fact(entity_id, fact_id)
+
+memg.add_user_note(entity_id, content="...", tag="work")
+
+memg.deny_fact(entity_id, fact_id)
+
+memg.delete_fact(entity_id, fact_id)
+
+exported = memg.export_memory(entity_id)
+
+memg.set_extraction_preferences(entity_id, exclude_tags=["financial"], pattern_visibility=False)
+```
+
+```go
+// Go library
+
+profile, err := m.ListMemoryProfile(ctx, entityUUID, memg.ProfileOptions{
+    UserVisible: true,
+    GroupBy:     "category",
+})
+
+err = m.CorrectFact(ctx, entityUUID, factUUID, "Works at Infosys")
+
+err = m.ConfirmFact(ctx, entityUUID, factUUID)
+
+err = m.PinFact(ctx, entityUUID, factUUID)
+
+err = m.UnpinFact(ctx, entityUUID, factUUID)
+
+err = m.AddUserNote(ctx, entityUUID, store.UserNote{Content: "...", Tag: "work"})
+
+err = m.DenyFact(ctx, entityUUID, factUUID)
+
+err = m.DeleteFact(ctx, entityUUID, factUUID)
+
+exported, err := m.ExportMemory(ctx, entityUUID)
+
+err = m.SetExtractionPreferences(ctx, entityUUID, store.ExtractionPreferences{
+    ExcludeTags:       []string{"financial"},
+    PatternVisibility: false,
+})
+```
+
+##### Interaction With Existing Subsystems
+
+| Subsystem | Relationship to User-Visible Memory |
+|---|---|
+| **Subsystem 1** (Chat Boundaries) | No changes. User memory operations are out-of-band — they do not flow through the session/conversation path. |
+| **Subsystem 2** (Memory Truth) | User corrections use the same `UpdateTemporalStatus` and slot-based conflict resolution. User-explicit facts (`source_role = "user_explicit"`) are never subject to low-confidence filtering. The deny list adds a new pre-insertion check in the extraction validation pipeline. |
+| **Subsystem 3** (Retrieval Correctness) | User-confirmed facts (confidence 1.0) receive no confidence penalty in ranking. User-explicit facts rank at the top of hybrid results when relevance scores are close. |
+| **Subsystem 4** (Runtime Efficiency) | The `ListFactsMetadata` method serves the memory profile endpoint without loading embeddings. Conscious cache invalidation on corrections and deletions ensures immediate profile freshness. |
+| **Subsystem 5** (Memory Hygiene) | Pinned facts bypass staleness demotion entirely. Confirmed facts reset their staleness clock (via `reinforced_at` update). The consolidator skips user-explicit facts — they are never consolidated into patterns because their individual content is intentional. |
+| **Subsystem 7** (Session Intelligence) | No direct interaction. User notes are not artifacts and do not flow through the turn-range summary pipeline. They are standalone facts that enter the fact store directly. |
+| **Subsystem 8** (Unified Recall) | `RecallAndBuildContext` is unchanged. User-explicit facts participate in recall like any other fact — they just rank higher due to confidence 1.0 and are never filtered by the deny list (the deny list only blocks extraction, not existing facts). |
+| **Subsystem 9** (Hierarchical Memory) | Pinned facts qualify for Tier 1 (semantic memory) regardless of original significance. User-explicit notes with significance >= 8 also qualify. The semantic tier loading query adds `OR source_role = 'user_explicit' AND pinned = true` to its filter. |
+| **Subsystem 12** (Proactive Surfacing) | User-explicit facts are never candidates for proactive surfacing triggers — the user already knows what they explicitly told the system. Pinned facts, however, can inform proactive behavior: a pinned "preparing for job change" fact makes career-related proactive triggers more likely when the conversation touches work topics. |
+| **Subsystem 13** (Confidence-Gated Generation) | User-explicit facts are always labeled `[VERIFIED]` in confidence-gated prompts, regardless of their original extraction confidence. The confidence gating pipeline treats `source_role = "user_explicit"` as the highest trust tier — these facts are never hedged, softened, or presented as uncertain. |
+
+##### Expected Impact
+
+**Factual accuracy.** The most direct impact. Every user correction removes one wrong fact and installs one correct fact. Across an active user base, hundreds of corrections per day translate to a measurably cleaner fact store. The improvement compounds: each corrected fact prevents future extraction errors (because the correct fact is now in the conscious set), prevents downstream reasoning errors (because the LLM no longer receives wrong context), and prevents user trust erosion (because the user no longer encounters confidently wrong statements). For a system operating at 80% extraction accuracy, user corrections on even 20% of errors would raise effective accuracy to 96% — a threshold where users perceive the AI as "knowing them well" rather than "getting things wrong sometimes."
+
+**User retention.** The psychological mechanisms described above — endowment, IKEA effect, commitment, reciprocity — are well-studied and have large effect sizes. The IKEA effect alone produces a 63% valuation premium. Endowment produces a 2x selling-vs-buying price gap. These effects are not speculative; they are among the most replicated findings in behavioral economics. While the exact retention impact depends on the application and user population, the directional prediction is unambiguous: users who interact with their memory profile will retain at longer rates than users who only chat.
+
+**System differentiation.** Most AI memory systems are pure auto-extraction — the user chats and the system remembers (or forgets) silently. User-visible memory with co-creation is a materially different product experience. The user's relationship shifts from "using an AI" to "building an AI that knows me." This is the same shift that made Nomi's shared notes feature its highest-engagement feature despite being the simplest technically — the value is in the participation, not the technology.
+
+**Trust through transparency.** Users who can see what the AI knows about them report higher trust than users who cannot, even when the underlying fact store is identical. This is the transparency paradox: showing users that the AI made mistakes (some facts are wrong, some are uncertain) actually *increases* trust, because it demonstrates that the system is honest about its limitations rather than hiding them behind a black box. The memory profile is a trust surface — every uncertain fact displayed is an implicit admission that the system is not perfect, which paradoxically makes the system feel more reliable than one that projects false omniscience.
+
+---
+
+## Research Foundation
+
+This section documents the academic and industry research that informs MemG's architecture. Each entry includes the citation, key finding, and which subsystem(s) it influences. The goal is traceability — every major design decision in the system should be traceable back to either a demonstrated result in the literature or a well-established principle from cognitive psychology, information retrieval, or systems research.
+
+The entries are grouped by domain. Within each domain, entries are ordered by relevance to the architecture, not by publication date.
+
+---
+
+### Memory Systems in AI
+
+These papers address the core problem MemG exists to solve: giving LLMs persistent, structured, and retrievable memory across conversations.
+
+| Paper | Authors | Venue | Key Finding | Informs |
+|---|---|---|---|---|
+| MemGPT: Towards LLMs as Operating Systems | Packer, Wooders, Lin, Fang, Patil, Gonzalez | arXiv:2310.08560, 2023 | OS-inspired virtual context management with two-tier memory enables unbounded context through intelligent paging | Subsystem 9 (Hierarchical Memory) |
+| MemoryBank: Enhancing LLMs with Long-Term Memory | Zhong et al. | AAAI 2024 | Ebbinghaus Forgetting Curve for memory decay; "SiliconFriend" AI companion tuned for empathy | Subsystem 9, 11 |
+| Generative Agents: Interactive Simulacra | Park, O'Brien, Cai, Morris, Liang, Bernstein | UIST 2023, arXiv:2304.03442 | Complete experience records synthesized into reflections with dynamic retrieval; agents autonomously coordinate social activities | Subsystem 10, 12 |
+| A-MEM: Agentic Memory for LLM Agents | Xu, Liang et al. | NeurIPS 2025, arXiv:2502.12110 | Zettelkasten-style self-organizing memory with LLM-driven linking; doubles multi-hop reasoning performance | Subsystem 10 |
+| Mem0: Production-Ready AI Agents with Scalable Long-Term Memory | Chhikara et al. | arXiv:2504.19413, 2025 | Graph memory captures relational structures; 26% improvement over OpenAI; 91% lower p95 latency; >90% token savings | Subsystem 9, 10, 12 |
+| HippoRAG: Neurobiologically Inspired Long-Term Memory | Gutierrez, Shu et al. | NeurIPS 2024, arXiv:2405.14831 | KG + Personalized PageRank mimicking neocortex/hippocampus; 20% improvement on multi-hop QA; 10-30x cheaper | Subsystem 10 |
+| Memoria: Scalable Agentic Memory Framework | — | arXiv:2512.12686, 2025 | 81.95% accuracy using only 1,294 tokens per query; 67% fewer tokens than competitors | Subsystem 9 |
+| A Machine with Short-Term, Episodic, and Semantic Memory | — | AAAI 2023, arXiv:2212.02098 | Agents with both semantic and episodic memory significantly outperform single-type memory | Subsystem 9, 10 |
+| AriGraph | Anokhin, Semenov | IJCAI 2025, arXiv:2407.04363 | Semantic KG + episodic vertices outperform unstructured memory for planning and decision-making | Subsystem 10 |
+
+**How these inform MemG:** The MemGPT paging model directly inspired the hierarchical memory architecture (Subsystem 9), where facts are tiered into semantic, episodic, and working memory with independent token budgets — analogous to MemGPT's main context vs. external storage, but with three tiers instead of two. MemoryBank's application of the Ebbinghaus Forgetting Curve validates the significance-based decay mechanism in Technique 4 — the exponential decay formula `R = e^(-t/S)` is the mathematical backbone of MemG's TTL calculations. The Generative Agents paper demonstrated that synthesizing raw experiences into higher-level reflections (what they call "reflection") dramatically improves agent coherence — this is exactly what MemG's conversation summarization (Technique 5) and turn-range summaries (Subsystem 7) do. A-MEM's Zettelkasten-inspired self-organizing memory validates the knowledge graph approach where facts link to related facts, informing the graph triple extraction in the augmentation pipeline. Mem0's production results (26% improvement, 91% latency reduction) provide the strongest industry validation that the hybrid graph + vector approach MemG uses is not just theoretically sound but measurably superior at scale. HippoRAG's neurobiological framing — neocortex for semantic indexing, hippocampus for associative retrieval — maps directly onto MemG's separation between embedding-based search and knowledge graph traversal. The AAAI 2023 paper on multi-type memory provides the clearest experimental evidence that combining semantic and episodic memory outperforms either alone, justifying the multi-tier architecture rather than a simpler flat store. AriGraph extends this finding to planning tasks, confirming that structured knowledge graphs with episodic vertices outperform unstructured memory — which validates MemG's investment in graph triples alongside vector embeddings.
+
+---
+
+### Token Reduction and Context Optimization
+
+These papers address the problem of fitting relevant memory into finite context windows without degrading LLM performance — the constraint that shapes every recall and context-building decision in MemG.
+
+| Paper | Authors | Venue | Key Finding | Informs |
+|---|---|---|---|---|
+| Lost in the Middle | Liu, Lin, Hewitt, Paranjape et al. | TACL 2024, arXiv:2307.03172 | LLM performance drops 15-47% as context grows; information at start/end performs best, middle is wasted | Subsystem 9 |
+| LLMLingua: Prompt Compression | Jiang, Wu, Lin, Yang, Qiu (Microsoft) | EMNLP 2023, arXiv:2310.05736 | Coarse-to-fine compression using small LM; up to 20x compression with minimal performance loss | Subsystem 9 |
+| LongLLMLingua | Same Microsoft Research group | ACL 2024, arXiv:2310.06839 | 21.4% performance improvement with 4x fewer tokens; 94% cost reduction on LooGLE benchmark | Subsystem 9 |
+| TCRA-LLM: Token Compression RAG | — | ACL Findings EMNLP 2023 | Compression specifically for RAG; reduces up to 65% of token size | Subsystem 9 |
+| Recursively Summarizing Enables Long-Term Dialogue Memory | — | Neurocomputing 2025, arXiv:2308.15022 | Recursive summarization enables consistent long-context responses | Subsystem 7, 9 |
+
+**How these inform MemG:** The "Lost in the Middle" finding is arguably the single most important external result for MemG's context builder design. It demonstrates that transformers attend strongly to the beginning and end of their context window, with a measurable 15-47% performance degradation for information placed in the middle. This directly shaped the priority ordering in `BuildContext` (Subsystem 1) and the hierarchical builder (Subsystem 9): conscious facts (user identity) are placed first (beginning — high attention), working memory and session context are placed last (end — recency bias), and recalled episodic facts occupy the middle (supplementary context that benefits from but does not require peak attention). The LLMLingua family of papers validates the principle that *less context can produce better answers* — a counterintuitive result that underpins MemG's aggressive use of Kneedle cutoffs, token budgets, and decay-based pruning. Rather than implementing LLMLingua's compression algorithm directly, MemG achieves a similar effect through architectural means: extracting atomic facts from verbose conversations (Technique 3), summarizing old sessions into 2-5 sentence narratives (Technique 5), and using Kneedle to return only the facts above the relevance knee rather than a fixed top-N. The TCRA-LLM paper confirms that compression specifically designed for retrieval-augmented generation can cut token usage by 65% — MemG's context builder operates on the same principle by compressing at the knowledge level (facts and summaries) rather than at the token level. The recursive summarization paper validates MemG's turn-range summary design (Subsystem 7), where older conversation turns are progressively compressed into summaries, and multiple summaries are consolidated into overviews — a recursive compression strategy that preserves narrative continuity at logarithmically decreasing token cost.
+
+---
+
+### Hallucination Reduction
+
+These papers address the problem of LLMs generating false or unsupported statements — a failure mode that memory systems can either mitigate (by grounding responses in verified facts) or amplify (by injecting incorrect or outdated facts into the prompt).
+
+| Paper | Authors | Venue | Key Finding | Informs |
+|---|---|---|---|---|
+| Chain-of-Verification (CoVe) | Dhuliawala, Komeili, Xu et al. | ACL Findings 2024, arXiv:2309.11495 | Draft-verify-regenerate pipeline decreases hallucinations across all task types | Subsystem 13 |
+| SelfCheckGPT | Manakul, Liusie, Gales (Cambridge) | EMNLP 2023, arXiv:2303.08896 | Hallucinated facts show high variability across samples; enables zero-resource detection | Subsystem 13 |
+| RAG Reduces Hallucinations | Marquez et al. / Google Research | NAACL 2024 / Dec 2024 | RAG reduces hallucinations 2-10%; limitation: Knowledge FFNs can override Copying Heads | Subsystem 13 |
+| SemDeDup: Semantic Deduplication | Abbas et al. | arXiv:2303.09540, 2023 | Remove 50% semantic duplicates with minimal performance loss; halves training time | Subsystem 2 (Provenance) |
+
+**How these inform MemG:** The Chain-of-Verification paradigm — draft a response, verify claims against evidence, regenerate if needed — informs the confidence and provenance model in Subsystem 2. MemG does not implement CoVe's full loop, but the `Confidence` field on facts and the `SourceRole` distinction (user-stated vs. assistant-inferred) serve the same purpose at the memory layer: facts that originate from the user carry confidence 1.0 and are trusted, while facts inferred by the assistant carry lower confidence and are subject to filtering. This prevents the system from hardening its own guesses into durable facts — the primary hallucination vector in memory-augmented systems. SelfCheckGPT's finding that hallucinated content shows high variability across samples provides the theoretical basis for MemG's deduplication-as-quality-signal: facts that are independently extracted from multiple conversations (high `ReinforcedCount`) are almost certainly real, while facts extracted only once from an assistant utterance are suspect. The Google Research paper on RAG and hallucinations is important for setting realistic expectations — RAG reduces hallucinations by 2-10%, not to zero. The finding that Knowledge FFNs can override Copying Heads (the model's parametric knowledge overriding the retrieved context) means that even perfectly recalled facts may be ignored by the model. This is why MemG annotates historical facts with `[Historical]` and places high-confidence facts in the conscious profile section (beginning of context, high attention) — to maximize the probability that the model's Copying Heads attend to the retrieved facts. SemDeDup validates MemG's content-key-based deduplication: removing semantically duplicate facts from the store does not degrade recall quality and measurably reduces noise. MemG's approach is more conservative than SemDeDup's 50% threshold — it deduplicates on exact content-key matches and reinforces duplicates — but the principle is the same.
+
+---
+
+### Psychology of Memory and Retention
+
+These findings from cognitive psychology, behavioral economics, and social psychology provide the theoretical foundation for how MemG models memory decay, emotional significance, user engagement, and the subjective experience of interacting with a memory-augmented system.
+
+| Finding | Source | Year | Key Insight | Informs |
+|---|---|---|---|---|
+| Atkinson-Shiffrin Memory Model | Atkinson, Shiffrin | 1968 | Human memory operates as three stores: sensory register (immediate), short-term store (working), long-term store (durable) | Subsystem 9 |
+| Ebbinghaus Forgetting Curve | Hermann Ebbinghaus | 1885 (replicated PMC, 2015) | Memory loss follows exponential pattern R = e^(-t/S); spaced repetition extends retention | Subsystem 9, 11 |
+| Flashbulb Memory | Brown, Kulik | 1977 | Emotionally arousing events create vivid, persistent memories; 73/80 participants | Subsystem 11 |
+| Peak-End Rule | Kahneman, Fredrickson, Schreiber, Redelmeier | 1993 (meta-analysis: 174 effects) | People judge experiences by peak intensity + ending, not average | Subsystem 11, 12 |
+| Variable Ratio Reinforcement | B.F. Skinner | Schedules of Reinforcement | Most consistent engagement; most resistant to extinction | Subsystem 12 |
+| Hook Model | Nir Eyal | 2014 ("Hooked") | Trigger-Action-Variable Reward-Investment cycle creates habits | Subsystem 12 |
+| Zeigarnik Effect | Bluma Zeigarnik | 1920s (meta-review 2025) | Incomplete tasks create cognitive tension driving return | Subsystem 12 |
+| Nostalgia Effect | Santini et al. (meta-analysis) | Psychology & Marketing, 2023 | Nostalgia drives loyalty and engagement; rosy retrospection bias | Subsystem 12 |
+| Mere Exposure Effect | Robert Zajonc | 1968 (meta: Bornstein 1989, 208 experiments) | Repeated exposure enhances preference; optimal at 10-20 exposures | Subsystem 12 |
+| IKEA Effect | Norton, Mochon, Ariely | J. Consumer Psychology, 2012 | People pay 63% more for self-assembled items; requires successful completion | Subsystem 14 |
+| Endowment Effect | Richard Thaler | 1980 | People value owned items more than equivalent unowned ones | Subsystem 14 |
+| Commitment and Consistency | Robert Cialdini | "Influence", 1984 | Small commitments drive continued engagement; 18% no-show reduction | Subsystem 14 |
+| Self-Disclosure Reciprocity | Ho et al. | J. Communication, 2018 | Self-disclosure to chatbot equals benefit of human disclosure; requires acknowledgment | Subsystem 11, 13 |
+| Parasocial Relationships | Various; FAccT 2024 | 2024 | AI companion market >$13B; 88% Replika users identify chatbot as partner | Subsystem 12, 13 |
+
+**How these inform MemG:**
+
+**Atkinson-Shiffrin** is the foundational model for MemG's entire architecture. The three-store model — sensory register, short-term store, long-term store — maps directly onto MemG's three-tier system: working memory (current session messages, Subsystem 1), episodic memory (recalled facts with decay, Technique 4), and semantic memory (high-significance durable facts, conscious mode). The hierarchical memory architecture (Subsystem 9) makes this mapping explicit by allocating separate token budgets to each tier, just as the Atkinson-Shiffrin model posits separate capacity constraints for each store.
+
+**Ebbinghaus Forgetting Curve** provides the mathematical basis for MemG's decay model. The formula `R = e^(-t/S)` — where R is retention, t is time since last reinforcement, and S is memory strength — is the exponential decay function that determines how quickly a fact's effective relevance diminishes. In MemG, S is determined by the `Significance` field: high-significance facts have large S (slow decay, long TTL), low-significance facts have small S (fast decay, short TTL). The Ebbinghaus finding that spaced repetition extends retention is the direct basis for MemG's reinforcement mechanism — each re-extraction resets the decay timer, modeling the spaced repetition effect. The 2015 replication study (PMC) confirmed that the original 1885 results hold with modern methodology, validating the continued use of exponential decay as a memory model.
+
+**Flashbulb Memory** informs the `Significance` field and the emotional weight system (Subsystem 11). Brown and Kulik's finding that emotionally arousing events create disproportionately vivid and persistent memories justifies MemG's asymmetric TTL model — a significance-10 fact (life-threatening allergy, child's birth) never expires, while a significance-1 fact (today's lunch) expires in 7 days. The 73/80 participant result demonstrates that this is not a marginal effect — nearly all subjects formed flashbulb memories for emotionally significant events. For MemG, this means the extraction stage's assignment of high significance to emotionally charged facts is not just a convenience but a reflection of how human memory actually prioritizes information.
+
+**Peak-End Rule** has implications for how MemG should structure recalled context. Kahneman's finding — confirmed across 174 effect sizes in meta-analysis — that people judge experiences by their peak moment and ending rather than their average means that the *order* and *selection* of injected facts matters more than the *quantity*. This validates the Kneedle cutoff (inject the peak-relevance facts, not a flat top-N) and the context builder's priority ordering (ending the context with session history gives the LLM access to the most recent — and therefore most "end-weighted" — information).
+
+**Variable Ratio Reinforcement and the Hook Model** inform the design of engagement-oriented memory features (Subsystem 12). Skinner's finding that variable ratio reinforcement schedules produce the most consistent engagement and the highest resistance to extinction means that unpredictable memory surfacing (recalling a surprising fact the user forgot they shared) is more engaging than predictable recall. The Hook Model's Trigger-Action-Variable Reward-Investment cycle maps onto the memory interaction loop: a context trigger (the user's query) leads to an action (the LLM response), which includes a variable reward (unexpectedly relevant recalled context), and the user's continued conversation is the investment that feeds more facts into the system.
+
+**Zeigarnik Effect** validates the design of conversation summaries that capture unresolved threads. Zeigarnik's finding that incomplete tasks create persistent cognitive tension means that a summary like "Planned Japan trip — needs visa, checking flights Friday" is not just informational but psychologically compelling. The user is more likely to return to continue the thread because the incomplete task creates a pull. For MemG, this means summaries should explicitly capture what is *unresolved*, not just what was *discussed*.
+
+**Nostalgia Effect and Mere Exposure Effect** inform how historical facts and repeated memory surfacing affect user engagement. Santini's meta-analysis showing that nostalgia drives loyalty means that recalling historical facts ("You used to live in Austin") can strengthen the user's sense of relationship with the system. Zajonc's mere exposure finding — preference increases with repeated exposure, optimal at 10-20 exposures — means that the conscious mode's repeated injection of identity facts serves a dual purpose: it keeps the LLM informed *and* it creates familiarity that the user perceives as the system "knowing" them. The 208-experiment meta-analysis by Bornstein confirms this is a robust effect.
+
+**IKEA Effect and Endowment Effect** inform the value of user-editable memory (Subsystem 14). Norton's finding that people pay 63% more for items they assembled themselves means that users who actively curate their memory (correcting facts, adding notes, confirming extractions) will value the memory system more than users who passively receive automatic extraction. The endowment effect extends this — once users perceive the accumulated memory as "theirs," they value it more than an equivalent system they did not help build. This has direct implications for the design of memory management interfaces: exposing memory to user inspection and editing is not just a transparency feature but an engagement mechanism.
+
+**Commitment and Consistency** reinforces the IKEA effect. Cialdini's finding that small commitments drive continued engagement (with an 18% reduction in no-shows as the measured effect) means that early interactions where the user confirms or corrects a fact create a commitment that increases the probability of continued use. For MemG, this suggests that explicit memory confirmation prompts ("I noticed you mentioned you live in Seattle — is that right?") serve both accuracy and engagement goals.
+
+**Self-Disclosure Reciprocity** is particularly relevant for memory-augmented systems. Ho et al.'s finding that self-disclosure to a chatbot produces the same psychological benefit as self-disclosure to a human — but only when the disclosure is acknowledged — means that MemG's recall of previously disclosed information ("You mentioned last week that you were stressed about the deadline") functions as acknowledgment. The memory system transforms a stateless chatbot into one that implicitly acknowledges prior disclosures, which the literature shows is the critical requirement for the therapeutic benefit of self-disclosure to transfer to AI interactions.
+
+**Parasocial Relationships** provide context for why memory matters at all. The FAccT 2024 findings — AI companion market exceeding $13B, 88% of Replika users identifying the chatbot as a partner — demonstrate that users form genuine attachment to AI systems, and that attachment is mediated by the system's ability to demonstrate persistent knowledge of the user. Memory is not a feature — it is the mechanism through which parasocial attachment forms.
+
+---
+
+### Astrology and Tarot Domain Psychology
+
+These findings from the psychology of belief, pattern perception, and cold reading inform the design of domain-specific extraction stages — particularly for applications operating in domains where subjective validation and perceived personalization drive user satisfaction.
+
+| Finding | Source | Year | Key Insight | Informs |
+|---|---|---|---|---|
+| Barnum/Forer Effect | Bertram Forer | 1948 | Identical personality descriptions rated 4.3/5 as personally accurate; requires positive content + authority + personalization belief | Subsystem 13 |
+| Confirmation Bias in Astrology | Lu et al. | JPSP, 2020 (UT Austin) | Believers overestimate alignment between zodiac and personality even when none exists | Subsystem 13 |
+| Illusory Pattern Perception | van Prooijen et al. | Eur. J. Social Psychology, 2018 | Pattern perception in random data predicts supernatural beliefs | Subsystem 13 |
+| Cold Reading and Memory | Ray Hyman | Experientia, 1977 | Clients forget mistakes and remember hits; memory of reading evolves to become "more amazing" over time | Subsystem 13 |
+
+**How these inform MemG:** These findings are relevant for any application that uses MemG in domains where user perception of accuracy is decoupled from objective accuracy. The Barnum/Forer Effect — where identical descriptions are rated 4.3/5 for personal accuracy when framed as personalized — means that memory-augmented responses in these domains benefit disproportionately from even basic personalization. A response that includes "given your tendency to [recalled pattern fact]" will be perceived as deeply personal regardless of the pattern's statistical validity, as long as three conditions are met: the content is positively valenced, the source is perceived as authoritative, and the user believes the content was generated specifically for them. MemG's architecture satisfies all three — recalled facts are framed as personalized context (belief in personalization), the LLM is perceived as authoritative, and positive framing is under the control of the extraction stage's prompt.
+
+Lu et al.'s confirmation bias finding means that users in belief-oriented domains will selectively attend to facts that confirm their existing beliefs and discount contradictions. For extraction stages operating in these domains, this has a practical implication: the system should avoid presenting contradictory recalled facts side by side, as users will discount the contradiction rather than update their beliefs, potentially reducing trust in the system.
+
+Hyman's cold reading finding — that clients' memories of a reading evolve to become "more amazing" over time — means that the perceived quality of MemG's recall will *increase* in retrospect even if the original recall was imprecise. This is a double-edged property: it increases user satisfaction but also means that users will not naturally correct for recall errors, making the provenance and confidence mechanisms (Subsystem 2) more important in these domains, not less.
+
+---
+
+### Industry Comparisons
+
+These are production systems that implement memory for AI companions. Their approaches and measured effectiveness provide empirical benchmarks for MemG's design decisions.
+
+| Product | Memory Approach | Effectiveness | Source |
+|---|---|---|---|
+| Replika | Explicit "Facts about me" bank + diary system | 88% users identify as partner; explicit recall works well | Help docs, FAccT 2024 |
+| Nomi | AI-managed shared notes visible to user | 7/10 facts recalled after 1 month | AI Companion Guides, 2025 |
+| Kindroid | Hybrid: auto-extract + manual notes | Manual notes outperform auto-only | AI Companion Guides, 2025 |
+| Character.AI | Implicit only (no visible memory) | Poor long-term factual recall | AI Companion Guides, 2025 |
+| Pi (Inflection) | Strong within-session continuity, implicit cross-session | Good empathy, limited explicit recall | AI Companion Guides, 2025 |
+
+**Key industry insight:** The hybrid approach (automatic extraction + user-visible, editable notes) consistently outperforms pure automatic extraction across all measured products. The critical differentiator is not just *storing* facts, but *surfacing* them at the right moment in conversation.
+
+**How these inform MemG:** The industry data reveals a clear hierarchy of memory architectures ranked by user satisfaction:
+
+1. **Hybrid (auto + user-editable):** Kindroid and Replika demonstrate that giving users visibility into and control over their memory produces the strongest engagement. MemG's architecture supports this through the `FactFilter` API, the MCP `memory_*` tools, and the explicit fact model — all of which allow applications to build user-facing memory management interfaces.
+
+2. **AI-managed but visible:** Nomi's shared notes approach (7/10 recall after one month) shows that even without user editing, making memory visible builds trust. MemG's conscious mode — which loads the top identity facts on every request — produces a similar effect: the user sees their own information reflected back consistently, creating the perception of reliable memory.
+
+3. **Implicit only:** Character.AI's poor long-term recall despite massive scale demonstrates that implicit memory (relying on conversation history replay without explicit fact extraction) fails for cross-session continuity. This validates MemG's core design decision to extract and store atomic facts rather than relying on raw message history.
+
+4. **Session-only:** Pi's strong within-session but weak cross-session performance illustrates the boundary between short-term and long-term memory. MemG's session management (Subsystem 1) provides Pi-equivalent within-session continuity, while the fact store and summary system provide the cross-session recall that Pi lacks.
+
+The strongest signal from the industry data is that **the memory management UX matters as much as the memory system itself**. MemG provides the underlying storage, retrieval, and lifecycle machinery — but the application layer's decision about whether to expose memory to users, allow editing, or surface recall transparently has an outsized impact on perceived quality. This is consistent with the IKEA Effect and Endowment Effect findings from the psychology section: user participation in memory curation amplifies perceived value beyond what the underlying system quality alone can achieve.
+
+---
+
+## 9. Advanced Memory Features (v2) — TypeScript SDK
+
+The TypeScript SDK (`sdk/typescript`) implements the advanced memory subsystems described in Subsystems 9-14 as a self-contained, in-process engine. This section documents the concrete TypeScript APIs, data model extensions, and behavioral details for each feature. All implementations described below are verified against the current source code.
+
+---
+
+### 9.1 Hierarchical Memory Architecture
+
+**Problem solved:** The flat context builder packs all memories into a single token budget with no structural separation. Identity facts compete with episodic events and session context for the same budget space. The LLM receives an unstructured list and must infer which memories are permanent identity, which are situational recall, and which are current conversation state.
+
+**Design:** Three tiers partition the memory budget, each with distinct retrieval strategies and injection order. The `buildHierarchicalContext()` function replaces the flat `buildContext()` for applications that want structured memory injection.
+
+**Tiers:**
+
+| Tier | Content | Retrieval | Budget Config |
+|---|---|---|---|
+| **Semantic** (always-on) | Identity facts, high-significance patterns, pinned facts | Filtered DB query — no embedding search | `semanticBudget` in `HierarchicalContextOptions` |
+| **Episodic** (query-dependent) | Recalled events, predictions, contextual patterns | Hybrid vector + BM25 search | `episodicBudget` in `HierarchicalContextOptions` |
+| **Working** (session-scoped) | Turn summaries from the current conversation | Loaded from session state | `workingBudget` in `HierarchicalContextOptions` |
+
+**Structured output format:** The context string is assembled in section order, with each section labeled:
+
+1. `[IDENTITY]` — Semantic tier. Who this user is. Each fact annotated with confidence grade (`verified`, `likely`, `inferred`). Verbatim quotes included when available.
+2. `[EMOTIONAL STATE]` — Recent emotional context, sorted by recency. Each entry shows relative time and confidence level. Verbatim user words included inline.
+3. `[OPEN THREADS]` — Unresolved topics from the Zeigarnik tracker (see 9.4). Shows tag, content, and duration since thread opened.
+4. `[RECALLED CONTEXT — VERIFIED]` — Episodic facts with confidence >= 0.8. Facts the user explicitly stated.
+5. `[RECALLED CONTEXT — INFERRED]` — Episodic facts with confidence 0.5-0.79, prefixed with hedging language ("May be", "Possibly").
+6. `[PROACTIVE CONTEXT]` — Proactive surfacing items (see 9.7). Labeled by trigger type.
+7. `[SESSION CONTEXT]` — Working memory tier. Current conversation turn summaries.
+8. `[PAST CONVERSATIONS]` — Conversation summaries from previous sessions, with relative dates.
+
+**TypeScript API:**
+
+```typescript
+// Build hierarchical context for prompt injection.
+const ctx: HierarchicalContext = await memg.buildHierarchicalMemoryContext(
+  entityId: string,
+  queryText: string,
+  opts?: HierarchicalContextOptions
+);
+
+interface HierarchicalContextOptions {
+  workingBudget?: number;    // Max tokens for working memory tier
+  episodicBudget?: number;   // Max tokens for episodic tier
+  semanticBudget?: number;   // Max tokens for semantic tier
+  includeProactive?: boolean; // Include proactive surfacing (default: true)
+  includeEmotional?: boolean; // Include emotional state (default: true)
+  confidenceFloor?: number;  // Exclude facts below this confidence
+  maxAgeDays?: number;       // Maximum fact age to include (days)
+}
+
+interface HierarchicalContext {
+  working: string;     // Session context tier text
+  episodic: string;    // Recalled context tier text
+  semantic: string;    // Identity tier text
+  proactive: string;   // Proactive surfacing text
+  emotional: string;   // Emotional state text
+  totalTokens: number; // Tokens used across all tiers
+  formatted: string;   // The full assembled context string
+}
+```
+
+The `formatted` field contains the complete context string ready for system prompt injection. Individual tier fields are available for applications that need custom assembly.
+
+**Token budgets:** Each tier has an independent budget. The builder tracks `tokensUsed` globally and respects the overall `totalTokens` ceiling. If a tier overflows, facts are truncated by significance. Summary sections use a dedicated sub-budget that is also capped by remaining total budget.
+
+**Injection order rationale:** The ordering places identity first and session context last, exploiting the U-shaped attention curve documented in "Lost in the Middle" (Liu et al., 2023) — LLMs attend most strongly to the beginning and end of context. Identity (always relevant) occupies the high-attention start position; working memory (most recently relevant) occupies the high-attention end position; episodic memories occupy the middle where attention is weakest but semantic relevance compensates.
+
+**Research basis:** LightMem (ICLR 2026), TiMem, MemGPT (Packer et al., 2023), Atkinson-Shiffrin memory model (1968), Lost in the Middle (Liu et al., 2023).
+
+---
+
+### 9.2 Emotional Memory Scoring
+
+**Problem solved:** Facts carry informational significance but not emotional significance. "Father passed away" and "Got promoted" both score high on significance but require fundamentally different recall, decay, and interaction behavior. Without emotional metadata, the system treats grief and celebration identically.
+
+**New Fact fields:**
+
+| Field | Type | Range | Purpose |
+|---|---|---|---|
+| `emotionalWeight` | `number` | 0.0-1.0 | Intensity of emotional significance. 0.0 = neutral/factual, 1.0 = deeply emotional |
+| `emotionalValence` | `string` | 9 categories | Dominant emotion category |
+
+**Valid valence categories:** `grief`, `joy`, `anxiety`, `hope`, `love`, `anger`, `fear`, `pride`, `neutral`.
+
+**Extraction:** The extraction prompt (`buildExtractionPrompt()` in `extract.ts`) instructs the LLM to output `emotional_weight` (0.0-1.0) and `emotional_valence` (one of the 9 categories) for each extracted fact. Validation clamps weight to [0, 1] and rejects valences not in the allowed set. Both fields default to `null` when not applicable.
+
+**Search engine boost:** The `HybridEngine.rank()` method applies an additive emotional boost to the hybrid score:
+
+```
+score += emotionalWeight * emotionalBoost
+```
+
+Default `emotionalBoost` is `0.05`. A fact with `emotionalWeight = 1.0` receives a +0.05 score boost — enough to break ties and surface emotionally significant facts in borderline relevance cases, but not enough to override genuine semantic irrelevance.
+
+**Context builder:** Emotional facts are loaded separately via a `listFactsFiltered` call with `emotionalValences` filter (excluding `neutral`). They appear in the `[EMOTIONAL STATE]` section of hierarchical context, sorted by recency, with relative timestamps and confidence annotations.
+
+**Research basis:** Peak-End Rule (Kahneman et al., 1993), Flashbulb Memory (Brown & Kulik, 1977), Emotional Memory Bias (Talarico & Rubin, 2003), MemoryBank (Zhong et al., AAAI 2024).
+
+---
+
+### 9.3 Confidence-Gated Generation
+
+**Problem solved:** All recalled facts are injected with equal authority regardless of extraction confidence. A fact the user explicitly stated (`confidence: 1.0`) and a fact the LLM inferred from context (`confidence: 0.4`) appear side by side in the prompt with no distinction. The LLM cannot tell which facts are reliable and which are speculative, leading to hallucination when it states inferred facts with unwarranted certainty.
+
+**Confidence tiers:**
+
+| Tier | Confidence Range | Context Label | LLM Behavior |
+|---|---|---|---|
+| Verified | >= 0.8 | `[RECALLED CONTEXT — VERIFIED]` | State directly: "You mentioned X" |
+| Likely | 0.5 - 0.79 | Prefixed with "May be" | Hedge: "I think you mentioned X" |
+| Inferred | < 0.5 | Prefixed with "Possibly" | Speculate: "You might have mentioned X" |
+
+**`confidenceFloor` option:** The `HierarchicalContextOptions.confidenceFloor` parameter (default: 0.3) excludes all facts below the threshold from context injection. This prevents very-low-confidence guesses from reaching the LLM at all.
+
+**Search engine confidence adjustment:** The hybrid ranking engine applies a confidence-based score multiplier:
+
+```
+if (confidence < 1.0) {
+  score *= 0.95 + 0.05 * confidence;
+}
+```
+
+A fact with `confidence: 0.5` retains 97.5% of its raw score. A fact with `confidence: 0.0` retains 95%. This is a gentle tiebreaker, not a hard filter — low-confidence facts that are highly semantically relevant still surface.
+
+**Context builder behavior:** The `buildHierarchicalContext()` function splits recalled facts into `verified` (>= 0.8) and `inferred` (< 0.8) groups. Verified facts are rendered as direct statements with their confidence score. Inferred facts are rendered with hedging prefixes ("May be", "Possibly") and their confidence score, instructing the LLM to use appropriately tentative language.
+
+**Research basis:** HaluMem (Zhang et al., 2025), Misinformation Effect (Loftus, 1975).
+
+---
+
+### 9.4 Open Thread Tracking (Zeigarnik Memory)
+
+**Problem solved:** Users mention unresolved situations — pending decisions, ongoing health issues, awaited results — that create psychological tension. The system has no mechanism to track which situations remain open and which have been resolved, so it cannot proactively follow up or surface ongoing concerns.
+
+**New Fact field:**
+
+| Field | Type | Values | Purpose |
+|---|---|---|---|
+| `threadStatus` | `string \| null` | `'open'`, `'resolved'`, `null` | Tracks whether a situation is unresolved |
+
+**Extraction:** The extraction prompt instructs the LLM to set `thread_status: "open"` for unresolved situations, pending decisions, and open questions. Validation normalizes the value to `'open'` or `null` — any value other than `'open'` is treated as no thread.
+
+**Search engine boost:** Open threads receive a fixed +0.03 additive score boost in hybrid ranking, ensuring they surface slightly more readily than closed facts at equal relevance.
+
+**TypeScript API:**
+
+```typescript
+// List all open threads for an entity.
+async getOpenThreads(
+  entityId: string,
+  limit?: number    // default: 20
+): Promise<Memory[]>
+
+// Mark a thread as resolved.
+async resolveThread(
+  entityId: string,
+  memoryId: string
+): Promise<boolean>
+```
+
+`getOpenThreads()` queries the store's `listOpenThreads()` method, which filters `mg_entity_fact` rows where `thread_status = 'open'`. Returns `Memory` objects with full metadata including `threadStatus`, `verbatim`, and `emotionalValence`.
+
+`resolveThread()` sets the fact's `thread_status` to `'resolved'` via `store.updateThreadStatus()`. This removes it from the open threads list and from the `[OPEN THREADS]` section of hierarchical context.
+
+**Context builder:** Open threads appear in the `[OPEN THREADS]` section with their tag, content, and duration since opened (computed from `startedAt` when available). Example output:
+
+```
+[OPEN THREADS] Unresolved topics to follow up on:
+- Relationship: User is considering breaking up with partner (still open, started 2 weeks ago)
+- Work: User awaiting results of job interview (still open, started 5 days ago)
+```
+
+**Research basis:** Zeigarnik Effect (1927) — interrupted tasks are remembered ~90% better than completed tasks. Ovsiankina Effect (1928) — unfinished tasks create motivational tension driving return to completion.
+
+---
+
+### 9.5 Verbatim Store (Self-Reference Mirroring)
+
+**Problem solved:** Extracted facts are paraphrased summaries of what the user said: "User is grieving" instead of "I can't stop crying about my dad." The paraphrase loses the user's voice, emotional texture, and the specific phrasing that makes recalled memory feel personal rather than clinical.
+
+**New Fact field:**
+
+| Field | Type | Constraints | Purpose |
+|---|---|---|---|
+| `verbatim` | `string \| null` | Max 300 chars, only when confidence >= 0.8 | User's exact words that led to this fact |
+
+**Extraction:** The extraction prompt instructs: *"verbatim = the user's EXACT words that led to this fact, quoted verbatim. Only include when confidence >= 0.8. null otherwise."* Validation trims whitespace and caps at 300 characters. Empty strings are normalized to `null`.
+
+**Context builder:** When a fact has a `verbatim` field, the hierarchical context builder appends it inline:
+
+```
+- User's father recently passed away (verified) | User said: "I can't stop crying about my dad"
+```
+
+This appears in both the `[IDENTITY]` section (for conscious facts) and the `[RECALLED CONTEXT — VERIFIED]` section (for recalled facts). The quoted format signals to the LLM that these are the user's actual words, enabling more empathetic and personalized responses that mirror the user's own language.
+
+**Research basis:** Self-Reference Effect (Symons & Johnson, 1997; meta-analytic d = 0.45) — information processed in relation to the self is remembered significantly better than information processed semantically. Mirroring the user's own words back to them activates self-referential encoding, increasing perceived personalization.
+
+---
+
+### 9.6 Temporal Semantic Memory
+
+**Problem solved:** Facts record *when they were extracted* (`createdAt`) but not *when the described state began*. A user who says "I've been dealing with anxiety for about three weeks" produces a fact with `createdAt = today`, but the anxiety started three weeks ago. The system has no way to represent or surface this temporal span.
+
+**New Fact field:**
+
+| Field | Type | Format | Purpose |
+|---|---|---|---|
+| `startedAt` | `string \| null` | ISO 8601 date (YYYY-MM-DD) | When the state or situation described by this fact began |
+
+**Extraction:** The extraction prompt instructs the LLM to compute `started_at` from relative language: *"For relative references like 'for 3 weeks', compute the date: today minus the duration."* Validation ensures ISO date format and rejects unparseable values.
+
+**Context builder:** When `startedAt` is present, the `[OPEN THREADS]` section displays temporal duration:
+
+```
+- Health: User experiencing anxiety (still open, started 3 weeks ago)
+```
+
+The `relativeDate()` helper converts ISO dates to human-readable relative durations ("3 days ago", "2 weeks ago", "1 month ago").
+
+**Research basis:** Beyond Dialogue Time (arXiv:2601.07468) — temporal reasoning about user state requires explicit temporal anchoring, not just message timestamps.
+
+---
+
+### 9.7 Proactive Memory Surfacing
+
+**Problem solved:** The memory system is purely reactive — it only recalls facts when the user's query is semantically close. It never proactively surfaces relevant information: it does not follow up on unresolved situations, check in after emotional disclosures, celebrate milestones, or reference meaningful old memories. This makes the system feel like a search engine rather than a companion.
+
+**Design:** The `getProactiveContext()` function generates re-engagement triggers by scanning the fact store for specific patterns. Five trigger types are implemented:
+
+| Trigger Type | What It Detects | Priority | Example |
+|---|---|---|---|
+| `open_thread` | Unresolved situations, older = higher priority | 0.1-1.3 (scaled by significance + age) | "You mentioned considering breaking up — how is that going?" |
+| `emotional_checkin` | Negative emotional facts from 1-14 days ago | 0.0-0.5 (scaled by emotional weight) | "You mentioned experiencing grief 5 days ago. How are you feeling about that now?" |
+| `milestone` | Fact count milestones (50, 100, 250, 500, 1000) or day anniversaries (30, 90, 180, 365) | 0.8 | "This is a milestone — 100 memories stored together." |
+| `nostalgia` | High-significance facts older than 30 days, not recalled in 14+ days | 0.4 | "Remember when you mentioned: 'I got the job!' That was 45 days ago." |
+| `prediction_followup` | Prediction-tagged facts aged 7-30 days with open/unset thread status | 0.6 | "You made a prediction 12 days ago: 'I think I'll get the promotion.' Has anything changed?" |
+
+**Variable ratio reinforcement:** To avoid predictability, proactive surfacing uses a hash-based probability gate:
+
+```typescript
+const dayHash = now.getDate() + entityUuid.charCodeAt(0);
+const shouldSurface = (dayHash % 3) !== 0; // ~66% chance
+```
+
+This implements variable ratio reinforcement (Skinner): unpredictable reward timing produces the highest engagement rates. The system surfaces proactive context roughly two-thirds of the time, making it feel natural rather than mechanical.
+
+**TypeScript API:**
+
+```typescript
+// Get proactive surfacing items for an entity.
+async getProactiveContext(
+  entityId: string,
+  opts?: { trigger?: string; limit?: number }
+): Promise<ProactiveContext[]>
+
+interface ProactiveContext {
+  type: 'open_thread' | 'emotional_checkin' | 'milestone' | 'nostalgia' | 'prediction_followup';
+  content: string;         // Human-readable prompt for the LLM
+  sourceFactId: string;    // UUID of the triggering fact
+  priority: number;        // Sorting weight (higher = more important)
+  daysSince?: number;      // Days since the source fact was created
+}
+```
+
+Results are sorted by priority descending and capped at `limit` (default: 3). The `content` field is ready for injection into the `[PROACTIVE CONTEXT]` section of hierarchical context.
+
+**Research basis:** Variable Ratio Reinforcement (Skinner, 1957), Hook Model (Eyal, 2014), Spacing Effect (optimal-interval resurfacing strengthens memory bonds), Zeigarnik Effect (open threads).
+
+---
+
+### 9.8 Segment-Level Extraction
+
+**Problem solved:** The standard extraction pipeline processes the entire conversation turn as a single unit. For long conversations that span multiple topics, this produces two problems: (1) the LLM extraction call receives a long, multi-topic transcript that dilutes attention on any single topic, and (2) trivial segments (greetings, acknowledgments) waste an extraction call.
+
+**Design:** `runSegmentedExtraction()` processes conversation by pre-segmented topic chunks. Each segment carries optional `topic` and `classification` metadata that are prepended to the transcript as context lines before the standard extraction pipeline runs.
+
+**TypeScript API:**
+
+```typescript
+// Run extraction over pre-segmented conversation chunks.
+async extractFromSegments(
+  entityId: string,
+  segments: SegmentInput[]
+): Promise<void>
+
+interface SegmentInput {
+  messages: Array<{ role: string; content: string }>;
+  topic?: string;           // e.g., "career", "relationship"
+  classification?: string;  // e.g., "QUESTION", "PREDICTION"
+}
+```
+
+**Behavior:**
+1. Each segment is checked independently for triviality via `isTrivialTurn()`. Trivial segments are skipped entirely — no LLM call.
+2. For non-trivial segments, the `topic` and `classification` fields are prepended to the first message as context lines (e.g., "Topic: career\nClassification: PREDICTION\n...").
+3. The standard `runExtraction()` pipeline handles the rest: LLM call, parse, validate, embed, dedup, slot conflict resolution, TTL assignment, persist.
+4. Results are aggregated: total `inserted` and `reinforced` counts across all segments.
+
+**Benefits:**
+- **Fewer extraction calls.** Trivial segments (greetings, filler) are skipped without an LLM call.
+- **More coherent facts.** Each extraction call receives a single-topic transcript, so the LLM has full topic context without cross-topic interference.
+- **Topic-aware extraction.** The prepended topic and classification metadata guide the LLM toward more accurate fact typing and tagging.
+
+**Research basis:** SeCom (ICLR 2025) — segment-level processing of conversational memory produces more coherent and complete knowledge extraction than whole-conversation processing.
+
+---
+
+### 9.9 User-Visible Memory (Pin & Confirm)
+
+**Problem solved:** Users have no way to participate in their own memory curation. The system extracts, decays, and prunes facts autonomously. Industry data (see Research Foundation section) shows that hybrid approaches — where users can see and edit their memory — consistently outperform pure automatic extraction across all measured products.
+
+**New Fact field:**
+
+| Field | Type | Default | Purpose |
+|---|---|---|---|
+| `pinned` | `boolean` | `false` | Whether the user has pinned this fact |
+
+**TypeScript API:**
+
+```typescript
+// Pin a memory — it never decays.
+async pin(entityId: string, memoryId: string): Promise<boolean>
+
+// Unpin a memory — re-enable normal decay.
+async unpin(entityId: string, memoryId: string): Promise<boolean>
+
+// Confirm a memory is correct — boosts confidence to 1.0, reinforces.
+async confirm(entityId: string, memoryId: string): Promise<boolean>
+```
+
+**Pin behavior:** `pinFact()` sets `pinned = 1`, `significance = 10`, and `expires_at = NULL` on the fact row. This means:
+- The fact never expires (no TTL).
+- The fact qualifies for the semantic tier in hierarchical context (significance >= 8).
+- The fact is immune to staleness demotion and routine pruning.
+
+**Unpin behavior:** `unpinFact()` sets `pinned = 0`. The fact retains its current significance but is no longer immune to decay. A new TTL is not automatically assigned — the fact remains without expiry until the next reinforcement or manual significance adjustment.
+
+**Confirm behavior:** `confirmFact()` sets `confidence = 1.0`, increments `reinforced_count`, and updates `reinforced_at` to the current timestamp. This promotes an uncertain fact to verified status, affecting how it appears in confidence-gated context (moved from `[INFERRED]` to `[VERIFIED]` section).
+
+**Search engine boost:** Pinned facts receive a fixed +0.10 additive score boost in hybrid ranking (configurable via `pinnedBoost` option). This is the largest single boost in the ranking pipeline — larger than emotional boost (+0.05), open thread boost (+0.03), or engagement boost (max +0.02).
+
+**Research basis:** IKEA Effect (Norton, Mochon, Ariely, 2012) — people value things they helped create disproportionately more. User-pinned facts feel "theirs" and increase perceived memory quality. Endowment Effect (Thaler, 1980) — possession increases perceived value. Giving users ownership over their memory amplifies satisfaction.
+
+---
+
+### 9.10 Personalization Throttle
+
+**Problem solved:** Without limits, the context builder can over-personalize — flooding the prompt with identity facts, emotional context, and thread tracking until the LLM becomes so focused on the user's history that it loses the ability to be helpful on the current task. Research shows that personalization follows an inverted U-curve: too little feels generic, too much feels invasive or distracting.
+
+**Configuration options:**
+
+| Option | Type | Default | Purpose |
+|---|---|---|---|
+| `maxPersonalFacts` | `number` | `15` | Caps identity + emotional + thread facts per context build |
+| `diversifyTopics` | `boolean` | `true` | No single tag exceeds 40% of recalled facts |
+| `freshnessBias` | `number` | `0.3` | Configurable recency preference (0.0-1.0) |
+
+**`maxPersonalFacts`:** The hierarchical context builder tracks a `personalFactCount` counter. Every fact added to the `[IDENTITY]`, `[EMOTIONAL STATE]`, or `[OPEN THREADS]` sections increments this counter. Once it reaches `maxPersonalFacts`, no more personal facts are added to those sections. Recalled context and session context are not subject to this cap — they are query-driven, not profile-driven.
+
+**`diversifyTopics`:** When enabled, the context builder caps any single tag at 40% of the recalled fact set before rendering the `[RECALLED CONTEXT]` section. The search engine also applies diversification: after ranking, if any tag exceeds 40% of results, excess facts in that tag have their score multiplied by 0.85, pushing them down. This prevents a user with 50 "work" facts and 5 "health" facts from having their entire recalled context be about work.
+
+**`freshnessBias`:** Configurable in `NativeConfig` to control how much recency affects recall ranking. Higher values favor recent facts; lower values favor pure relevance. The default of 0.3 provides a mild recency preference.
+
+**Research basis:** Inverted U-Curve of personalization (JAR, 2025), Personalization Backfire (MDPI, 2025) — excessive personalization reduces trust and perceived helpfulness.
+
+---
+
+### 9.11 New Schema Fields
+
+The `mg_entity_fact` table gains 7 new columns in the v2 migration:
+
+| Column | SQL Type | Default | Nullable | Purpose |
+|---|---|---|---|---|
+| `emotional_weight` | `REAL` | — | Yes | Emotional intensity (0.0-1.0) |
+| `emotional_valence` | `TEXT` | — | Yes | Emotion category (one of 9 values) |
+| `verbatim` | `TEXT` | — | Yes | User's exact words (max 300 chars) |
+| `started_at` | `TEXT` | — | Yes | ISO date when the state began |
+| `thread_status` | `TEXT` | — | Yes | `'open'` or `'resolved'` |
+| `engagement_score` | `REAL` | `0` | No | Topic engagement level (0.0-1.0) |
+| `pinned` | `INTEGER` | `0` | No | User-pinned flag (0 or 1) |
+
+**Indexes added:**
+
+| Index | Columns | Purpose |
+|---|---|---|
+| `idx_mg_fact_thread` | `(entity_id, thread_status)` | Fast open thread queries |
+| `idx_mg_fact_pinned` | `(entity_id, pinned)` | Fast pinned fact queries |
+| `idx_mg_fact_emotional` | `(entity_id, emotional_valence)` | Fast emotional fact queries |
+
+**Migration strategy:** The schema uses `ALTER TABLE ... ADD COLUMN` statements that are applied idempotently. The SQLite store wraps each migration statement in a try-catch so that columns that already exist do not cause errors. New columns with nullable defaults are backward-compatible — existing rows have `NULL` values for the new fields, which the `rowToFact()` mapper handles with fallback defaults.
+
+**Full Fact type in TypeScript:**
+
+```typescript
+interface Fact {
+  uuid: string;
+  content: string;
+  embedding?: number[];
+  createdAt?: string;
+  updatedAt?: string;
+  factType: 'identity' | 'event' | 'pattern';
+  temporalStatus: 'current' | 'historical';
+  significance: number;
+  contentKey: string;
+  referenceTime?: string;
+  expiresAt?: string;
+  reinforcedAt?: string;
+  reinforcedCount: number;
+  tag: string;
+  slot: string;
+  confidence: number;
+  embeddingModel: string;
+  sourceRole: string;
+  recallCount: number;
+  lastRecalledAt?: string;
+  // v2 fields:
+  emotionalWeight?: number;
+  emotionalValence?: 'grief' | 'joy' | 'anxiety' | 'hope' | 'love' | 'anger' | 'fear' | 'pride' | 'neutral';
+  verbatim?: string;
+  startedAt?: string;
+  threadStatus?: 'open' | 'resolved' | null;
+  engagementScore?: number;
+  pinned?: boolean;
+}
+```
+
+---
+
+### 9.12 New Store Interface Methods
+
+The `Store` interface (`store.ts`) gains 9 new methods for the v2 features. All methods return `T | Promise<T>` (the `MaybeAsync<T>` pattern) so both synchronous stores (SQLite) and asynchronous stores (Postgres, MySQL) can implement them.
+
+#### Pin & Confirm
+
+```typescript
+// Pin a fact: sets pinned=1, significance=10, expires_at=NULL.
+pinFact(factUuid: string): MaybeAsync<void>;
+
+// Unpin a fact: sets pinned=0.
+unpinFact(factUuid: string): MaybeAsync<void>;
+
+// Confirm a fact: sets confidence=1.0, increments reinforced_count,
+// updates reinforced_at to now.
+confirmFact(factUuid: string): MaybeAsync<void>;
+```
+
+#### Thread Tracking
+
+```typescript
+// Set thread_status on a fact ('open' or 'resolved').
+updateThreadStatus(factUuid: string, status: string): MaybeAsync<void>;
+
+// List facts with thread_status='open' for an entity, ordered by
+// significance DESC, created_at ASC. Returns full Fact objects.
+listOpenThreads(entityUuid: string, limit: number): MaybeAsync<Fact[]>;
+```
+
+#### Emotional & Engagement
+
+```typescript
+// Update emotional weight and valence on a fact.
+updateEmotionalWeight(factUuid: string, weight: number, valence: string): MaybeAsync<void>;
+
+// Update engagement score on a fact.
+updateEngagementScore(factUuid: string, score: number): MaybeAsync<void>;
+```
+
+#### Entity Statistics (for Milestones)
+
+```typescript
+// Count total facts for an entity (used for milestone detection).
+countEntityFacts(entityUuid: string): MaybeAsync<number>;
+
+// Get the creation date of the oldest fact for an entity (used for
+// anniversary milestone detection). Returns ISO date string or null.
+getEntityFirstFactDate(entityUuid: string): MaybeAsync<string | null>;
+```
+
+All 9 methods are implemented in `MemGStore` (SQLite), `PostgresStore`, and `MySQLStore`. Custom store implementations must add these methods to support v2 features.
