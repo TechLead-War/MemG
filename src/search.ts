@@ -241,21 +241,21 @@ export class HybridEngine {
         score *= 0.95 + 0.05 * conf;
       }
 
-      // Emotional boost: emotionally significant facts get a small relevance boost.
-      score += (c.emotionalWeight ?? 0) * (opts?.emotionalBoost ?? 0.05);
+      // Emotional boost: emotionally significant facts get a small relevance boost (multiplicative).
+      score *= 1.0 + (c.emotionalWeight ?? 0) * (opts?.emotionalBoost ?? 0.05);
 
-      // Pinned boost: user-pinned facts get a fixed boost.
+      // Pinned boost: user-pinned facts get a fixed multiplicative boost.
       if (c.pinned) {
-        score += opts?.pinnedBoost ?? 0.10;
+        score *= 1.0 + (opts?.pinnedBoost ?? 0.10);
       }
 
-      // Open thread boost: unresolved situations get a small boost.
+      // Open thread boost: unresolved situations get a small multiplicative boost.
       if (c.threadStatus === 'open') {
-        score += 0.03;
+        score *= 1.03;
       }
 
-      // Engagement boost: highly-engaged topics get a minor boost.
-      score += (c.engagementScore ?? 0) * 0.02;
+      // Engagement boost: highly-engaged topics get a minor multiplicative boost.
+      score *= 1.0 + (c.engagementScore ?? 0) * 0.02;
 
       return { idx: i, score };
     });
@@ -301,8 +301,8 @@ export class HybridEngine {
         tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1);
       }
 
-      const maxAllowed = Math.floor(results.length * 0.4);
-      if (maxAllowed > 0) {
+      const maxAllowed = Math.max(1, Math.floor(results.length * 0.4));
+      if (results.length > 2) {
         for (const [tag, count] of tagCounts) {
           if (count > maxAllowed) {
             let seen = 0;

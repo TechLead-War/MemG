@@ -277,38 +277,7 @@ Technique 4 introduces an enriched fact model that addresses these problems by g
 
 ### The Enriched Fact Model
 
-Every fact in MemG carries metadata beyond its content and embedding. Here is the complete data model:
-
-```go
-type Fact struct {
-    UUID            string         // Unique identifier
-    Content         string         // The fact text: "User lives in Seattle"
-    Embedding       []float32      // Dense vector for semantic search
-
-    Type            FactType       // identity, event, or pattern
-    TemporalStatus  TemporalStatus // current or historical
-    Significance    Significance   // 1–10, controls lifespan
-
-    ContentKey      string         // Normalized hash for deduplication
-    ReferenceTime   *time.Time     // When the fact refers to (e.g. the date the user ate pasta)
-    ExpiresAt       *time.Time     // TTL — fact is pruned after this time
-    ReinforcedAt    *time.Time     // Last time a duplicate extraction reinforced this fact
-    ReinforcedCount int            // How many times this fact has been re-encountered
-
-    // Provenance fields (see Subsystem 2: Memory Truth, Provenance, And Mutation)
-    Slot           string          // Semantic slot for conflict resolution (e.g. "location", "job")
-    Confidence     float64         // Extraction confidence (0.0–1.0)
-    EmbeddingModel string          // Which model produced the embedding vector
-    SourceRole     string          // "user" or "assistant" — where the fact originated
-
-    // Usage tracking fields (see Subsystem 5: Long-Horizon Memory Hygiene)
-    RecallCount    int             // How many times injected into a prompt
-    LastRecalledAt *time.Time      // When last included in a prompt
-
-    CreatedAt       time.Time      // When the fact was first extracted
-    UpdatedAt       time.Time      // Last modification time
-}
-```
+Every fact in MemG carries metadata beyond its content and embedding. The Fact data model includes: a unique identifier (UUID), the fact text (Content), a dense vector embedding for semantic search, a Type (identity, event, or pattern), a TemporalStatus (current or historical), a Significance level (1-10), a ContentKey for deduplication, a ReferenceTime for when the fact refers to, an ExpiresAt TTL, reinforcement tracking fields (ReinforcedAt, ReinforcedCount), provenance fields (Slot for conflict resolution, Confidence 0.0-1.0, EmbeddingModel, SourceRole), usage tracking fields (RecallCount, LastRecalledAt), and standard timestamps (CreatedAt, UpdatedAt). See README.md for the complete type definition.
 
 **Classifications at a glance:**
 
@@ -1213,15 +1182,7 @@ The proxy now creates a single `http.Client` with `http.DefaultTransport` at sta
 
 #### Database Connection Pool Configuration
 
-The SQLite database connection now has explicit pool limits:
-
-```
-db.SetMaxOpenConns(4)       — prevents connection exhaustion
-db.SetMaxIdleConns(2)       — keeps warm connections ready
-db.SetConnMaxLifetime(30m)  — prevents stale connections
-```
-
-SQLite allows only one concurrent writer, so 4 open connections is sufficient — read queries can proceed in parallel while a single write holds the lock. Without these limits, Go's `sql.DB` grows the connection count unboundedly under concurrent load.
+The SQLite database connection now has explicit pool limits: 4 max open connections (prevents connection exhaustion), 2 max idle connections (keeps warm connections ready), and 30-minute max connection lifetime (prevents stale connections). SQLite allows only one concurrent writer, so 4 open connections is sufficient — read queries can proceed in parallel while a single write holds the lock. Without these limits, the connection count grows unboundedly under concurrent load.
 
 #### Recall Candidate Cap
 
@@ -1444,18 +1405,7 @@ The recall pipeline involves seven coordinated steps: embedding the query, loadi
 6. **Load relevant artifacts** (code, JSON, SQL from the active conversation)
 7. **Assemble context** via `BuildContext` with five-layer priority and token budgeting
 
-```
-// Go
-memory.RecallAndBuildContext(ctx, repo, embedder, engine, entityUUID, query, cfg)
-
-// TypeScript
-recallAndBuildContext(store, embedder, entityUuid, query, cfg?)
-
-// Python
-recall_and_build_context(store, embedder, entity_uuid, query, cfg=None)
-```
-
-All three implementations share identical logic and identical function signatures. Callers configure behavior via `RecallConfig`:
+See README.md for SDK interface and usage examples. All three implementations (Go, TypeScript, Python) share identical logic and identical function signatures. Callers configure behavior via `RecallConfig`:
 
 | Setting | Default | What It Controls |
 |---|---|---|
@@ -1710,67 +1660,7 @@ The hierarchical architecture integrates with, rather than replaces, the existin
 
 **Backward compatibility:** When all three tier budgets are set to 0, the system falls back to the flat `BuildContext` behavior from Subsystem 1. This preserves backward compatibility for applications that have tuned their context assembly around the existing priority list. The `ConsciousLimit` setting continues to work when the semantic tier is disabled — it controls the legacy conscious mode loading path. When the semantic tier is enabled (any non-zero `SemanticTokenBudget`), `ConsciousLimit` is ignored in favor of the token-budgeted semantic tier.
 
-#### SDK Interface
-
-The hierarchical memory architecture is exposed through the SDK with explicit tier control:
-
-```typescript
-// TypeScript SDK
-const context = await memg.buildMemoryContext(entityId, query, {
-  semanticBudget: 600,
-  episodicBudget: 1400,
-  workingBudget: 2000,
-  ebbinghausDecay: true,
-  conversationId: activeConversationId
-});
-
-// Returns structured tiers, not a flat string
-// {
-//   semantic: [{ content: "User is allergic to peanuts", significance: 10 }, ...],
-//   episodic: [{ content: "User ate sushi on March 12", score: 0.73, retention: 0.85 }, ...],
-//   working:  [{ type: "summary", content: "[Turns 1-5] Discussed horoscope..." }, ...],
-//   totalTokens: 3847,
-//   tierTokens: { semantic: 487, episodic: 1203, working: 2157 }
-// }
-```
-
-```python
-# Python SDK
-context = memg.build_memory_context(
-    entity_id=entity_id,
-    query=query,
-    semantic_budget=600,
-    episodic_budget=1400,
-    working_budget=2000,
-    ebbinghaus_decay=True,
-    conversation_id=active_conversation_id
-)
-
-# context.semantic  -> list of semantic-tier facts
-# context.episodic  -> list of episodic-tier facts with scores and retention
-# context.working   -> list of working-tier items (summaries, artifacts, messages)
-# context.total_tokens -> int
-# context.tier_tokens  -> {"semantic": 487, "episodic": 1203, "working": 2157}
-```
-
-```go
-// Go library
-ctx := memory.BuildHierarchicalContext(ctx, repo, embedder, engine, entityUUID, query, memory.HierarchicalConfig{
-    SemanticTokenBudget: 600,
-    EpisodicTokenBudget: 1400,
-    WorkingTokenBudget:  2000,
-    EbbinghausDecay:     true,
-    ConversationID:      activeConversationID,
-})
-
-// ctx.Semantic  -> []Fact
-// ctx.Episodic  -> []ScoredFact (with Score, Retention fields)
-// ctx.Working   -> []WorkingMemoryItem
-// ctx.TotalTokens -> int
-// ctx.TierTokens  -> map[string]int
-```
-
-The structured return type enables callers to inspect, filter, or reformat tier contents before injection. Applications that need custom prompt templates can assemble the system prompt from individual tiers rather than accepting the default formatted string. The default `RecallAndBuildContext` (Subsystem 8) continues to return a formatted string for backward compatibility — it calls the hierarchical builder internally and formats the result.
+See README.md for SDK interface and usage examples. The structured return type enables callers to inspect, filter, or reformat tier contents before injection. Applications that need custom prompt templates can assemble the system prompt from individual tiers rather than accepting the default formatted string. The default `RecallAndBuildContext` (Subsystem 8) continues to return a formatted string for backward compatibility — it calls the hierarchical builder internally and formats the result.
 
 #### Expected Impact
 
@@ -1831,22 +1721,7 @@ The relational memory graph promotes the existing `graph/` package triples from 
 
 ##### Triple Model
 
-A triple represents a single directed relationship between two entities:
-
-```go
-type Triple struct {
-    UUID             string     // Unique identifier
-    EntityID         string     // Scoping entity (the user whose knowledge graph this belongs to)
-    Subject          string     // Source entity: "Priya", "User", "Ananya"
-    Predicate        string     // Relationship type: "is_mother_of", "lives_in", "works_as"
-    Object           string     // Target entity: "User", "Mumbai", "doctor"
-    SourceFactID     string     // Which fact this triple was extracted from
-    Weight           float64    // Confidence/strength of the relationship (0.0–1.0)
-    SubjectEmbedding []float32  // Embedding of the subject entity name (for entity resolution)
-    CreatedAt        time.Time
-    UpdatedAt        time.Time
-}
-```
+A triple represents a single directed relationship between two entities. Each triple contains: a UUID, an EntityID (scoping entity), Subject and Object strings (the two entities being linked), a Predicate (relationship type like "is_mother_of", "lives_in"), a SourceFactID (tracing back to the fact that produced it), a Weight (0.0-1.0 confidence/strength), a SubjectEmbedding (for entity resolution), and timestamps. See README.md for the complete type definition.
 
 **Why `SubjectEmbedding`:** Entity resolution (described below) requires comparing entity names semantically. Storing the embedding on the triple avoids recomputing it on every resolution check. The embedding is generated once during extraction, using the same embedding model as facts.
 
@@ -1856,27 +1731,7 @@ type Triple struct {
 
 ##### Schema
 
-```sql
-CREATE TABLE mg_triple (
-    uuid             TEXT PRIMARY KEY,
-    entity_id        TEXT NOT NULL,
-    subject          TEXT NOT NULL,
-    predicate        TEXT NOT NULL,
-    object           TEXT NOT NULL,
-    source_fact_id   TEXT NOT NULL,
-    weight           REAL NOT NULL DEFAULT 1.0,
-    subject_embedding BLOB,
-    created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (entity_id) REFERENCES mg_entity(uuid),
-    FOREIGN KEY (source_fact_id) REFERENCES mg_entity_fact(uuid)
-);
-
-CREATE INDEX idx_triple_entity ON mg_triple(entity_id);
-CREATE INDEX idx_triple_subject ON mg_triple(entity_id, subject);
-CREATE INDEX idx_triple_object ON mg_triple(entity_id, object);
-CREATE INDEX idx_triple_source ON mg_triple(source_fact_id);
-```
+The `mg_triple` table stores triples with columns for uuid (primary key), entity_id, subject, predicate, object, source_fact_id, weight (default 1.0), subject_embedding (BLOB), and timestamps. Foreign keys reference `mg_entity` and `mg_entity_fact`. Indexes on entity_id, (entity_id, subject), (entity_id, object), and source_fact_id enable fast entity-based lookups and cascade operations.
 
 The `entity_id` scoping ensures that one user's knowledge graph is completely isolated from another's. The subject and object indexes enable fast entity-based lookups for graph traversal. The source index enables cascade operations when facts are modified.
 
@@ -1946,19 +1801,7 @@ The graph layer augments the existing hybrid recall pipeline with a post-retriev
 
 **Step 4a — Entity extraction from seed facts:** The engine identifies entity names mentioned in the top-K recalled facts (default: K=5). Entity extraction uses a lightweight approach: check each recalled fact's content against the canonical entity names in the graph. This is a string matching operation against the resolution cache, not an NLP extraction — it runs in microseconds.
 
-**Step 4b — Graph traversal:** For each identified entity, the engine queries:
-
-```sql
-SELECT t.*, f.content, f.significance, f.temporal_status
-FROM mg_triple t
-JOIN mg_entity_fact f ON f.uuid = t.source_fact_id
-WHERE t.entity_id = ?
-  AND (t.subject = ? OR t.object = ?)
-  AND f.temporal_status = 'current'
-  AND f.uuid NOT IN (... already recalled fact UUIDs ...)
-ORDER BY t.weight DESC
-LIMIT ?  -- GraphExpansionHops * 10, default: 10
-```
+**Step 4b — Graph traversal:** For each identified entity, the engine queries the `mg_triple` table joined with `mg_entity_fact`, filtering for the target entity (as subject or object), current temporal status, and excluding already-recalled facts. Results are ordered by weight descending and limited to `GraphExpansionHops * 10` (default: 10).
 
 This returns triples where the entity appears as either subject or object — a 1-hop neighborhood in the graph. The join with `mg_entity_fact` pulls the source fact's content and metadata, enabling the engine to inject the connected fact's natural language form rather than the raw triple.
 
@@ -2104,27 +1947,9 @@ Where:
 
 ##### Store Contract: Optional TripleStore Interface
 
-The graph layer is opt-in. The `TripleStore` interface extends the base `Repository` contract:
+The graph layer is opt-in. The `TripleStore` interface extends the base `Repository` contract with five methods: `InsertTriple`, `ListTriples` (by subject), `ListTriplesByObject`, `DeleteTriplesBySourceFact`, and `UpdateTripleWeight`. See README.md for the complete interface definition.
 
-```go
-type TripleStore interface {
-    InsertTriple(ctx context.Context, triple Triple) error
-    ListTriples(ctx context.Context, entityID string, subject string) ([]Triple, error)
-    ListTriplesByObject(ctx context.Context, entityID string, object string) ([]Triple, error)
-    DeleteTriplesBySourceFact(ctx context.Context, factID string) error
-    UpdateTripleWeight(ctx context.Context, tripleID string, weight float64) error
-}
-```
-
-The recall pipeline checks whether the repository implements `TripleStore` via a type assertion:
-
-```go
-if ts, ok := repo.(store.TripleStore); ok && config.GraphRecall {
-    expandedFacts = graphExpand(ctx, ts, seedFacts, config)
-}
-```
-
-When the repository does not implement `TripleStore` (e.g., a minimal SQLite store without graph support), the graph expansion step is silently skipped. All existing store implementations continue to work — the graph layer is additive, not mandatory. The augmentation pipeline similarly checks for `TripleStore` before attempting triple extraction, and the pruner checks before attempting cascade deletion.
+The recall pipeline checks whether the repository implements `TripleStore` via a type assertion. When the repository does not implement `TripleStore` (e.g., a minimal SQLite store without graph support), the graph expansion step is silently skipped. All existing store implementations continue to work — the graph layer is additive, not mandatory. The augmentation pipeline similarly checks for `TripleStore` before attempting triple extraction, and the pruner checks before attempting cascade deletion.
 
 This graceful degradation means applications can adopt the graph layer incrementally: start with the base fact store, add `TripleStore` implementation when graph-augmented recall is needed, and enable `GraphRecall` in the config. No code changes are required outside the store implementation.
 
@@ -2137,48 +1962,7 @@ This graceful degradation means applications can adopt the graph layer increment
 | `GraphProximityBonus` | 0.05 | `MEMG_GRAPH_PROXIMITY_BONUS` | Base score bonus for facts discovered through graph expansion. Higher values make graph connections more influential in ranking. |
 | `EntityResolutionThreshold` | 0.85 | `MEMG_ENTITY_RESOLUTION_THRESHOLD` | Cosine similarity threshold for merging entity names during resolution. Lower values merge more aggressively (risk: false merges). Higher values preserve distinctions (risk: entity fragmentation). |
 
-#### SDK Interface
-
-```go
-// Go — query the knowledge graph for an entity
-graph, err := m.GetEntityGraph(ctx, entityID, "Priya")
-// Returns: []Triple — all triples where "Priya" appears as subject or object
-
-// Go — graph-augmented recall is automatic when GraphRecall is enabled
-ctx := memory.RecallAndBuildContext(ctx, repo, embedder, engine, entityUUID, query, cfg)
-// The pipeline checks for TripleStore and expands if available
-```
-
-```typescript
-// TypeScript — query the knowledge graph
-const graph = await memg.getEntityGraph(entityId, "Priya");
-// Returns: Triple[] — all triples involving "Priya"
-
-// TypeScript — graph-augmented context building
-const context = await memg.buildMemoryContext(entityId, query, {
-  graphRecall: true,
-  graphExpansionHops: 1,
-  graphProximityBonus: 0.05,
-  entityResolutionThreshold: 0.85
-});
-// Graph expansion happens internally when the store supports it
-```
-
-```python
-# Python — query the knowledge graph
-graph = memg.get_entity_graph(entity_id, "Priya")
-# Returns: list[Triple] — all triples involving "Priya"
-
-# Python — graph-augmented context building
-context = memg.build_memory_context(
-    entity_id=entity_id,
-    query=query,
-    graph_recall=True,
-    graph_expansion_hops=1,
-    graph_proximity_bonus=0.05,
-    entity_resolution_threshold=0.85
-)
-```
+See README.md for SDK interface and usage examples. The graph can be queried for an entity via `GetEntityGraph` / `getEntityGraph` / `get_entity_graph`. Graph-augmented recall is automatic when `GraphRecall` is enabled in the config -- the pipeline checks for `TripleStore` and expands if available.
 
 #### Interaction With Existing Subsystems
 
@@ -2240,17 +2024,7 @@ The emotional scoring system adds three metadata fields to the fact model, modif
 
 ##### Three New Fact Fields
 
-```go
-type Fact struct {
-    // ... existing fields ...
-
-    EmotionalValence  string  // "positive", "negative", "neutral", "mixed"
-    EmotionalArousal  string  // "high", "medium", "low"
-    EmotionalCategory string  // "grief", "joy", "anxiety", "hope", "love", "anger",
-                              // "fear", "pride", "gratitude", "loneliness",
-                              // "excitement", "relief"
-}
-```
+Three new fields are added to the Fact model: `EmotionalValence` (string: "positive", "negative", "neutral", "mixed"), `EmotionalArousal` (string: "high", "medium", "low"), and `EmotionalCategory` (string: one of 12 categories -- "grief", "joy", "anxiety", "hope", "love", "anger", "fear", "pride", "gratitude", "loneliness", "excitement", "relief").
 
 **Why three fields instead of a single sentiment score:** A single positive/negative score conflates two independent dimensions that affect memory differently. "User is terrified of flying" (negative valence, high arousal) and "User finds meetings boring" (negative valence, low arousal) are both negative, but the first produces a flashbulb-like persistent memory while the second fades quickly. The valence-arousal model (Russell's Circumplex, 1980) separates these dimensions, enabling the decay system to treat them independently.
 
@@ -2412,14 +2186,7 @@ The threshold of 7.0 is calibrated to flag roughly the top 10-15% of conversatio
 
 3. **Enriched summaries.** When the summarizer generates a summary for a peak moment conversation, the prompt includes an instruction: "This conversation contains an emotionally significant moment. Preserve the emotional arc and specific details in the summary, not just the informational content." This produces richer summaries that capture the emotional texture of the conversation, not just what was discussed.
 
-**Schema addition:**
-
-```sql
-ALTER TABLE mg_conversation ADD COLUMN is_peak_moment BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE mg_conversation ADD COLUMN peak_score REAL;
-```
-
-The `is_peak_moment` flag is set during summary generation at session rollover. The `peak_score` is stored for analytics and threshold tuning.
+**Schema addition:** Two columns are added to `mg_conversation`: `is_peak_moment` (boolean, default false) and `peak_score` (real). The `is_peak_moment` flag is set during summary generation at session rollover. The `peak_score` is stored for analytics and threshold tuning.
 
 ##### Interaction With the Ebbinghaus Decay Function
 
@@ -2452,63 +2219,7 @@ This interaction is the primary mechanism through which emotional memory scoring
 | `PeakMomentThreshold` | 7.0 | `MEMG_PEAK_MOMENT_THRESHOLD` | Minimum `peak_score` for a conversation to be flagged as a peak moment. Lower values flag more conversations; higher values are more selective. |
 | `EmpatheticAnnotation` | true | `MEMG_EMPATHETIC_ANNOTATION` | Enable `[Emotionally sensitive]` tags on high-arousal negative facts in context injection. When false, emotional facts are injected without the annotation tag and the empathetic instruction is omitted. |
 
-#### SDK Interface
-
-```go
-// Go — retrieve peak moments for an entity
-peaks, err := m.GetPeakMoments(ctx, entityID, memory.PeakMomentFilter{
-    MinScore:  7.0,
-    Limit:     10,
-    SinceDate: time.Now().AddDate(-1, 0, 0), // last year
-})
-// Returns: []PeakMoment — conversations flagged as peaks, with summaries and scores
-
-// Go — emotionally-aware context building (automatic when EmotionalScoring enabled)
-ctx := memory.RecallAndBuildContext(ctx, repo, embedder, engine, entityUUID, query, cfg)
-// Emotional metadata on recalled facts is used for:
-//   - Ebbinghaus decay modulation (emotional_weight)
-//   - Emotional relevance matching (category/valence bonus)
-//   - Empathetic annotation ([Emotionally sensitive] tags)
-```
-
-```typescript
-// TypeScript — retrieve peak moments
-const peaks = await memg.getPeakMoments(entityId, {
-  minScore: 7.0,
-  limit: 10,
-  sinceDate: new Date('2025-03-29')
-});
-// Returns: PeakMoment[] — { conversationId, summary, peakScore, date, emotionalCategories }
-
-// TypeScript — emotionally-aware context building
-const context = await memg.buildMemoryContext(entityId, query, {
-  emotionalScoring: true,
-  emotionalRecallBoost: 0.03,
-  empatheticAnnotation: true
-});
-// Emotional metadata is applied automatically during recall and context assembly
-```
-
-```python
-# Python — retrieve peak moments
-peaks = memg.get_peak_moments(
-    entity_id=entity_id,
-    min_score=7.0,
-    limit=10,
-    since_date=datetime(2025, 3, 29)
-)
-# Returns: list[PeakMoment] — conversations with peak_score >= threshold
-
-# Python — emotionally-aware context building
-context = memg.build_memory_context(
-    entity_id=entity_id,
-    query=query,
-    emotional_scoring=True,
-    emotional_recall_boost=0.03,
-    empathetic_annotation=True
-)
-# Emotional metadata applied during recall scoring and context injection
-```
+See README.md for SDK interface and usage examples. Peak moments can be retrieved via `GetPeakMoments` / `getPeakMoments` / `get_peak_moments`. Emotionally-aware context building is automatic when `EmotionalScoring` is enabled -- emotional metadata on recalled facts is used for Ebbinghaus decay modulation, emotional relevance matching, and empathetic annotation.
 
 #### Interaction With Existing Subsystems
 
@@ -2681,22 +2392,7 @@ Each trigger type has specific conditions beyond the base probability and cooldo
 
 The engine also checks that the prediction fact's `temporal_status` is `current` — a prediction that was already resolved (reclassified to `historical` by a later extraction) is not eligible. This prevents the system from asking "How did the promotion go?" after the user already said "I got the promotion!" and the extraction stage recorded it.
 
-```
-eligible_predictions = SELECT * FROM mg_entity_fact
-  WHERE entity_uuid = ?
-    AND type = 'event'
-    AND tag = 'prediction'
-    AND temporal_status = 'current'
-    AND reference_time IS NOT NULL
-    AND (
-      reference_time BETWEEN now() AND now() + INTERVAL 3 DAY
-      OR (reference_time < now() AND (last_recalled_at IS NULL OR last_recalled_at < reference_time))
-    )
-  ORDER BY reference_time ASC
-  LIMIT 1
-```
-
-The `ORDER BY reference_time ASC` ensures the most time-sensitive prediction (the one whose deadline is soonest) is selected first. The `LIMIT 1` means the trigger evaluates a single prediction per session — if the user has 5 open predictions, the system follows up on the most urgent one, not all of them. The remaining predictions will be eligible in future sessions.
+The query filters for current event facts with the `prediction` tag and a non-null `reference_time`, matching predictions whose deadline is within 3 days in the future or already past without a follow-up recall. Results are ordered by `reference_time` ascending, ensuring the most time-sensitive prediction (the one whose deadline is soonest) is selected first. Only one prediction is evaluated per session — if the user has 5 open predictions, the system follows up on the most urgent one, not all of them. The remaining predictions will be eligible in future sessions.
 
 **`emotional_callback`** — The engine queries conversation summaries that scored above a significance threshold during their original extraction and have not been referenced in recall for at least 7 days. "Emotional" is determined by the presence of emotional marker words in the summary text (`worried`, `scared`, `excited`, `devastated`, `thrilled`, `anxious`, `heartbroken`, `terrified`, `overjoyed`, `furious`, `grief`, `panic`) — a simple heuristic rather than a sentiment model, because false negatives (missing an emotional conversation) are acceptable while false positives (following up on a non-emotional conversation as if it were emotional) are jarring.
 
@@ -2712,19 +2408,7 @@ A milestone is eligible if the entity's current state matches any of these thres
 
 When a milestone is detected, the engine loads the entity's **first conversation summary** (the very first session's summary, if available) and the entity's current top-significance facts. This gives the LLM material to contrast "then vs now" — a powerful nostalgia-plus-growth narrative. For session count milestones, the engine also computes a tag frequency distribution across all facts, providing a topical summary of the relationship: "You've discussed relationships (35 times), career (28 times), and health (15 times)."
 
-**`nostalgia`** — The engine checks whether the current date is within 3 days of the anniversary of a significant early event. "Significant early event" is defined as: any fact created within the first 7 days of the entity's existence with `significance >= 7`. The anniversary check uses month-and-day matching, ignoring year:
-
-```
-eligible_nostalgia = SELECT * FROM mg_entity_fact
-  WHERE entity_uuid = ?
-    AND created_at < (SELECT created_at FROM mg_entity WHERE uuid = ?) + INTERVAL 7 DAY
-    AND significance >= 7
-    AND ABS(
-      DAYOFYEAR(CURRENT_DATE) - DAYOFYEAR(created_at)
-    ) <= 3
-  ORDER BY significance DESC
-  LIMIT 1
-```
+**`nostalgia`** — The engine checks whether the current date is within 3 days of the anniversary of a significant early event. "Significant early event" is defined as: any fact created within the first 7 days of the entity's existence with `significance >= 7`. The anniversary check uses month-and-day matching (ignoring year), filtering for high-significance facts created during the entity's first week whose day-of-year is within 3 days of the current date. The highest-significance match is selected.
 
 If no anniversary match is found, the nostalgia trigger is ineligible for this session. This makes nostalgia triggers inherently rare — they can only fire near the anniversary of early interactions, which happens at most a few times per year. The rarity is a feature, not a limitation — nostalgia is most powerful when it surprises.
 
@@ -2913,88 +2597,11 @@ The user never asked for this. The system noticed it, surfaced it, and the LLM w
 
 **Why disabled by default.** Proactive surfacing depends on two prerequisites that not all applications provide: (1) an extraction stage that tags predictions with `tag: "prediction"` and sets `reference_time`, and (2) conversations of sufficient depth and duration to generate meaningful patterns and emotional content. Enabling it for a simple Q&A bot with short, factual conversations would produce either no triggers (no predictions, no emotional content) or awkward ones (pattern insights over a handful of sessions are not statistically meaningful). Applications that want proactive surfacing must opt in after ensuring their extraction stage supports it.
 
-#### SDK Interface
+See README.md for SDK interface and usage examples. The proactive engine exposes three key operations: `GetProactiveContext` (evaluate triggers at session start), `TrackPrediction` (register a prediction for future follow-up), and proactive context inclusion in `RecallAndBuildContext` when `ProactiveRecall` is enabled.
 
-The proactive engine is exposed through three SDK methods that mirror the Go library's internal functions:
+`GetProactiveContext` is designed to be called **once** at the start of a session, before the first `Chat()` or `Stream()` call. When `ProactiveRecall` is enabled in the config, `RecallAndBuildContext` calls it internally as a step between conscious fact loading and query-dependent recall. Callers who use `RecallAndBuildContext` (or `Chat()`/`Stream()`, which call it) do not need to invoke `GetProactiveContext` separately -- it is integrated into the unified pipeline.
 
-```go
-// Go — evaluate proactive triggers at session start
-func (m *MemG) GetProactiveContext(ctx context.Context, entityID string, opts ...ProactiveOption) (*ProactiveResult, error)
-
-// ProactiveResult contains the output of a proactive evaluation.
-type ProactiveResult struct {
-    Triggered bool              // Whether a trigger fired
-    Type      string            // Trigger type that fired (e.g. "milestone", "prediction_followup")
-    Context   string            // Formatted context string for injection
-    Metadata  map[string]any    // Trigger-specific metadata (e.g. session_count, prediction content)
-}
-
-// Go — register a prediction for future follow-up (alternative to extraction-stage tagging)
-func (m *MemG) TrackPrediction(ctx context.Context, entityID string, p Prediction) error
-
-// Prediction describes a user commitment or forecast with a future date.
-type Prediction struct {
-    Content              string     // What was predicted: "Career improvement by end of March"
-    TargetDate           time.Time  // When the prediction should be evaluated
-    SourceConversationID string     // Which conversation produced this prediction
-}
-
-// Go — RecallAndBuildContext checks config.ProactiveRecall internally
-// and includes proactive context in the unified pipeline when enabled.
-// No separate call needed for callers using Chat() or Stream().
-```
-
-```typescript
-// TypeScript — evaluate proactive triggers
-const proactive = await memg.getProactiveContext(entityId, {
-  trigger: 'session_start',
-  currentDate: new Date(),
-  sessionCount: 47
-});
-// Returns: { triggered: boolean, type: string, context: string, metadata: {...} } | null
-
-// TypeScript — register a prediction
-await memg.trackPrediction(entityId, {
-  content: "Career improvement by end of March",
-  targetDate: new Date('2026-03-31'),
-  sourceConversationId: 'conv-uuid'
-});
-
-// TypeScript — include proactive context in unified recall
-const context = await memg.buildMemoryContext(entityId, query, {
-  proactiveRecall: true,
-  sessionCount: 47,
-  currentDate: new Date()
-});
-```
-
-```python
-# Python — evaluate proactive triggers
-proactive = await memg.get_proactive_context(entity_id,
-    trigger="session_start",
-    current_date=datetime.now(),
-    session_count=47
-)
-# Returns: ProactiveResult(triggered=True, type="milestone", context="...", metadata={...}) or None
-
-# Python — register a prediction
-await memg.track_prediction(entity_id,
-    content="Career improvement by end of March",
-    target_date=datetime(2026, 3, 31),
-    source_conversation_id="conv-uuid"
-)
-
-# Python — include proactive context in unified recall
-context = await memg.build_memory_context(entity_id, query,
-    proactive_recall=True,
-    session_count=47,
-    current_date=datetime.now()
-)
-```
-
-`GetProactiveContext` is designed to be called **once** at the start of a session, before the first `Chat()` or `Stream()` call. When `ProactiveRecall` is enabled in the config, `RecallAndBuildContext` calls it internally as a step between conscious fact loading and query-dependent recall. Callers who use `RecallAndBuildContext` (or `Chat()`/`Stream()`, which call it) do not need to invoke `GetProactiveContext` separately — it is integrated into the unified pipeline.
-
-`TrackPrediction` is an explicit API for registering predictions outside the extraction pipeline. This is useful when the application identifies predictions through its own logic (e.g., a tarot reading app that knows every reading contains predictions) rather than relying on the extraction stage's LLM-based detection. Internally, `TrackPrediction` creates an event fact with `tag: "prediction"`, `reference_time: targetDate`, and `temporal_status: current` — the same structure the extraction stage would produce.
+`TrackPrediction` is an explicit API for registering predictions outside the extraction pipeline. This is useful when the application identifies predictions through its own logic (e.g., a tarot reading app that knows every reading contains predictions) rather than relying on the extraction stage's LLM-based detection. Internally, `TrackPrediction` creates an event fact with `tag: "prediction"`, `reference_time: targetDate`, and `temporal_status: current` -- the same structure the extraction stage would produce.
 
 #### Interaction With Existing Subsystems
 
@@ -3313,61 +2920,7 @@ No single layer handles all cases. The combination does.
 
 **Backward compatibility:** When `ConfidenceLabeling` is false (or when upgrading from a version that predates this subsystem), the context builder produces output identical to the pre-gating format -- no tier labels, no instruction block. Facts with zero-value confidence (pre-existing facts that were never assigned a confidence score) default to 1.0 and are labeled `[VERIFIED]`, matching the existing behavior where all facts are treated as authoritative. This ensures that applications upgrading to a version with confidence gating see no behavior change until they opt in.
 
-##### SDK Interface
-
-The confidence gating configuration is exposed through the SDK as part of the existing recall and context-building APIs:
-
-```typescript
-// TypeScript SDK
-const context = await memg.buildMemoryContext(entityId, query, {
-  confidenceLabeling: true,
-  confidenceFloor: 0.5,
-  sourceProvenance: true,
-  confidenceVerifiedThreshold: 0.8,
-  confidenceInferredThreshold: 0.5
-});
-// Each fact in the result includes:
-// { content, confidence, tier, sourceRole, lastReinforced, reinforcedCount }
-
-// Promote fact confidence via user confirmation
-await memg.confirmFact(entityId, factId);
-// Sets confidence to 1.0, source_role to "user"
-
-// Replace a wrong fact with the correct version
-await memg.correctFact(entityId, factId, "User does not have a sister");
-// Old fact reclassified to historical
-// New fact created with confidence 1.0, source_role "user"
-```
-
-```python
-# Python SDK
-context = memg.build_memory_context(
-    entity_id=entity_id,
-    query=query,
-    confidence_labeling=True,
-    confidence_floor=0.5,
-    source_provenance=True
-)
-# context.facts -> list of facts with .confidence, .tier, .source_role
-
-memg.confirm_fact(entity_id, fact_id)
-memg.correct_fact(entity_id, fact_id, "User does not have a sister")
-```
-
-```go
-// Go library
-ctx := memory.RecallAndBuildContext(ctx, repo, embedder, engine, entityUUID, query, memory.RecallConfig{
-    ConfidenceLabeling: true,
-    ConfidenceFloor:    0.5,
-    SourceProvenance:   true,
-})
-
-// Confirm a fact
-memory.ConfirmFact(ctx, repo, entityUUID, factUUID)
-
-// Correct a fact
-memory.CorrectFact(ctx, repo, embedder, entityUUID, factUUID, "User does not have a sister")
-```
+See README.md for SDK interface and usage examples. Confidence gating is configured through the existing recall and context-building APIs via `confidenceLabeling`, `confidenceFloor`, and `sourceProvenance` options. The SDK also exposes `confirmFact` (set confidence to 1.0) and `correctFact` (replace a wrong fact with the correct version) operations.
 
 ##### Expected Impact
 
@@ -3432,32 +2985,11 @@ User-visible memory introduces a new category of operations that expose the inte
 
 Six new SDK operations give users direct access to their memory profile. Each operation maps to existing store interfaces and fact lifecycle mechanisms, requiring no changes to the core data model.
 
-**List visible memories.** Returns the user's stored facts, grouped by category (derived from the `tag` field), with confidence and status indicators. This is the primary "show me what you know" operation.
-
-```typescript
-const memories = await memg.list(entityId, {
-  userVisible: true,
-  groupBy: 'category'
-});
-// Returns memories grouped by tag/category:
-// {
-//   personal: [{ content: "Name is Priya", confidence: 1.0, source: "user", ... }],
-//   work: [{ content: "Works at TCS", confidence: 0.8, source: "extracted", ... }],
-//   preferences: [{ content: "Likes quiet restaurants", confidence: 0.6, source: "inferred", ... }]
-// }
-```
+**List visible memories.** Returns the user's stored facts, grouped by category (derived from the `tag` field), with confidence and status indicators. This is the primary "show me what you know" operation. The result contains memories grouped by tag/category, where each fact includes its content, confidence score, source attribution (`"user"`, `"extracted"`, or `"inferred"`), and other metadata.
 
 The implementation uses `ListFactsMetadata` (Subsystem 4) to avoid loading embedding blobs — the user-facing view never needs vector data. Facts are filtered by the visibility rules described below (Fact Visibility Filtering) and grouped by tag. Within each group, facts are sorted by confidence descending, then by creation date descending. The `source` field in the response is derived from `SourceRole` and `Confidence`: user-stated facts (source_role = "user", confidence >= 0.9) are labeled "user", pipeline-extracted facts are labeled "extracted", and lower-confidence inferences are labeled "inferred". This three-level source labeling gives users an intuitive sense of how the AI acquired each piece of knowledge.
 
-**Correct a fact.** Replaces an incorrect fact with a corrected version, preserving the original as historical.
-
-```typescript
-await memg.correct(entityId, factId, {
-  newContent: "Works at Infosys, not TCS"
-});
-// Old fact -> temporal_status = "historical"
-// New fact -> confidence = 1.0, source_role = "user_explicit", temporal_status = "current"
-```
+**Correct a fact.** Replaces an incorrect fact with a corrected version, preserving the original as historical. The old fact's temporal status is set to `"historical"`, and a new fact is created with confidence 1.0, source_role `"user_explicit"`, and temporal_status `"current"`.
 
 The correction operation is a two-step atomic write:
 
@@ -3468,27 +3000,13 @@ The `source_role` value `"user_explicit"` is distinct from `"user"` (extracted f
 
 If both steps succeed, the conscious context cache is invalidated via `OnFactStatusChanged` (Subsystem 4) so the corrected fact appears in the user profile immediately rather than waiting for the 30-second cache TTL.
 
-**Confirm a fact.** Validates an uncertain fact as correct, boosting its confidence and reinforcement count.
-
-```typescript
-await memg.confirm(entityId, factId);
-// confidence -> 1.0
-// reinforcement_count += 1
-// reinforced_at -> now
-```
+**Confirm a fact.** Validates an uncertain fact as correct, boosting its confidence to 1.0, incrementing the reinforcement count, and updating `reinforced_at` to the current time.
 
 Confirmation is semantically equivalent to the user restating the fact in conversation — it triggers the same reinforcement mechanism (Technique 4). The fact's confidence is set to 1.0 (the user has verified it), its `reinforced_count` is incremented, its `reinforced_at` is set to the current time, and its TTL is reset based on its significance level. If the reinforcement count crosses the promotion threshold (5), the fact is promoted to `SignificanceHigh` and its TTL is cleared (never expires), just as it would be through conversational reinforcement.
 
 The key difference from conversational reinforcement is the confidence boost. When a duplicate extraction reinforces a fact, the confidence stays at whatever the extraction pipeline assigned. When a user confirms a fact, the confidence is set to 1.0 unconditionally — the user is the authoritative source. This distinction matters for confidence-weighted ranking (Subsystem 3): a user-confirmed fact receives no ranking penalty, while an extraction-confirmed fact retains its original confidence.
 
-**Pin a fact.** Marks a fact as permanently important, preventing decay and ensuring it remains in the semantic memory tier.
-
-```typescript
-await memg.pin(entityId, factId);
-// significance -> SignificanceHigh (10)
-// expires_at -> nil (never expires)
-// Qualifies for Tier 1 (Semantic Memory) regardless of original significance
-```
+**Pin a fact.** Marks a fact as permanently important, preventing decay and ensuring it remains in the semantic memory tier. Pinning sets significance to `SignificanceHigh` (10), clears `expires_at` (never expires), and qualifies the fact for Tier 1 (Semantic Memory) regardless of original significance.
 
 Pinning is the user's override of the system's significance assessment. The extraction pipeline assigned the fact significance 3 ("User is preparing for a job change" — the pipeline treated it as a low-significance transient note), but the user considers it critically important. Pinning sets significance to `SignificanceHigh` (10), clears the TTL (the fact never expires), and ensures it qualifies for Tier 1 semantic memory (Subsystem 9) on every request. The existing `UpdateSignificance` store method handles the significance change; TTL clearing uses the same mechanism as significance-based expiry but sets `ExpiresAt` to nil.
 
@@ -3505,29 +3023,13 @@ The `[Pinned]` annotation tells the LLM that this fact has special user-designat
 
 **Unpin** reverses the operation, restoring the fact's original significance and recalculating its TTL. The original significance is stored in a `pre_pin_significance` metadata field set at pin time, preventing information loss.
 
-**Add a user note.** Stores a user-authored fact that did not originate from conversational extraction.
-
-```typescript
-await memg.addUserNote(entityId, {
-  content: "I'm preparing for a job change, keep this in mind",
-  tag: "work"
-});
-// Stored as: type = "identity", confidence = 1.0, source_role = "user_explicit"
-// Embedded using the configured embedding model
-// Available for both semantic and episodic recall immediately
-```
+**Add a user note.** Stores a user-authored fact that did not originate from conversational extraction. The note is stored with `type: identity`, `confidence: 1.0`, `source_role: "user_explicit"`, embedded using the configured embedding model, and made available for both semantic and episodic recall immediately.
 
 User notes bypass the extraction pipeline entirely. The user provides the content directly; the system embeds it, assigns it the default metadata (`type: identity`, `temporal_status: current`, `significance: SignificanceMedium`), and inserts it. The user can optionally specify a `tag` for categorization and a `significance` override for importance.
 
 Notes are the most direct expression of the user's intent. They are not filtered, validated, or modified by the extraction pipeline — the user said it, so it is stored as-is. The only processing is embedding generation (necessary for recall) and content key computation (necessary for deduplication if the user adds the same note twice). If the user adds a note that conflicts with an existing slotted fact, normal slot-based conflict resolution (Subsystem 2) applies — the existing fact is reclassified to historical, the note becomes current.
 
-**Delete a fact.** Permanently removes a fact from the system.
-
-```typescript
-await memg.delete(entityId, factId);
-// Fact is permanently removed from all stores
-// Not reclassified to historical -- deleted entirely
-```
+**Delete a fact.** Permanently removes a fact from the system. The fact is permanently removed from all stores — not reclassified to historical, but deleted entirely.
 
 Deletion is the nuclear option. Unlike correction (which preserves the original as historical) or unpinning (which restores original significance), deletion removes the fact from the database entirely. It is not recoverable. This operation exists for two reasons: GDPR Article 17 (right to erasure) requires the ability to permanently delete personal data on request, and some facts are simply wrong in a way that historical preservation does not serve — a hallucinated fact like "User has three children" (when the user has none) should not persist as historical because it was never true.
 
@@ -3653,50 +3155,11 @@ User-visible memory creates a transparency surface that addresses four privacy r
 
 **Right to deletion.** Users can delete any individual fact. Deletion is permanent — the fact is removed from the database, not reclassified to historical. This satisfies GDPR Article 17 (right to erasure) and equivalent privacy regulations. The `DeleteFact` operation is already present in the `FactManager` interface; the user-visible memory API exposes it through the SDK.
 
-**Extraction preferences.** Users can configure which categories of knowledge the extraction pipeline is allowed to extract and retain. For example, a user might say "don't remember my financial details" — this is implemented as a per-entity tag exclusion list stored in the `mg_entity_preferences` table:
-
-```typescript
-await memg.setExtractionPreferences(entityId, {
-  excludeTags: ['financial', 'medical'],
-  patternVisibility: false
-});
-```
+**Extraction preferences.** Users can configure which categories of knowledge the extraction pipeline is allowed to extract and retain. For example, a user might say "don't remember my financial details" — this is implemented as a per-entity tag exclusion list stored in the `mg_entity_preferences` table. The user specifies which tags to exclude (e.g., `financial`, `medical`) and whether pattern-type facts should be visible.
 
 When the extraction pipeline produces a fact tagged as "financial" for this entity, the fact is silently dropped before insertion. The exclusion list is checked after extraction validation (Subsystem 2) and before storage. Existing facts with excluded tags are not retroactively deleted — the user must delete them manually via the memory profile. This prevents the dangerous scenario where a user changes their preferences and unknowingly triggers mass deletion of previously consented knowledge.
 
-**Data export.** Users can export their complete memory profile in a standard JSON format:
-
-```typescript
-const exported = await memg.exportMemory(entityId);
-// Returns:
-// {
-//   facts: [
-//     { content: "Works at Infosys", type: "identity", tag: "work",
-//       confidence: 1.0, source_role: "user_explicit", created_at: "...",
-//       temporal_status: "current", significance: 8, reinforced_count: 3 },
-//     ...
-//   ],
-//   summaries: [
-//     { conversation_date: "2026-03-15", summary: "Discussed trip to Japan...", ... },
-//     ...
-//   ],
-//   graph: [
-//     { subject: "User", predicate: "works_at", object: "Infosys", ... },
-//     ...
-//   ],
-//   preferences: {
-//     excludeTags: ["financial"],
-//     patternVisibility: false
-//   },
-//   metadata: {
-//     entity_id: "...",
-//     exported_at: "2026-03-29T12:00:00Z",
-//     fact_count: 247,
-//     summary_count: 32,
-//     format_version: "1.0"
-//   }
-// }
-```
+**Data export.** Users can export their complete memory profile in a standard JSON format. The export contains facts (with content, type, tag, confidence, source_role, temporal_status, significance, and reinforcement metadata), conversation summaries, knowledge graph triples (if the graph module is enabled), extraction preferences, and export metadata including a `format_version` field.
 
 The export includes facts (without embeddings — those are model-specific and non-portable), conversation summaries (the narrative layer), knowledge graph triples (if the graph module is enabled), extraction preferences, and metadata. Embeddings are excluded because they are tied to the specific embedding model used by the exporting system — a different system would need to re-embed the text content using its own model. The `format_version` field enables future schema evolution without breaking importers.
 
@@ -3726,16 +3189,7 @@ The visibility filter runs in the SDK layer, not the store layer. The store retu
 
 When a user denies an uncertain fact ("No, I do not have a sister"), the system must ensure that fact does not reappear. Without intervention, the extraction pipeline may re-extract the same inference from the same conversation on a future processing pass, or from a similar conversational pattern in a new session.
 
-The deny list is a per-entity set of content keys stored in the `mg_entity_deny` table:
-
-```
-mg_entity_deny
-  uuid          TEXT PRIMARY KEY
-  entity_uuid   TEXT NOT NULL
-  content_key   TEXT NOT NULL
-  denied_at     TIMESTAMP NOT NULL
-  original_content TEXT NOT NULL   -- human-readable record of what was denied
-```
+The deny list is a per-entity set of content keys stored in the `mg_entity_deny` table, which contains `uuid` (primary key), `entity_uuid`, `content_key`, `denied_at` (timestamp), and `original_content` (human-readable record of what was denied).
 
 When the user denies a fact:
 
@@ -3765,97 +3219,7 @@ All sub-settings (`UserCorrections`, `UserPinning`, `UserNotes`) default to `tru
 
 ##### SDK Interface (Complete)
 
-```typescript
-// TypeScript SDK
-
-// List memory profile
-const profile = await memg.list(entityId, { userVisible: true, groupBy: 'category' });
-
-// Correct a fact
-await memg.correct(entityId, factId, { newContent: "Works at Infosys" });
-
-// Confirm a fact (boost confidence to 1.0, reinforce)
-await memg.confirm(entityId, factId);
-
-// Pin a fact (never decays, always in semantic tier)
-await memg.pin(entityId, factId);
-
-// Unpin a fact (restore original significance and TTL)
-await memg.unpin(entityId, factId);
-
-// Add user note (bypass extraction pipeline)
-await memg.addUserNote(entityId, { content: "...", tag: "work" });
-
-// Deny a fact (delete and prevent re-extraction)
-await memg.deny(entityId, factId);
-
-// Delete a fact (permanent removal, no deny list entry)
-await memg.delete(entityId, factId);
-
-// Export all memories
-const exported = await memg.exportMemory(entityId);
-// Returns: { facts: [...], summaries: [...], graph: [...], preferences: {...}, metadata: {...} }
-
-// Configure extraction preferences
-await memg.setExtractionPreferences(entityId, {
-  excludeTags: ['financial'],
-  patternVisibility: false
-});
-```
-
-```python
-# Python SDK
-
-profile = memg.list_memory(entity_id, user_visible=True, group_by="category")
-
-memg.correct_fact(entity_id, fact_id, new_content="Works at Infosys")
-
-memg.confirm_fact(entity_id, fact_id)
-
-memg.pin_fact(entity_id, fact_id)
-
-memg.unpin_fact(entity_id, fact_id)
-
-memg.add_user_note(entity_id, content="...", tag="work")
-
-memg.deny_fact(entity_id, fact_id)
-
-memg.delete_fact(entity_id, fact_id)
-
-exported = memg.export_memory(entity_id)
-
-memg.set_extraction_preferences(entity_id, exclude_tags=["financial"], pattern_visibility=False)
-```
-
-```go
-// Go library
-
-profile, err := m.ListMemoryProfile(ctx, entityUUID, memg.ProfileOptions{
-    UserVisible: true,
-    GroupBy:     "category",
-})
-
-err = m.CorrectFact(ctx, entityUUID, factUUID, "Works at Infosys")
-
-err = m.ConfirmFact(ctx, entityUUID, factUUID)
-
-err = m.PinFact(ctx, entityUUID, factUUID)
-
-err = m.UnpinFact(ctx, entityUUID, factUUID)
-
-err = m.AddUserNote(ctx, entityUUID, store.UserNote{Content: "...", Tag: "work"})
-
-err = m.DenyFact(ctx, entityUUID, factUUID)
-
-err = m.DeleteFact(ctx, entityUUID, factUUID)
-
-exported, err := m.ExportMemory(ctx, entityUUID)
-
-err = m.SetExtractionPreferences(ctx, entityUUID, store.ExtractionPreferences{
-    ExcludeTags:       []string{"financial"},
-    PatternVisibility: false,
-})
-```
+See README.md for SDK interface and usage examples.
 
 ##### Interaction With Existing Subsystems
 
@@ -4037,484 +3401,5 @@ The strongest signal from the industry data is that **the memory management UX m
 
 ---
 
-## 9. Advanced Memory Features (v2) — TypeScript SDK
+*For TypeScript SDK v2 API details, data model extensions, and implementation specifics for all advanced memory features, see the README.md.*
 
-The TypeScript SDK (`sdk/typescript`) implements the advanced memory subsystems described in Subsystems 9-14 as a self-contained, in-process engine. This section documents the concrete TypeScript APIs, data model extensions, and behavioral details for each feature. All implementations described below are verified against the current source code.
-
----
-
-### 9.1 Hierarchical Memory Architecture
-
-**Problem solved:** The flat context builder packs all memories into a single token budget with no structural separation. Identity facts compete with episodic events and session context for the same budget space. The LLM receives an unstructured list and must infer which memories are permanent identity, which are situational recall, and which are current conversation state.
-
-**Design:** Three tiers partition the memory budget, each with distinct retrieval strategies and injection order. The `buildHierarchicalContext()` function replaces the flat `buildContext()` for applications that want structured memory injection.
-
-**Tiers:**
-
-| Tier | Content | Retrieval | Budget Config |
-|---|---|---|---|
-| **Semantic** (always-on) | Identity facts, high-significance patterns, pinned facts | Filtered DB query — no embedding search | `semanticBudget` in `HierarchicalContextOptions` |
-| **Episodic** (query-dependent) | Recalled events, predictions, contextual patterns | Hybrid vector + BM25 search | `episodicBudget` in `HierarchicalContextOptions` |
-| **Working** (session-scoped) | Turn summaries from the current conversation | Loaded from session state | `workingBudget` in `HierarchicalContextOptions` |
-
-**Structured output format:** The context string is assembled in section order, with each section labeled:
-
-1. `[IDENTITY]` — Semantic tier. Who this user is. Each fact annotated with confidence grade (`verified`, `likely`, `inferred`). Verbatim quotes included when available.
-2. `[EMOTIONAL STATE]` — Recent emotional context, sorted by recency. Each entry shows relative time and confidence level. Verbatim user words included inline.
-3. `[OPEN THREADS]` — Unresolved topics from the Zeigarnik tracker (see 9.4). Shows tag, content, and duration since thread opened.
-4. `[RECALLED CONTEXT — VERIFIED]` — Episodic facts with confidence >= 0.8. Facts the user explicitly stated.
-5. `[RECALLED CONTEXT — INFERRED]` — Episodic facts with confidence 0.5-0.79, prefixed with hedging language ("May be", "Possibly").
-6. `[PROACTIVE CONTEXT]` — Proactive surfacing items (see 9.7). Labeled by trigger type.
-7. `[SESSION CONTEXT]` — Working memory tier. Current conversation turn summaries.
-8. `[PAST CONVERSATIONS]` — Conversation summaries from previous sessions, with relative dates.
-
-**TypeScript API:**
-
-```typescript
-// Build hierarchical context for prompt injection.
-const ctx: HierarchicalContext = await memg.buildHierarchicalMemoryContext(
-  entityId: string,
-  queryText: string,
-  opts?: HierarchicalContextOptions
-);
-
-interface HierarchicalContextOptions {
-  workingBudget?: number;    // Max tokens for working memory tier
-  episodicBudget?: number;   // Max tokens for episodic tier
-  semanticBudget?: number;   // Max tokens for semantic tier
-  includeProactive?: boolean; // Include proactive surfacing (default: true)
-  includeEmotional?: boolean; // Include emotional state (default: true)
-  confidenceFloor?: number;  // Exclude facts below this confidence
-  maxAgeDays?: number;       // Maximum fact age to include (days)
-}
-
-interface HierarchicalContext {
-  working: string;     // Session context tier text
-  episodic: string;    // Recalled context tier text
-  semantic: string;    // Identity tier text
-  proactive: string;   // Proactive surfacing text
-  emotional: string;   // Emotional state text
-  totalTokens: number; // Tokens used across all tiers
-  formatted: string;   // The full assembled context string
-}
-```
-
-The `formatted` field contains the complete context string ready for system prompt injection. Individual tier fields are available for applications that need custom assembly.
-
-**Token budgets:** Each tier has an independent budget. The builder tracks `tokensUsed` globally and respects the overall `totalTokens` ceiling. If a tier overflows, facts are truncated by significance. Summary sections use a dedicated sub-budget that is also capped by remaining total budget.
-
-**Injection order rationale:** The ordering places identity first and session context last, exploiting the U-shaped attention curve documented in "Lost in the Middle" (Liu et al., 2023) — LLMs attend most strongly to the beginning and end of context. Identity (always relevant) occupies the high-attention start position; working memory (most recently relevant) occupies the high-attention end position; episodic memories occupy the middle where attention is weakest but semantic relevance compensates.
-
-**Research basis:** LightMem (ICLR 2026), TiMem, MemGPT (Packer et al., 2023), Atkinson-Shiffrin memory model (1968), Lost in the Middle (Liu et al., 2023).
-
----
-
-### 9.2 Emotional Memory Scoring
-
-**Problem solved:** Facts carry informational significance but not emotional significance. "Father passed away" and "Got promoted" both score high on significance but require fundamentally different recall, decay, and interaction behavior. Without emotional metadata, the system treats grief and celebration identically.
-
-**New Fact fields:**
-
-| Field | Type | Range | Purpose |
-|---|---|---|---|
-| `emotionalWeight` | `number` | 0.0-1.0 | Intensity of emotional significance. 0.0 = neutral/factual, 1.0 = deeply emotional |
-| `emotionalValence` | `string` | 9 categories | Dominant emotion category |
-
-**Valid valence categories:** `grief`, `joy`, `anxiety`, `hope`, `love`, `anger`, `fear`, `pride`, `neutral`.
-
-**Extraction:** The extraction prompt (`buildExtractionPrompt()` in `extract.ts`) instructs the LLM to output `emotional_weight` (0.0-1.0) and `emotional_valence` (one of the 9 categories) for each extracted fact. Validation clamps weight to [0, 1] and rejects valences not in the allowed set. Both fields default to `null` when not applicable.
-
-**Search engine boost:** The `HybridEngine.rank()` method applies an additive emotional boost to the hybrid score:
-
-```
-score += emotionalWeight * emotionalBoost
-```
-
-Default `emotionalBoost` is `0.05`. A fact with `emotionalWeight = 1.0` receives a +0.05 score boost — enough to break ties and surface emotionally significant facts in borderline relevance cases, but not enough to override genuine semantic irrelevance.
-
-**Context builder:** Emotional facts are loaded separately via a `listFactsFiltered` call with `emotionalValences` filter (excluding `neutral`). They appear in the `[EMOTIONAL STATE]` section of hierarchical context, sorted by recency, with relative timestamps and confidence annotations.
-
-**Research basis:** Peak-End Rule (Kahneman et al., 1993), Flashbulb Memory (Brown & Kulik, 1977), Emotional Memory Bias (Talarico & Rubin, 2003), MemoryBank (Zhong et al., AAAI 2024).
-
----
-
-### 9.3 Confidence-Gated Generation
-
-**Problem solved:** All recalled facts are injected with equal authority regardless of extraction confidence. A fact the user explicitly stated (`confidence: 1.0`) and a fact the LLM inferred from context (`confidence: 0.4`) appear side by side in the prompt with no distinction. The LLM cannot tell which facts are reliable and which are speculative, leading to hallucination when it states inferred facts with unwarranted certainty.
-
-**Confidence tiers:**
-
-| Tier | Confidence Range | Context Label | LLM Behavior |
-|---|---|---|---|
-| Verified | >= 0.8 | `[RECALLED CONTEXT — VERIFIED]` | State directly: "You mentioned X" |
-| Likely | 0.5 - 0.79 | Prefixed with "May be" | Hedge: "I think you mentioned X" |
-| Inferred | < 0.5 | Prefixed with "Possibly" | Speculate: "You might have mentioned X" |
-
-**`confidenceFloor` option:** The `HierarchicalContextOptions.confidenceFloor` parameter (default: 0.3) excludes all facts below the threshold from context injection. This prevents very-low-confidence guesses from reaching the LLM at all.
-
-**Search engine confidence adjustment:** The hybrid ranking engine applies a confidence-based score multiplier:
-
-```
-if (confidence < 1.0) {
-  score *= 0.95 + 0.05 * confidence;
-}
-```
-
-A fact with `confidence: 0.5` retains 97.5% of its raw score. A fact with `confidence: 0.0` retains 95%. This is a gentle tiebreaker, not a hard filter — low-confidence facts that are highly semantically relevant still surface.
-
-**Context builder behavior:** The `buildHierarchicalContext()` function splits recalled facts into `verified` (>= 0.8) and `inferred` (< 0.8) groups. Verified facts are rendered as direct statements with their confidence score. Inferred facts are rendered with hedging prefixes ("May be", "Possibly") and their confidence score, instructing the LLM to use appropriately tentative language.
-
-**Research basis:** HaluMem (Zhang et al., 2025), Misinformation Effect (Loftus, 1975).
-
----
-
-### 9.4 Open Thread Tracking (Zeigarnik Memory)
-
-**Problem solved:** Users mention unresolved situations — pending decisions, ongoing health issues, awaited results — that create psychological tension. The system has no mechanism to track which situations remain open and which have been resolved, so it cannot proactively follow up or surface ongoing concerns.
-
-**New Fact field:**
-
-| Field | Type | Values | Purpose |
-|---|---|---|---|
-| `threadStatus` | `string \| null` | `'open'`, `'resolved'`, `null` | Tracks whether a situation is unresolved |
-
-**Extraction:** The extraction prompt instructs the LLM to set `thread_status: "open"` for unresolved situations, pending decisions, and open questions. Validation normalizes the value to `'open'` or `null` — any value other than `'open'` is treated as no thread.
-
-**Search engine boost:** Open threads receive a fixed +0.03 additive score boost in hybrid ranking, ensuring they surface slightly more readily than closed facts at equal relevance.
-
-**TypeScript API:**
-
-```typescript
-// List all open threads for an entity.
-async getOpenThreads(
-  entityId: string,
-  limit?: number    // default: 20
-): Promise<Memory[]>
-
-// Mark a thread as resolved.
-async resolveThread(
-  entityId: string,
-  memoryId: string
-): Promise<boolean>
-```
-
-`getOpenThreads()` queries the store's `listOpenThreads()` method, which filters `mg_entity_fact` rows where `thread_status = 'open'`. Returns `Memory` objects with full metadata including `threadStatus`, `verbatim`, and `emotionalValence`.
-
-`resolveThread()` sets the fact's `thread_status` to `'resolved'` via `store.updateThreadStatus()`. This removes it from the open threads list and from the `[OPEN THREADS]` section of hierarchical context.
-
-**Context builder:** Open threads appear in the `[OPEN THREADS]` section with their tag, content, and duration since opened (computed from `startedAt` when available). Example output:
-
-```
-[OPEN THREADS] Unresolved topics to follow up on:
-- Relationship: User is considering breaking up with partner (still open, started 2 weeks ago)
-- Work: User awaiting results of job interview (still open, started 5 days ago)
-```
-
-**Research basis:** Zeigarnik Effect (1927) — interrupted tasks are remembered ~90% better than completed tasks. Ovsiankina Effect (1928) — unfinished tasks create motivational tension driving return to completion.
-
----
-
-### 9.5 Verbatim Store (Self-Reference Mirroring)
-
-**Problem solved:** Extracted facts are paraphrased summaries of what the user said: "User is grieving" instead of "I can't stop crying about my dad." The paraphrase loses the user's voice, emotional texture, and the specific phrasing that makes recalled memory feel personal rather than clinical.
-
-**New Fact field:**
-
-| Field | Type | Constraints | Purpose |
-|---|---|---|---|
-| `verbatim` | `string \| null` | Max 300 chars, only when confidence >= 0.8 | User's exact words that led to this fact |
-
-**Extraction:** The extraction prompt instructs: *"verbatim = the user's EXACT words that led to this fact, quoted verbatim. Only include when confidence >= 0.8. null otherwise."* Validation trims whitespace and caps at 300 characters. Empty strings are normalized to `null`.
-
-**Context builder:** When a fact has a `verbatim` field, the hierarchical context builder appends it inline:
-
-```
-- User's father recently passed away (verified) | User said: "I can't stop crying about my dad"
-```
-
-This appears in both the `[IDENTITY]` section (for conscious facts) and the `[RECALLED CONTEXT — VERIFIED]` section (for recalled facts). The quoted format signals to the LLM that these are the user's actual words, enabling more empathetic and personalized responses that mirror the user's own language.
-
-**Research basis:** Self-Reference Effect (Symons & Johnson, 1997; meta-analytic d = 0.45) — information processed in relation to the self is remembered significantly better than information processed semantically. Mirroring the user's own words back to them activates self-referential encoding, increasing perceived personalization.
-
----
-
-### 9.6 Temporal Semantic Memory
-
-**Problem solved:** Facts record *when they were extracted* (`createdAt`) but not *when the described state began*. A user who says "I've been dealing with anxiety for about three weeks" produces a fact with `createdAt = today`, but the anxiety started three weeks ago. The system has no way to represent or surface this temporal span.
-
-**New Fact field:**
-
-| Field | Type | Format | Purpose |
-|---|---|---|---|
-| `startedAt` | `string \| null` | ISO 8601 date (YYYY-MM-DD) | When the state or situation described by this fact began |
-
-**Extraction:** The extraction prompt instructs the LLM to compute `started_at` from relative language: *"For relative references like 'for 3 weeks', compute the date: today minus the duration."* Validation ensures ISO date format and rejects unparseable values.
-
-**Context builder:** When `startedAt` is present, the `[OPEN THREADS]` section displays temporal duration:
-
-```
-- Health: User experiencing anxiety (still open, started 3 weeks ago)
-```
-
-The `relativeDate()` helper converts ISO dates to human-readable relative durations ("3 days ago", "2 weeks ago", "1 month ago").
-
-**Research basis:** Beyond Dialogue Time (arXiv:2601.07468) — temporal reasoning about user state requires explicit temporal anchoring, not just message timestamps.
-
----
-
-### 9.7 Proactive Memory Surfacing
-
-**Problem solved:** The memory system is purely reactive — it only recalls facts when the user's query is semantically close. It never proactively surfaces relevant information: it does not follow up on unresolved situations, check in after emotional disclosures, celebrate milestones, or reference meaningful old memories. This makes the system feel like a search engine rather than a companion.
-
-**Design:** The `getProactiveContext()` function generates re-engagement triggers by scanning the fact store for specific patterns. Five trigger types are implemented:
-
-| Trigger Type | What It Detects | Priority | Example |
-|---|---|---|---|
-| `open_thread` | Unresolved situations, older = higher priority | 0.1-1.3 (scaled by significance + age) | "You mentioned considering breaking up — how is that going?" |
-| `emotional_checkin` | Negative emotional facts from 1-14 days ago | 0.0-0.5 (scaled by emotional weight) | "You mentioned experiencing grief 5 days ago. How are you feeling about that now?" |
-| `milestone` | Fact count milestones (50, 100, 250, 500, 1000) or day anniversaries (30, 90, 180, 365) | 0.8 | "This is a milestone — 100 memories stored together." |
-| `nostalgia` | High-significance facts older than 30 days, not recalled in 14+ days | 0.4 | "Remember when you mentioned: 'I got the job!' That was 45 days ago." |
-| `prediction_followup` | Prediction-tagged facts aged 7-30 days with open/unset thread status | 0.6 | "You made a prediction 12 days ago: 'I think I'll get the promotion.' Has anything changed?" |
-
-**Variable ratio reinforcement:** To avoid predictability, proactive surfacing uses a hash-based probability gate:
-
-```typescript
-const dayHash = now.getDate() + entityUuid.charCodeAt(0);
-const shouldSurface = (dayHash % 3) !== 0; // ~66% chance
-```
-
-This implements variable ratio reinforcement (Skinner): unpredictable reward timing produces the highest engagement rates. The system surfaces proactive context roughly two-thirds of the time, making it feel natural rather than mechanical.
-
-**TypeScript API:**
-
-```typescript
-// Get proactive surfacing items for an entity.
-async getProactiveContext(
-  entityId: string,
-  opts?: { trigger?: string; limit?: number }
-): Promise<ProactiveContext[]>
-
-interface ProactiveContext {
-  type: 'open_thread' | 'emotional_checkin' | 'milestone' | 'nostalgia' | 'prediction_followup';
-  content: string;         // Human-readable prompt for the LLM
-  sourceFactId: string;    // UUID of the triggering fact
-  priority: number;        // Sorting weight (higher = more important)
-  daysSince?: number;      // Days since the source fact was created
-}
-```
-
-Results are sorted by priority descending and capped at `limit` (default: 3). The `content` field is ready for injection into the `[PROACTIVE CONTEXT]` section of hierarchical context.
-
-**Research basis:** Variable Ratio Reinforcement (Skinner, 1957), Hook Model (Eyal, 2014), Spacing Effect (optimal-interval resurfacing strengthens memory bonds), Zeigarnik Effect (open threads).
-
----
-
-### 9.8 Segment-Level Extraction
-
-**Problem solved:** The standard extraction pipeline processes the entire conversation turn as a single unit. For long conversations that span multiple topics, this produces two problems: (1) the LLM extraction call receives a long, multi-topic transcript that dilutes attention on any single topic, and (2) trivial segments (greetings, acknowledgments) waste an extraction call.
-
-**Design:** `runSegmentedExtraction()` processes conversation by pre-segmented topic chunks. Each segment carries optional `topic` and `classification` metadata that are prepended to the transcript as context lines before the standard extraction pipeline runs.
-
-**TypeScript API:**
-
-```typescript
-// Run extraction over pre-segmented conversation chunks.
-async extractFromSegments(
-  entityId: string,
-  segments: SegmentInput[]
-): Promise<void>
-
-interface SegmentInput {
-  messages: Array<{ role: string; content: string }>;
-  topic?: string;           // e.g., "career", "relationship"
-  classification?: string;  // e.g., "QUESTION", "PREDICTION"
-}
-```
-
-**Behavior:**
-1. Each segment is checked independently for triviality via `isTrivialTurn()`. Trivial segments are skipped entirely — no LLM call.
-2. For non-trivial segments, the `topic` and `classification` fields are prepended to the first message as context lines (e.g., "Topic: career\nClassification: PREDICTION\n...").
-3. The standard `runExtraction()` pipeline handles the rest: LLM call, parse, validate, embed, dedup, slot conflict resolution, TTL assignment, persist.
-4. Results are aggregated: total `inserted` and `reinforced` counts across all segments.
-
-**Benefits:**
-- **Fewer extraction calls.** Trivial segments (greetings, filler) are skipped without an LLM call.
-- **More coherent facts.** Each extraction call receives a single-topic transcript, so the LLM has full topic context without cross-topic interference.
-- **Topic-aware extraction.** The prepended topic and classification metadata guide the LLM toward more accurate fact typing and tagging.
-
-**Research basis:** SeCom (ICLR 2025) — segment-level processing of conversational memory produces more coherent and complete knowledge extraction than whole-conversation processing.
-
----
-
-### 9.9 User-Visible Memory (Pin & Confirm)
-
-**Problem solved:** Users have no way to participate in their own memory curation. The system extracts, decays, and prunes facts autonomously. Industry data (see Research Foundation section) shows that hybrid approaches — where users can see and edit their memory — consistently outperform pure automatic extraction across all measured products.
-
-**New Fact field:**
-
-| Field | Type | Default | Purpose |
-|---|---|---|---|
-| `pinned` | `boolean` | `false` | Whether the user has pinned this fact |
-
-**TypeScript API:**
-
-```typescript
-// Pin a memory — it never decays.
-async pin(entityId: string, memoryId: string): Promise<boolean>
-
-// Unpin a memory — re-enable normal decay.
-async unpin(entityId: string, memoryId: string): Promise<boolean>
-
-// Confirm a memory is correct — boosts confidence to 1.0, reinforces.
-async confirm(entityId: string, memoryId: string): Promise<boolean>
-```
-
-**Pin behavior:** `pinFact()` sets `pinned = 1`, `significance = 10`, and `expires_at = NULL` on the fact row. This means:
-- The fact never expires (no TTL).
-- The fact qualifies for the semantic tier in hierarchical context (significance >= 8).
-- The fact is immune to staleness demotion and routine pruning.
-
-**Unpin behavior:** `unpinFact()` sets `pinned = 0`. The fact retains its current significance but is no longer immune to decay. A new TTL is not automatically assigned — the fact remains without expiry until the next reinforcement or manual significance adjustment.
-
-**Confirm behavior:** `confirmFact()` sets `confidence = 1.0`, increments `reinforced_count`, and updates `reinforced_at` to the current timestamp. This promotes an uncertain fact to verified status, affecting how it appears in confidence-gated context (moved from `[INFERRED]` to `[VERIFIED]` section).
-
-**Search engine boost:** Pinned facts receive a fixed +0.10 additive score boost in hybrid ranking (configurable via `pinnedBoost` option). This is the largest single boost in the ranking pipeline — larger than emotional boost (+0.05), open thread boost (+0.03), or engagement boost (max +0.02).
-
-**Research basis:** IKEA Effect (Norton, Mochon, Ariely, 2012) — people value things they helped create disproportionately more. User-pinned facts feel "theirs" and increase perceived memory quality. Endowment Effect (Thaler, 1980) — possession increases perceived value. Giving users ownership over their memory amplifies satisfaction.
-
----
-
-### 9.10 Personalization Throttle
-
-**Problem solved:** Without limits, the context builder can over-personalize — flooding the prompt with identity facts, emotional context, and thread tracking until the LLM becomes so focused on the user's history that it loses the ability to be helpful on the current task. Research shows that personalization follows an inverted U-curve: too little feels generic, too much feels invasive or distracting.
-
-**Configuration options:**
-
-| Option | Type | Default | Purpose |
-|---|---|---|---|
-| `maxPersonalFacts` | `number` | `15` | Caps identity + emotional + thread facts per context build |
-| `diversifyTopics` | `boolean` | `true` | No single tag exceeds 40% of recalled facts |
-| `freshnessBias` | `number` | `0.3` | Configurable recency preference (0.0-1.0) |
-
-**`maxPersonalFacts`:** The hierarchical context builder tracks a `personalFactCount` counter. Every fact added to the `[IDENTITY]`, `[EMOTIONAL STATE]`, or `[OPEN THREADS]` sections increments this counter. Once it reaches `maxPersonalFacts`, no more personal facts are added to those sections. Recalled context and session context are not subject to this cap — they are query-driven, not profile-driven.
-
-**`diversifyTopics`:** When enabled, the context builder caps any single tag at 40% of the recalled fact set before rendering the `[RECALLED CONTEXT]` section. The search engine also applies diversification: after ranking, if any tag exceeds 40% of results, excess facts in that tag have their score multiplied by 0.85, pushing them down. This prevents a user with 50 "work" facts and 5 "health" facts from having their entire recalled context be about work.
-
-**`freshnessBias`:** Configurable in `NativeConfig` to control how much recency affects recall ranking. Higher values favor recent facts; lower values favor pure relevance. The default of 0.3 provides a mild recency preference.
-
-**Research basis:** Inverted U-Curve of personalization (JAR, 2025), Personalization Backfire (MDPI, 2025) — excessive personalization reduces trust and perceived helpfulness.
-
----
-
-### 9.11 New Schema Fields
-
-The `mg_entity_fact` table gains 7 new columns in the v2 migration:
-
-| Column | SQL Type | Default | Nullable | Purpose |
-|---|---|---|---|---|
-| `emotional_weight` | `REAL` | — | Yes | Emotional intensity (0.0-1.0) |
-| `emotional_valence` | `TEXT` | — | Yes | Emotion category (one of 9 values) |
-| `verbatim` | `TEXT` | — | Yes | User's exact words (max 300 chars) |
-| `started_at` | `TEXT` | — | Yes | ISO date when the state began |
-| `thread_status` | `TEXT` | — | Yes | `'open'` or `'resolved'` |
-| `engagement_score` | `REAL` | `0` | No | Topic engagement level (0.0-1.0) |
-| `pinned` | `INTEGER` | `0` | No | User-pinned flag (0 or 1) |
-
-**Indexes added:**
-
-| Index | Columns | Purpose |
-|---|---|---|
-| `idx_mg_fact_thread` | `(entity_id, thread_status)` | Fast open thread queries |
-| `idx_mg_fact_pinned` | `(entity_id, pinned)` | Fast pinned fact queries |
-| `idx_mg_fact_emotional` | `(entity_id, emotional_valence)` | Fast emotional fact queries |
-
-**Migration strategy:** The schema uses `ALTER TABLE ... ADD COLUMN` statements that are applied idempotently. The SQLite store wraps each migration statement in a try-catch so that columns that already exist do not cause errors. New columns with nullable defaults are backward-compatible — existing rows have `NULL` values for the new fields, which the `rowToFact()` mapper handles with fallback defaults.
-
-**Full Fact type in TypeScript:**
-
-```typescript
-interface Fact {
-  uuid: string;
-  content: string;
-  embedding?: number[];
-  createdAt?: string;
-  updatedAt?: string;
-  factType: 'identity' | 'event' | 'pattern';
-  temporalStatus: 'current' | 'historical';
-  significance: number;
-  contentKey: string;
-  referenceTime?: string;
-  expiresAt?: string;
-  reinforcedAt?: string;
-  reinforcedCount: number;
-  tag: string;
-  slot: string;
-  confidence: number;
-  embeddingModel: string;
-  sourceRole: string;
-  recallCount: number;
-  lastRecalledAt?: string;
-  // v2 fields:
-  emotionalWeight?: number;
-  emotionalValence?: 'grief' | 'joy' | 'anxiety' | 'hope' | 'love' | 'anger' | 'fear' | 'pride' | 'neutral';
-  verbatim?: string;
-  startedAt?: string;
-  threadStatus?: 'open' | 'resolved' | null;
-  engagementScore?: number;
-  pinned?: boolean;
-}
-```
-
----
-
-### 9.12 New Store Interface Methods
-
-The `Store` interface (`store.ts`) gains 9 new methods for the v2 features. All methods return `T | Promise<T>` (the `MaybeAsync<T>` pattern) so both synchronous stores (SQLite) and asynchronous stores (Postgres, MySQL) can implement them.
-
-#### Pin & Confirm
-
-```typescript
-// Pin a fact: sets pinned=1, significance=10, expires_at=NULL.
-pinFact(factUuid: string): MaybeAsync<void>;
-
-// Unpin a fact: sets pinned=0.
-unpinFact(factUuid: string): MaybeAsync<void>;
-
-// Confirm a fact: sets confidence=1.0, increments reinforced_count,
-// updates reinforced_at to now.
-confirmFact(factUuid: string): MaybeAsync<void>;
-```
-
-#### Thread Tracking
-
-```typescript
-// Set thread_status on a fact ('open' or 'resolved').
-updateThreadStatus(factUuid: string, status: string): MaybeAsync<void>;
-
-// List facts with thread_status='open' for an entity, ordered by
-// significance DESC, created_at ASC. Returns full Fact objects.
-listOpenThreads(entityUuid: string, limit: number): MaybeAsync<Fact[]>;
-```
-
-#### Emotional & Engagement
-
-```typescript
-// Update emotional weight and valence on a fact.
-updateEmotionalWeight(factUuid: string, weight: number, valence: string): MaybeAsync<void>;
-
-// Update engagement score on a fact.
-updateEngagementScore(factUuid: string, score: number): MaybeAsync<void>;
-```
-
-#### Entity Statistics (for Milestones)
-
-```typescript
-// Count total facts for an entity (used for milestone detection).
-countEntityFacts(entityUuid: string): MaybeAsync<number>;
-
-// Get the creation date of the oldest fact for an entity (used for
-// anniversary milestone detection). Returns ISO date string or null.
-getEntityFirstFactDate(entityUuid: string): MaybeAsync<string | null>;
-```
-
-All 9 methods are implemented in `MemGStore` (SQLite), `PostgresStore`, and `MySQLStore`. Custom store implementations must add these methods to support v2 features.

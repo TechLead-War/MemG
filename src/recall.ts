@@ -122,6 +122,9 @@ export async function recallFactsWithVector(
 
   return results.map((r) => {
     const orig = factById.get(r.id);
+    if (!orig) {
+      console.warn(`[memg] recall: fact ${r.id} not found in lookup map, new fields will be empty`);
+    }
     return {
       id: r.id,
       content: r.content,

@@ -19,8 +19,18 @@ import type { Store } from './store.js';
 // mysql2 is an optional peer dependency — use `any` to avoid compile-time requirement.
 type Pool = any;
 
+function toMySQLDatetime(iso: string): string {
+  return iso.replace('T', ' ').slice(0, 19);
+}
+
 function nowISO(): string {
-  return new Date().toISOString();
+  return toMySQLDatetime(new Date().toISOString());
+}
+
+function sanitizeDatetime(val: string | null | undefined): string | null {
+  if (!val) return null;
+  if (val.includes('T')) return toMySQLDatetime(val);
+  return val;
 }
 
 function encodeEmbedding(vec: number[]): Buffer {
@@ -74,7 +84,7 @@ function rowToFact(row: any): Fact {
     emotionalValence: row.emotional_valence ?? undefined,
     verbatim: row.verbatim ?? undefined,
     startedAt: row.started_at ?? undefined,
-    threadStatus: row.thread_status ?? undefined,
+    threadStatus: row.thread_status ?? null,
     engagementScore: row.engagement_score ?? 0,
     pinned: row.pinned === 1,
   };
@@ -449,7 +459,7 @@ export class MySQLStore implements Store {
       emotionalValence: row.emotional_valence ?? undefined,
       verbatim: row.verbatim ?? undefined,
       startedAt: row.started_at ?? undefined,
-      threadStatus: row.thread_status ?? undefined,
+      threadStatus: row.thread_status ?? null,
       engagementScore: row.engagement_score ?? 0,
       pinned: row.pinned === 1,
     }));
@@ -529,15 +539,15 @@ export class MySQLStore implements Store {
         entityUuid,
         fact.content,
         embedding,
-        fact.createdAt ?? now,
-        fact.updatedAt ?? now,
+        sanitizeDatetime(fact.createdAt) ?? now,
+        sanitizeDatetime(fact.updatedAt) ?? now,
         fact.factType ?? 'identity',
         fact.temporalStatus ?? 'current',
         fact.significance ?? 5,
         fact.contentKey ?? '',
-        fact.referenceTime ?? null,
-        fact.expiresAt ?? null,
-        fact.reinforcedAt ?? null,
+        sanitizeDatetime(fact.referenceTime),
+        sanitizeDatetime(fact.expiresAt),
+        sanitizeDatetime(fact.reinforcedAt),
         fact.reinforcedCount ?? 0,
         fact.tag ?? '',
         fact.slot ?? '',
@@ -545,7 +555,7 @@ export class MySQLStore implements Store {
         fact.embeddingModel ?? '',
         fact.sourceRole ?? '',
         fact.recallCount ?? 0,
-        fact.lastRecalledAt ?? null,
+        sanitizeDatetime(fact.lastRecalledAt),
         fact.emotionalWeight ?? null,
         fact.emotionalValence ?? null,
         fact.verbatim ?? null,
@@ -573,15 +583,15 @@ export class MySQLStore implements Store {
             entityUuid,
             fact.content,
             embedding,
-            fact.createdAt ?? now,
-            fact.updatedAt ?? now,
+            sanitizeDatetime(fact.createdAt) ?? now,
+            sanitizeDatetime(fact.updatedAt) ?? now,
             fact.factType ?? 'identity',
             fact.temporalStatus ?? 'current',
             fact.significance ?? 5,
             fact.contentKey ?? '',
-            fact.referenceTime ?? null,
-            fact.expiresAt ?? null,
-            fact.reinforcedAt ?? null,
+            sanitizeDatetime(fact.referenceTime),
+            sanitizeDatetime(fact.expiresAt),
+            sanitizeDatetime(fact.reinforcedAt),
             fact.reinforcedCount ?? 0,
             fact.tag ?? '',
             fact.slot ?? '',
@@ -589,7 +599,7 @@ export class MySQLStore implements Store {
             fact.embeddingModel ?? '',
             fact.sourceRole ?? '',
             fact.recallCount ?? 0,
-            fact.lastRecalledAt ?? null,
+            sanitizeDatetime(fact.lastRecalledAt),
             fact.emotionalWeight ?? null,
             fact.emotionalValence ?? null,
             fact.verbatim ?? null,
@@ -785,7 +795,7 @@ export class MySQLStore implements Store {
     const now = nowISO();
     await this.pool.query(
       `UPDATE mg_entity_fact SET reinforced_at = ?, reinforced_count = reinforced_count + 1, expires_at = ?, updated_at = ? WHERE uuid = ?`,
-      [now, newExpiresAt, now, factUuid]
+      [now, sanitizeDatetime(newExpiresAt), now, factUuid]
     );
   }
 
@@ -850,7 +860,7 @@ export class MySQLStore implements Store {
 
   async pruneStaleSummaries(days: number = 90): Promise<number> {
     await this.ready();
-    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const cutoff = toMySQLDatetime(new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString());
     const [result] = await this.pool.query(
       `UPDATE mg_conversation SET summary = '', summary_embedding = NULL WHERE created_at < ? AND summary != ''`,
       [cutoff]
@@ -888,7 +898,7 @@ export class MySQLStore implements Store {
   ): Promise<{ session: FactSession; isNew: boolean }> {
     await this.ready();
     const now = new Date();
-    const nowStr = now.toISOString();
+    const nowStr = toMySQLDatetime(now.toISOString());
 
     const [rows] = await this.pool.query(
       `SELECT uuid, entity_id, process_id, created_at, expires_at, entity_mentions, message_count FROM mg_session WHERE entity_id = ? AND process_id = ? AND expires_at > ? ORDER BY created_at DESC LIMIT 1`,
@@ -897,7 +907,7 @@ export class MySQLStore implements Store {
 
     if (rows.length > 0) {
       const row = rows[0];
-      const newExpiry = new Date(now.getTime() + timeoutMs).toISOString();
+      const newExpiry = toMySQLDatetime(new Date(now.getTime() + timeoutMs).toISOString());
       await this.pool.query(
         `UPDATE mg_session SET expires_at = ? WHERE uuid = ?`,
         [newExpiry, row.uuid]
@@ -919,7 +929,7 @@ export class MySQLStore implements Store {
     }
 
     const id = randomUUID();
-    const expiresAt = new Date(now.getTime() + timeoutMs).toISOString();
+    const expiresAt = toMySQLDatetime(new Date(now.getTime() + timeoutMs).toISOString());
     await this.pool.query(
       `INSERT INTO mg_session (uuid, entity_id, process_id, created_at, expires_at, entity_mentions) VALUES (?, ?, ?, ?, ?, '[]')`,
       [id, entityUuid, processUuid, nowStr, expiresAt]
@@ -968,7 +978,7 @@ export class MySQLStore implements Store {
     const now = nowISO();
     await this.pool.query(
       `INSERT INTO mg_message (uuid, conversation_id, role, content, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-      [msg.uuid, conversationUuid, msg.role, msg.content, msg.kind ?? 'text', msg.createdAt ?? now]
+      [msg.uuid, conversationUuid, msg.role, msg.content, msg.kind ?? 'text', sanitizeDatetime(msg.createdAt) ?? now]
     );
     await this.pool.query(
       `UPDATE mg_conversation SET updated_at = ? WHERE uuid = ?`,
@@ -1038,7 +1048,7 @@ export class MySQLStore implements Store {
         ts.summary,
         embedding,
         ts.isOverview ? 1 : 0,
-        ts.createdAt ?? nowISO(),
+        sanitizeDatetime(ts.createdAt) ?? nowISO(),
       ]
     );
   }
@@ -1090,7 +1100,7 @@ export class MySQLStore implements Store {
         embedding,
         a.supersededBy ?? null,
         a.turnNumber ?? 0,
-        a.createdAt ?? nowISO(),
+        sanitizeDatetime(a.createdAt) ?? nowISO(),
       ]
     );
   }

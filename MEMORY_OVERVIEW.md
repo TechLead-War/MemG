@@ -1,224 +1,162 @@
-# MemG — Memory System Overview
+# MemG -- Memory Overview
 
-This document explains how MemG gives LLMs persistent memory. It covers the key ideas and design decisions at a high level. For implementation details, algorithms, data structures, and production subsystems, see [MEMORY_ARCHITECTURE.md](MEMORY_ARCHITECTURE.md).
+## 1. What is MemG
 
----
-
-## The Problem
-
-LLMs are stateless. Every request starts from zero — the model remembers nothing from prior conversations. If a user says "I'm allergic to peanuts" today, the model has no idea tomorrow.
-
-The obvious fix — dump all past conversations into every request — fails because:
-
-- **Context windows are finite.** A few weeks of chat history exceeds even the largest windows.
-- **Noise kills quality.** Stuffing irrelevant history into the prompt makes answers worse, not better.
-- **Not all knowledge is explicit.** Some facts are patterns observed across conversations, not direct quotes.
-
-MemG solves this with five techniques that work together behind a simple API.
+MemG is a pluggable memory layer for language model applications. It gives LLMs persistent memory across conversations by intercepting API calls, recalling relevant knowledge from stored facts, and asynchronously extracting new knowledge from every interaction. The result is an LLM that remembers who it is talking to, what has been discussed before, and what matters most -- without the developer building any of this from scratch. MemG ships as a zero-code reverse proxy, a native SDK (Go, TypeScript, Python), and an MCP server for agent frameworks.
 
 ---
 
-## The Five Techniques
+## 2. The Problem
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        MemG Memory                          │
-│                                                             │
-│  ┌───────────┐  ┌───────────┐  ┌──────────────────────┐    │
-│  │ Long-Term │  │Short-Term │  │     Write Path        │    │
-│  │  Recall   │  │  Session  │  │                       │    │
-│  │           │  │  History  │  │  Distillation → Facts │    │
-│  │ Facts +   │  │           │  │  Summaries → Recaps   │    │
-│  │ Summaries │  │  Recent   │  │  Lifecycle → Decay,   │    │
-│  │ by        │  │  messages │  │    Reinforce, Evolve  │    │
-│  │ relevance │  │  (capped) │  │                       │    │
-│  └─────┬─────┘  └─────┬─────┘  └──────────┬───────────┘    │
-│        │              │                    │                 │
-│        └──────────┬───┘                    │                 │
-│                   ▼                        │                 │
-│          LLM receives rich,               │                 │
-│          relevant context                  │                 │
-│                   │                        │                 │
-│                   ▼                        │                 │
-│            LLM responds ──────────────────►│                 │
-│                                    (async extraction)       │
-└─────────────────────────────────────────────────────────────┘
-```
+Large language models are stateless. Every request is a blank slate -- the model cannot recall anything from previous conversations. If a user says "I'm allergic to peanuts" today, the model has zero knowledge of that tomorrow.
 
-### 1. Semantic Retrieval — "What do I know that's relevant right now?"
+The naive solution is to dump the entire conversation history into every request. This fails for three reasons:
 
-This is the core read path. When the user sends a message, MemG finds the most relevant stored facts — even if the wording is completely different from how they were originally stated.
-
-**How it works conceptually:**
-
-- Every stored fact is converted into a numerical vector (an embedding) that captures its *meaning*, not just its words.
-- The user's query is also converted into a vector using the same model.
-- MemG finds facts whose vectors point in a similar direction to the query vector — meaning they're semantically related.
-- It also does keyword matching (BM25) to catch exact term overlaps that pure semantic search might underweight.
-- The two scores are combined. The balance adapts: short queries lean more on keywords, longer queries lean more on meaning.
-- A smart cutoff (the Kneedle algorithm) decides how many facts to return based on the score distribution — instead of always returning a fixed number, it stops where scores drop from "clearly relevant" to "noise."
-
-**Why this design:**
-
-- Hybrid search (vectors + keywords) covers each method's blind spots.
-- Brute-force search over all facts is used instead of approximate indexes, because per-user fact stores are small enough (hundreds to low thousands) that exact search is both fast and complete.
-- Dynamic cutoff means the LLM gets a clean, focused set of facts rather than being flooded with marginally relevant ones.
-
-### 2. Session Tracking — "What just happened in this conversation?"
-
-Within a single conversation, you need continuity. If the user says "My name is Alice" and then asks "What's my name?", the system shouldn't wait for fact extraction — it should remember the conversation.
-
-**How it works conceptually:**
-
-- Messages are grouped into sessions based on activity. A session stays open as long as messages keep flowing (sliding timeout, default 30 minutes).
-- The most recent messages (default: 20 turns) are loaded and included in every request, giving the model perfect short-term recall.
-- When a session expires due to inactivity, a new one begins as a clean slate. The old session's conversation is summarized in the background (Technique 5).
-
-**Why this design:**
-
-- The sliding timeout creates natural conversation boundaries — you don't carry breakfast recipe context into an afternoon coding session.
-- Capping message history prevents unbounded prompt growth while keeping recent context sharp.
-- MemG deliberately does not attempt topic segmentation within sessions. Figuring out what "this" refers to when the user switches topics is the LLM's job — MemG is a memory layer, not a reasoning engine.
-
-### 3. Knowledge Distillation — "What should I remember from this conversation?"
-
-Retrieval and sessions are read paths. Distillation is the write path — it creates new knowledge from conversations.
-
-**How it works conceptually:**
-
-- After every LLM response, the conversation turn is sent to an extraction pipeline that runs in the background.
-- An LLM analyzes the exchange and extracts structured facts: "User has a dog named Max", "User's dog is a golden retriever", "User recently adopted their dog."
-- Each fact is embedded and stored, immediately available for future recall.
-- This is asynchronous — the user doesn't wait for extraction. Facts are ready within 1–2 seconds.
-
-**Why this design:**
-
-- Raw messages are noisy and implicit. Distillation produces clean, searchable, atomic pieces of knowledge.
-- Extraction stages are user-defined because different applications need fundamentally different strategies — a medical assistant extracts symptoms and medications, a coding assistant extracts tech preferences and architecture decisions. There is no universal extraction prompt.
-- Trivial exchanges ("hi", "ok", "thanks") are detected and skipped before calling the extraction LLM, saving cost without losing knowledge.
-
-### 4. Memory Lifecycle — "How should knowledge age, change, and be forgotten?"
-
-Without lifecycle management, every fact is permanent and equal. A lunch from six months ago sits alongside a life-threatening allergy. Old addresses coexist with current ones. The fact store grows without bound.
-
-MemG gives every fact three properties that control how it lives and dies:
-
-**Fact Types — what kind of knowledge is this?**
-
-| Type | What it is | How it evolves |
-|---|---|---|
-| **Identity** | Enduring truths: "lives in Seattle", "allergic to peanuts" | Replaced — old value becomes historical, new value becomes current |
-| **Event** | Point-in-time occurrences: "ate pasta on March 18" | Accumulated — events never supersede each other |
-| **Pattern** | Behavioral tendencies: "tends to eat pasta for breakfast" | Strengthened or weakened by evidence over time |
-
-**Temporal Status — is this still true?**
-
-When a user moves from Austin to Seattle, MemG doesn't delete "lives in Austin" — it reclassifies it as *historical*. The system can now answer both "Where do you live?" (Seattle) and "Have you ever lived in Austin?" (yes, previously). Historical facts get a recall penalty but aren't invisible.
-
-**Significance — how important is this?**
-
-| Level | Examples | Lifespan |
-|---|---|---|
-| High (10) | Allergies, major life events | Never expires |
-| Medium (5) | Current book, workplace | 30 days without reinforcement |
-| Low (1–4) | Today's lunch, a meeting time | 7 days without reinforcement |
-
-Significance controls *how long* a fact survives, not *how loudly* it surfaces. A peanut allergy doesn't appear in response to "What's the weather?" just because it's high-significance. It still must pass the relevance threshold. Significance determines lifespan, not recall priority.
-
-**Reinforcement — repetition prevents forgetting.**
-
-When a fact is re-extracted (the user mentions it again in a later conversation), its decay timer resets. A fact mentioned in 5+ separate conversations gets promoted to permanent. This mirrors how human memory works — repetition burns things in.
-
-**Decay — forgetting improves quality.**
-
-This is counterintuitive but critical: a smaller, well-pruned fact store produces *better* answers than a larger, noisier one. Expired low-value facts would otherwise fill the retrieval results with marginally relevant noise, drowning out the genuinely useful facts. Forgetting is a recall precision mechanism, not just housekeeping.
-
-### 5. Conversation Summaries — "What happened last time we talked?"
-
-Facts capture atomic knowledge ("budget is $3000", "prefers Airbnb"). But conversations have narrative — decisions made, threads left open, plans in progress. Summaries capture the story that individual facts cannot.
-
-**How it works conceptually:**
-
-- When a session expires and a new one begins, the old session's full conversation is summarized by the LLM.
-- The summary is embedded and stored, just like facts.
-- During recall, summaries go through the same relevance ranking as facts. They surface only when relevant to the current query.
-- Trivial conversations ("What's my email?" → response) produce no summary.
-- Summaries are pruned after 90 days — old enough that their narrative context is unlikely to be needed.
-
-**Why both facts and summaries:**
-
-| Question | What answers it |
-|---|---|
-| "What's my budget?" | A fact: "$3000" |
-| "How's my trip planning going?" | A summary: "Planned Japan trip, narrowed to Tokyo, 7 days in April, Airbnb, needs visa, checking flights Friday" |
-
-Facts give precision. Summaries give continuity. Together, the LLM can both answer specific questions and naturally pick up where a previous conversation left off.
+1. **Context windows are finite.** Models accept a limited number of tokens. A few weeks of conversation history exceeds that limit.
+2. **Irrelevant context degrades quality.** Stuffing pages of old conversations into the prompt drowns the model in noise and produces worse answers than if it had no context at all.
+3. **Not all knowledge is in conversations.** Some facts are derived -- "User tends to prefer concise answers" is a pattern observed across many conversations, not a quote from any single one.
 
 ---
 
-## How It All Comes Together
+## 3. Three Modes of Operation
 
-Here's what happens during a single request:
+**Proxy mode** -- A reverse proxy that sits between your application and the LLM API. It intercepts chat completion requests, recalls relevant facts and conversation summaries, injects them into the system prompt, forwards to the real API, and extracts knowledge from the response in the background. Zero code changes required -- change one environment variable and your existing app gets persistent memory.
 
-```
-User: "Can you recommend a restaurant for tonight?"
+**Library mode** -- Native SDKs for Go, TypeScript, and Python that provide programmatic APIs. Call `Chat()` or `Stream()` with a user identifier, and MemG handles recall, context building, and extraction automatically. Direct recall APIs are also available for applications that need fine-grained control over what is retrieved and how it is injected.
 
-BEFORE the LLM call:
-  1. Embed the query (once, reused for all recall)
-  2. Load user profile (top facts by significance — always present)
-     → "Allergic to peanuts", "Vegetarian", "Lives in Portland"
-  3. Recall relevant facts (semantic + keyword search, dynamic cutoff)
-     → "Dislikes loud environments"
-  4. Recall relevant summaries (same search, separate layer)
-     → [Mar 10] "Discussed wanting to try more plant-based restaurants"
-  5. Load recent session messages (last 20 turns)
-  6. Assemble everything into the LLM prompt
-
-THE LLM RESPONDS with a personalized recommendation.
-
-AFTER the response (async, in background):
-  • Save messages to conversation log
-  • Extract new facts from the exchange
-  • Track which recalled facts were used
-  • (On session expiry: summarize the conversation)
-```
-
-Three layers of context — user profile, query-relevant facts, and conversation summaries — ensure the LLM is always informed. The profile provides baseline identity. Recalled facts provide topical relevance. Summaries provide conversational continuity. And the write path continuously learns from every interaction.
+**MCP mode** -- Exposes memory operations as JSON-RPC tools that agent frameworks can invoke directly. Any MCP-compatible agent can store facts, recall context, manage sessions, and query the knowledge graph through a standard protocol.
 
 ---
 
-## Key Design Principles
+## 4. How Memory Flows Through the System
 
-**Memory, not intelligence.** MemG provides context. It does not resolve pronouns, detect topic shifts, or reason about what the user means. That's the LLM's job.
+The end-to-end lifecycle of a single interaction:
 
-**Pluggable at every layer.** Storage backends, LLM providers, embedding models, and extraction stages are all swappable interfaces. The core handles lifecycle mechanics; domain-specific decisions belong to the application.
+1. **User sends a message.** MemG receives the request via proxy interception, SDK call, or MCP tool invocation.
 
-**Small and exact over large and approximate.** Per-user memory is small enough for exact search. No approximate indexes, no external vector databases, no C++ dependencies.
+2. **MemG embeds the query.** The user's message is converted into a dense vector embedding -- a numeric representation of its meaning. This vector is computed once and reused for all recall passes.
 
-**Forgetting is a feature.** Pruning stale facts directly improves answer quality by keeping the retrieval pool clean.
+3. **Context is assembled from five layers.** Each layer contributes a different kind of memory:
+   - **User profile (semantic memory)** -- The user's most important identity facts (name, location, allergies, job) are loaded unconditionally on every request, regardless of what the user asked. The LLM always knows who it is talking to.
+   - **Session context (turn-range summaries)** -- Compressed summaries of earlier turns in the current conversation, providing continuity beyond the raw message window.
+   - **Recalled facts (episodic memory)** -- Facts retrieved by semantic similarity and keyword matching against the user's query, filtered by a dynamic cutoff that adapts to the score distribution.
+   - **Artifacts** -- Code blocks, JSON, SQL, and other structured outputs from earlier in the conversation, retrievable by description or content.
+   - **Conversation summaries** -- Narrative summaries of past sessions, recalled by relevance to the current query.
 
-**Async by default.** Extraction, summarization, recall tracking, and pruning all happen in the background. The user never waits for memory operations.
+4. **The LLM responds with full context.** The assembled memory is injected into the system prompt alongside the recent conversation history. The model generates its response informed by everything the system knows.
+
+5. **Background pipeline processes the exchange.** After the response is returned to the user, a unified background pipeline kicks off asynchronously:
+   - Atomic facts are extracted from the conversation via an LLM call.
+   - Structured outputs (code, JSON, SQL) are detected and stored as artifacts.
+   - Entity mentions (proper nouns, technical terms) are accumulated for session-level context.
+   - If the conversation has grown beyond the working memory window, older turns are compressed into turn-range summaries.
+
+6. **On session expiry, the full conversation is summarized.** When the user goes idle long enough for the session to expire, the complete conversation is summarized by the LLM and stored with an embedding for future recall.
 
 ---
 
-## What's in MEMORY_ARCHITECTURE.md
+## 5. The Five Core Techniques
 
-The deep-dive document covers everything above in full detail, plus:
+### Semantic Retrieval (Long-Term Memory)
 
-- **The math** — cosine similarity formula, BM25 scoring, hybrid weight adaptation, Kneedle algorithm mechanics
-- **The data model** — complete `Fact` struct with all 20+ fields, defaults, and field-level explanations
-- **Polysemy handling** — how contextual embeddings resolve ambiguous words
-- **Replacement vs accumulation** — the hard problem of deciding when "I love apple" supersedes "I love mango"
-- **Slot-based conflict resolution** — automatic handling of single-valued attributes (location, job, name)
-- **Slot normalization** — embedding-based canonical matching so "spouse" and "partner" resolve to the same slot
-- **Extraction validation** — filtering empty, oversized, low-confidence, and ungrounded facts
-- **Confidence-weighted ranking** — small penalty for uncertain inferences during retrieval
-- **Embedding mismatch detection and re-embedding** — handling model changes without silent amnesia
-- **Conscious mode** — always-on user profile injection with staleness demotion for mutable facts
-- **Fact filtering** — per-call scoping by type, status, tags, significance, and time range
-- **Embedding backfill** — healing facts stored during provider outages
-- **Context builder internals** — token budgets, cross-component deduplication, priority ordering
-- **Runtime efficiency** — fixed-worker pools, bounded queues, metadata-only reads, batch pruning, connection pooling
-- **Consolidation** — background clustering of old events into pattern facts
-- **Recall usage tracking** — RecallCount / LastRecalledAt feedback signals
-- **Concurrency bounds** — semaphore-capped background goroutines, HTTP client reuse, candidate caps
+Every piece of knowledge is stored as a fact -- a short natural language statement like "User is allergic to peanuts" -- paired with a dense vector embedding that represents its meaning. When the user sends a message, MemG embeds the query and measures how similar it is to every stored fact using cosine similarity (semantic matching) and BM25 (keyword matching). The two scores are combined with adaptive weights that shift based on query length. A dynamic cutoff algorithm (Kneedle) analyzes the shape of the score curve to determine where genuinely relevant results end and noise begins, returning only the facts above that knee. This hybrid approach covers each method's blind spots: semantic matching finds facts with different wording but similar meaning, while keyword matching catches exact term matches that embeddings might underweight.
+
+### Session-Scoped Conversation (Short-Term Memory)
+
+MemG groups messages into sessions using sliding inactivity timeouts. Within an active session, the most recent messages are loaded and prepended to the LLM request, giving the model perfect recall of the current conversation without unbounded history growth. When the user goes idle and the session expires, a new session begins with a clean slate. The old conversation is summarized in the background. This creates natural boundaries between unrelated interactions -- a breakfast recipe discussion at 9am does not pollute a Python coding session at 3pm.
+
+### Knowledge Distillation (Learning)
+
+After every LLM response, the conversation is sent to an extraction pipeline that analyzes it and produces structured facts. "I just adopted a golden retriever named Max" yields facts like "User has a dog named Max" and "User's dog is a golden retriever." Each fact is embedded and stored, becoming immediately available for future recall. Extraction runs asynchronously so the user never waits for it. Over time, the system accumulates a richer body of knowledge with each interaction. The extraction pipeline is pluggable -- different applications can define what knowledge matters and how to extract it.
+
+### Memory Lifecycle (Decay and Reinforcement)
+
+Not all facts are equally durable. Each fact carries a type (identity, event, or pattern), a temporal status (current or historical), and a significance level that determines its time-to-live. High-significance facts like allergies persist indefinitely. Low-significance facts like today's lunch expire in days. When a fact is mentioned again in a later conversation, its decay timer resets and its reinforcement count increments -- repeated mention equals persistence. Facts reinforced five or more times are automatically promoted to permanent status. When new information contradicts old information (the user moves from Austin to Seattle), the old fact is reclassified to historical rather than deleted, preserving the full timeline. Slot-based conflict resolution handles this automatically for single-valued attributes like location and job title.
+
+### Conversation Summaries
+
+When a session expires, the full conversation is summarized by the LLM into a concise narrative capturing what was discussed, what was decided, and what remains pending. These summaries are embedded and recalled by relevance just like facts. They capture narrative arc and conversational flow that individual atomic facts cannot -- "We planned a Japan trip, narrowed to Tokyo for 7 days in April, the user still needs to apply for a visa" is a thread the user can pick up naturally. Summaries older than 90 days are pruned to prevent unbounded growth.
+
+---
+
+## 6. Advanced Subsystems
+
+### Chat Boundaries and Working Memory
+
+Sessions use sliding expiry so continuous conversations are never interrupted. A token-aware adaptive window dynamically sizes the number of raw messages loaded based on remaining budget after other context layers. When conversations grow long, older turns are compressed into immutable turn-range summaries that preserve detail permanently. An overview summary consolidates older summaries, keeping the total summary footprint bounded regardless of conversation length.
+
+### Memory Truth and Provenance
+
+Every fact carries provenance metadata: a semantic slot for conflict resolution, an extraction confidence score, the embedding model that produced its vector, and whether it originated from user or assistant utterances. Slot-based conflict resolution automatically reclassifies superseded facts (the old location becomes historical when a new one arrives). Slot names are normalized via embedding similarity against a canonical registry, ensuring consistent conflict detection even when the LLM uses different words for the same concept.
+
+### Retrieval Correctness
+
+The query is embedded once and reused for all recall passes, halving embedding cost. Facts are loaded in significance order rather than creation order, ensuring important old facts are not crowded out by recent trivia. An optional query transformer rewrites vague follow-up queries into standalone retrieval queries. Embedding dimension mismatches are detected and logged rather than silently returning empty results. A re-embedding operation migrates facts to a new model without data loss.
+
+### Runtime Efficiency
+
+A fixed-worker extraction pool with a bounded queue prevents goroutine pile-up under load. A trivial-turn gate skips extraction for greetings and acknowledgments, saving an LLM call per trivial exchange. Metadata-only reads skip the heavy embedding column when only content and metadata are needed. A per-entity conscious context cache with eager invalidation avoids repeated database queries for profile facts.
+
+### Long-Horizon Memory Hygiene
+
+Recall usage is tracked on every fact (how often it was injected into a prompt and when). Mutable identity facts that have not been reinforced or recalled for months are demoted in conscious mode ranking. A background consolidator clusters old event facts into pattern facts, preventing linear growth. Conversation summaries older than 90 days are pruned.
+
+### Concurrency and Resource Bounds
+
+Background work runs in semaphore-bounded goroutine pools. The proxy reuses a single HTTP client for all upstream calls. Database connection pools have explicit limits. Recall candidate loading is capped to prevent unbounded memory consumption. Slot normalization batches all embedding calls into a single request per extraction job.
+
+### Session Intelligence
+
+Rolling turn-range summaries compress older conversation turns with a two-level structure (individual range summaries plus a consolidated overview). An artifact store detects and indexes code blocks, JSON, and SQL from conversations, making them retrievable when the user says "modify that code" twenty turns later. An entity mention accumulator tracks specific proper nouns and technical terms, augmenting vague queries with session-level context when primary recall returns insufficient results. All background work runs as independent stages within a single unified pipeline per entity.
+
+### Unified Recall Entry Point
+
+A single function orchestrates the full recall pipeline: embedding the query, loading profile facts, recalling relevant facts and summaries, loading turn summaries and artifacts, and assembling the final context string with five-layer priority and token budgeting. Any improvement to the recall pipeline automatically propagates to every caller -- proxy, library, and custom integrations alike.
+
+### Hierarchical Memory Architecture
+
+The memory token budget is partitioned into three tiers modeled after the Atkinson-Shiffrin cognitive framework. Semantic memory (always-on identity facts) occupies the beginning of the prompt where transformer attention is strongest. Episodic memory (query-relevant recalled facts and summaries) fills the middle, ranked by an Ebbinghaus-inspired retention function that models exponential forgetting. Working memory (current session context) occupies the end of the prompt where recency bias is highest. Each tier has an independent budget with surplus cascading to the next tier.
+
+### Relational Memory Graph
+
+A knowledge graph of subject-predicate-object triples links facts through typed relationships, enabling multi-hop reasoning that pure vector search cannot achieve. When the user asks "How is my mother doing?", graph traversal connects "mother Priya" to "ill" to "upcoming surgery" to "worried" -- relationships that span multiple facts with low pairwise similarity. Entity resolution merges variant surface forms ("mom", "mother", "Priya") into canonical entities. Graph expansion augments standard recall by pulling in neighboring facts connected through the graph structure.
+
+### Emotional Memory Scoring
+
+Facts carry emotional metadata: valence (positive/negative/neutral), arousal (high/medium/low), and category (grief, joy, anxiety, hope, and others). High-arousal facts decay more slowly, modeled after the flashbulb memory phenomenon where emotionally intense experiences persist longer. Peak emotional moments in conversations are detected and protected from routine pruning. The context builder annotates emotionally significant facts so the LLM can respond with appropriate sensitivity.
+
+### Proactive Memory Surfacing
+
+Rather than waiting for the user to ask, the system evaluates trigger conditions at the start of each session. It can follow up on predictions whose deadlines have passed, check in on emotional conversations that happened days ago, acknowledge milestones like the 100th session, surface nostalgic references to early interactions, deliver pattern insights the user may not have noticed, and greet returning users with continuity from their last conversation. Triggers fire on a variable schedule to prevent habituation.
+
+### Confidence-Gated Generation
+
+Recalled facts are labeled with three confidence tiers -- VERIFIED, INFERRED, and UNCERTAIN -- based on their extraction confidence and source role. These labels are injected alongside the facts so the LLM can calibrate its language: stating verified facts directly, hedging inferred facts, and flagging uncertain facts as possibilities rather than truths. This prevents the system from confidently asserting something it is not sure about.
+
+### User-Visible Memory and Co-Creation
+
+Users can see their full memory profile, correct wrong facts, confirm inferred ones, pin important facts to ensure they are always recalled, add facts manually, and delete facts they want forgotten. A deny list prevents specific content from being re-extracted. Corrections take precedence over future extraction -- if a user corrects a fact, the pipeline will not silently overwrite it. This turns memory from something that happens to the user into something the user actively builds.
+
+---
+
+## 7. Storage and Providers
+
+MemG supports three storage backends out of the box: **PostgreSQL**, **SQLite**, and **MySQL**. Each backend implements the full repository contract including the knowledge graph triple table, artifact store, and turn summary schema.
+
+The system integrates with **10 LLM providers** (OpenAI, Anthropic, Gemini, Ollama, Azure OpenAI, AWS Bedrock, DeepSeek, Groq, Together AI, xAI) and **11 embedding providers** (OpenAI, Gemini, Ollama, HuggingFace, Azure OpenAI, AWS Bedrock, Together AI, Cohere, VoyageAI, in-process ONNX Runtime, and a local sentence-transformers service). Local embedding options require no API keys.
+
+Recall uses hybrid ranking: cosine similarity for semantic matching combined with BM25 for keyword matching, with adaptive query-length weighting and Kneedle dynamic cutoff.
+
+---
+
+## 8. Research Foundation
+
+The architecture is grounded in established research across three domains:
+
+**Cognitive psychology** -- The three-tier memory hierarchy follows the Atkinson-Shiffrin model (sensory/short-term/long-term stores). Episodic decay uses an Ebbinghaus forgetting curve. Emotional memory scoring draws on flashbulb memory research (Brown and Kulik), the peak-end rule (Kahneman), and emotional memory bias findings (Talarico and Rubin). Proactive surfacing applies variable ratio reinforcement (Skinner), the Zeigarnik effect, and the nostalgia effect. User-visible memory leverages the IKEA effect and endowment effect.
+
+**Information retrieval** -- Fact recall combines dense vector search with Okapi BM25 lexical scoring, a hybrid approach standard in modern search systems. The Kneedle algorithm (Satopaa et al., 2011) provides dynamic result cutoff. Slot normalization uses embedding-based semantic similarity for entity resolution.
+
+**AI memory systems** -- The design draws on MemGPT (OS-inspired tiered memory), MemoryBank (Ebbinghaus decay with emotional modulation), Mem0 (graph memory with grounded generation), HippoRAG (knowledge graph plus Personalized PageRank for multi-hop reasoning), A-MEM (Zettelkasten-style associative indexing), AriGraph (semantic-episodic graph for planning), and Generative Agents (relational knowledge for social reasoning). Context injection order follows findings from Lost in the Middle (Liu et al., 2023) on transformer attention patterns.
+
+For full technical details, formulas, and implementation specifics, see [MEMORY_ARCHITECTURE.md](MEMORY_ARCHITECTURE.md).

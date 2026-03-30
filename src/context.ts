@@ -385,7 +385,8 @@ export function buildHierarchicalContext(input: HierarchicalContextInput): Hiera
           const label = confidenceLabel(f.confidence ?? 1.0);
           let line = `- ${f.content} (${label})`;
           if (f.verbatim) {
-            line += ` | User said: "${f.verbatim}"`;
+            const escaped = f.verbatim.replace(/"/g, '\\"');
+            line += ` | User said: "${escaped}"`;
           }
           const est = estimateTokens(line + '\n');
           if (tokensUsed + sectionTokens + est > budget) break;
@@ -424,7 +425,8 @@ export function buildHierarchicalContext(input: HierarchicalContextInput): Hiera
         const confStr = conf >= 0.8 ? ', confidence: high' : conf >= 0.5 ? ', confidence: medium' : '';
         let line = `- ${f.content} (${when}${confStr})`;
         if (f.verbatim) {
-          line += `\n  User said: "${f.verbatim}"`;
+          const escaped = f.verbatim.replace(/"/g, '\\"');
+          line += `\n  User said: "${escaped}"`;
         }
         const est = estimateTokens(line + '\n');
         if (tokensUsed + sectionTokens + est > budget) break;
@@ -511,7 +513,8 @@ export function buildHierarchicalContext(input: HierarchicalContextInput): Hiera
       for (const f of verified) {
         let line = `- ${f.content} (confidence: ${(f.confidence ?? 1.0).toFixed(1)})`;
         if (f.verbatim) {
-          line += ` | User said: "${f.verbatim}"`;
+          const escaped = f.verbatim.replace(/"/g, '\\"');
+          line += ` | User said: "${escaped}"`;
         }
         const est = estimateTokens(line + '\n');
         if (tokensUsed + sectionTokens + est > budget) break;
@@ -540,7 +543,8 @@ export function buildHierarchicalContext(input: HierarchicalContextInput): Hiera
         const contentLower = f.content.charAt(0).toLowerCase() + f.content.slice(1);
         let line = `- ${prefix}${contentLower} (confidence: ${c.toFixed(1)})`;
         if (f.verbatim) {
-          line += ` | User said: "${f.verbatim}"`;
+          const escaped = f.verbatim.replace(/"/g, '\\"');
+          line += ` | User said: "${escaped}"`;
         }
         const est = estimateTokens(line + '\n');
         if (tokensUsed + sectionTokens + est > budget) break;

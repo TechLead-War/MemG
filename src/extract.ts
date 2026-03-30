@@ -245,7 +245,7 @@ function validateExtraction(facts: ExtractedFact[]): ExtractedFact[] {
       }
     }
 
-    // Validate started_at: ISO date format, default null.
+    // Validate started_at: ISO date format, not in the future, default null.
     let startedAt: string | null = f.started_at ?? null;
     if (startedAt !== null) {
       const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
@@ -253,7 +253,7 @@ function validateExtraction(facts: ExtractedFact[]): ExtractedFact[] {
         startedAt = null;
       } else {
         const parsed = new Date(startedAt);
-        if (isNaN(parsed.getTime())) {
+        if (isNaN(parsed.getTime()) || parsed.getFullYear() < 1900 || parsed > new Date()) {
           startedAt = null;
         }
       }
@@ -307,10 +307,10 @@ function clampSignificance(v: number): number {
 }
 
 /**
- * Get confidence value, defaulting to 0.8 if null.
+ * Get confidence value, defaulting to 0.5 (neutral) if null/undefined.
  */
 function confidenceValue(v: number | null | undefined): number {
-  if (v === null || v === undefined) return 0.8;
+  if (v === null || v === undefined) return 0.5;
   return v;
 }
 

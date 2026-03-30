@@ -42,6 +42,64 @@ const obfuscatorConfig = {
   transformObjectKeys: true,
   unicodeEscapeSequence: false,
 
+  // ── Preserve public API method and property names ──────
+  reservedNames: [
+    // MemG class methods
+    'init', 'add', 'search', 'list', 'delete', 'deleteAll', 'chat',
+    'buildMemoryContext', 'extractFromMessages', 'close',
+    'getStore', 'getEmbedder', 'getEngine', 'getConfig', 'wrap',
+    // v2 methods
+    'pin', 'unpin', 'confirm', 'resolveThread', 'getOpenThreads',
+    'getProactiveContext', 'buildHierarchicalMemoryContext',
+    'extractFromSegments',
+    // Store interface
+    'upsertEntity', 'lookupEntity', 'listEntityUuids',
+    'insertFact', 'insertFacts', 'listFacts', 'listFactsFiltered',
+    'listFactsForRecall', 'listFactsMetadata', 'findFactByKey',
+    'reinforceFact', 'updateTemporalStatus', 'updateSignificance',
+    'deleteFact', 'deleteEntityFacts', 'pruneExpiredFacts',
+    'pruneStaleSummaries', 'updateRecallUsage',
+    'listUnembeddedFacts', 'updateFactEmbedding',
+    'ensureSession', 'startConversation', 'activeConversation',
+    'appendMessage', 'readMessages', 'readRecentMessages',
+    'listConversationSummaries', 'updateConversationSummary',
+    'findUnsummarizedConversation',
+    'insertTurnSummary', 'listTurnSummaries', 'countTurnSummaries',
+    'deleteTurnSummaries',
+    'insertArtifact', 'supersedeArtifact', 'listActiveArtifacts',
+    'listActiveArtifactsByEntity',
+    'updateSessionMentions', 'incrementSessionMessageCount',
+    'getSessionMentions',
+    'pinFact', 'unpinFact', 'confirmFact',
+    'updateThreadStatus', 'listOpenThreads',
+    'updateEmotionalWeight', 'updateEngagementScore',
+    'countEntityFacts', 'getEntityFirstFactDate',
+    'upsertProcess', 'insertProcessAttribute',
+    'listCanonicalSlots', 'insertCanonicalSlot', 'findCanonicalSlotByName',
+    // Embedder interface
+    'embed', 'dimension', 'modelName',
+    // HybridEngine
+    'rank',
+    // Exported functions
+    'buildContext', 'buildHierarchicalContext', 'estimateTokens',
+    'adaptiveWindowSize',
+    'runExtraction', 'runSegmentedExtraction', 'isTrivialTurn', 'callLLM',
+    'recallFacts', 'recallSummaries', 'recallAndBuildContext',
+    'consolidateEntity', 'loadConsciousContext',
+    'pruneExpiredAndStale', 'backfillMissingEmbeddings', 'reEmbedFacts',
+    'generateAndStoreSummary', 'maintainTurnSummaries',
+    'detectArtifacts', 'storeArtifacts', 'recallArtifacts',
+    'extractEntityMentions', 'detectProvider',
+    'cosineSimilarity', 'dimensionMatch', 'defaultContentKey',
+    'normalizeConversationMessages', 'diffIncomingMessages', 'mergeHistory',
+    // Constructors
+    'MemG', 'MemGStore', 'PostgresStore', 'MySQLStore', 'MemGClient',
+    'HybridEngine',
+    'TransformersEmbedder', 'OpenAIEmbedder', 'GeminiEmbedder',
+    'create',
+  ],
+  reservedStrings: [],
+
   // ── Target ─────────────────────────────────────────────
   target: 'node',
   seed: 0,

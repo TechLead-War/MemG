@@ -9,6 +9,7 @@
  * - Spacing Effect: resurfacing topics at optimal intervals strengthens bonds
  */
 
+import { createHash } from 'crypto';
 import type { Store } from './store.js';
 import type { Fact, FactFilter, ProactiveContext } from './types.js';
 
@@ -55,7 +56,8 @@ export async function getProactiveContext(
 
   // Variable ratio reinforcement: use a hash-based probability to create
   // unpredictability in when proactive context surfaces (~66% chance).
-  const dayHash = now.getDate() + entityUuid.charCodeAt(0);
+  const hashInput = entityUuid + now.toISOString().slice(0, 10);
+  const dayHash = createHash('sha256').update(hashInput).digest()[0];
   const shouldSurface = (dayHash % 3) !== 0;
   if (!shouldSurface) return [];
 
@@ -198,7 +200,7 @@ async function collectMilestones(
       results.push({
         type: 'milestone',
         content: `This is a milestone — ${totalFacts} memories stored together.`,
-        sourceFactId: entityUuid,
+        sourceFactId: '',
         priority: 0.8,
       });
       break; // Only surface the highest applicable milestone.
@@ -216,7 +218,7 @@ async function collectMilestones(
         results.push({
           type: 'milestone',
           content: `It's been ${totalDays} days since our first conversation.`,
-          sourceFactId: entityUuid,
+          sourceFactId: '',
           priority: 0.8,
           daysSince: totalDays,
         });
