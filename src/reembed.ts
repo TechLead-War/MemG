@@ -32,7 +32,8 @@ export async function backfillMissingEmbeddings(
   let vectors: number[][];
   try {
     vectors = await embedder.embed(contents);
-  } catch {
+  } catch (err) {
+    console.warn('[memg] reembed: backfill embed batch failed:', err);
     return 0;
   }
 
@@ -42,8 +43,8 @@ export async function backfillMissingEmbeddings(
     try {
       await store.updateFactEmbedding(facts[i].uuid, vectors[i], modelName);
       updated++;
-    } catch {
-      // best-effort
+    } catch (err) {
+      console.warn('[memg] reembed: updateFactEmbedding failed:', err);
     }
   }
   return updated;
@@ -79,7 +80,8 @@ export async function reEmbedFacts(
     let vectors: number[][];
     try {
       vectors = await embedder.embed(contents);
-    } catch {
+    } catch (err) {
+      console.warn('[memg] reembed: re-embed batch failed:', err);
       break;
     }
 
@@ -87,8 +89,8 @@ export async function reEmbedFacts(
       try {
         await store.updateFactEmbedding(batch[j].uuid, vectors[j], modelName);
         updated++;
-      } catch {
-        // best-effort
+      } catch (err) {
+        console.warn('[memg] reembed: updateFactEmbedding failed:', err);
       }
     }
   }

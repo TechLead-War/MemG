@@ -38,7 +38,8 @@ export async function generateAndStoreSummary(
   let summary: string;
   try {
     summary = await llmChat(fullPrompt);
-  } catch {
+  } catch (err) {
+    console.warn('[memg] summary: LLM call failed:', err);
     return;
   }
 
@@ -49,8 +50,8 @@ export async function generateAndStoreSummary(
   try {
     const [vec] = await embedder.embed([summary]);
     embedding = vec;
-  } catch {
-    // proceed without embedding
+  } catch (err) {
+    console.warn('[memg] summary: embed failed, proceeding without embedding:', err);
   }
 
   const modelName = embedder.modelName();

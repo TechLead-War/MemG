@@ -36,7 +36,8 @@ function decodeEmbedding(raw: Buffer | null | undefined): number[] | undefined {
   if (raw.length % 4 !== 0 || raw[0] === 0x5b) {
     try {
       return JSON.parse(raw.toString()) as number[];
-    } catch {
+    } catch (err) {
+      console.warn('[memg] postgres_store: decodeEmbedding JSON parse failed:', err);
       return undefined;
     }
   }
@@ -77,6 +78,8 @@ function rowToFact(row: any): Fact {
     threadStatus: row.thread_status ?? null,
     engagementScore: row.engagement_score ?? 0,
     pinned: row.pinned === 1,
+    supersededAt: row.superseded_at ?? undefined,
+    supersededBy: row.superseded_by ?? undefined,
   };
 }
 
@@ -134,7 +137,7 @@ function rowToArtifact(row: any): Artifact {
   };
 }
 
-const FACT_COLUMNS = `uuid, content, embedding, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned`;
+const FACT_COLUMNS = `uuid, content, embedding, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned, superseded_at, superseded_by`;
 
 const POSTGRES_SCHEMA_DDL: string[] = [
   `CREATE TABLE IF NOT EXISTS mg_entity (
@@ -267,6 +270,9 @@ const POSTGRES_MIGRATIONS: string[] = [
   `ALTER TABLE mg_entity_fact ADD COLUMN IF NOT EXISTS thread_status TEXT`,
   `ALTER TABLE mg_entity_fact ADD COLUMN IF NOT EXISTS engagement_score DOUBLE PRECISION NOT NULL DEFAULT 0`,
   `ALTER TABLE mg_entity_fact ADD COLUMN IF NOT EXISTS pinned INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE mg_entity_fact ADD COLUMN IF NOT EXISTS superseded_at TEXT`,
+  `ALTER TABLE mg_entity_fact ADD COLUMN IF NOT EXISTS superseded_by TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_mg_fact_superseded ON mg_entity_fact(entity_id, superseded_at)`,
 ];
 
 export class PostgresStore implements Store {
@@ -306,8 +312,8 @@ export class PostgresStore implements Store {
     for (const migration of POSTGRES_MIGRATIONS) {
       try {
         await this.pool.query(migration);
-      } catch {
-        // Column may already exist on older Postgres that lacks IF NOT EXISTS for ADD COLUMN.
+      } catch (err) {
+        console.warn('[memg] postgres_store: migration may have already been applied:', err);
       }
     }
   }
@@ -354,7 +360,7 @@ export class PostgresStore implements Store {
 
   async listFactsMetadata(entityUuid: string, filter: FactFilter, limit: number): Promise<Fact[]> {
     await this.ready();
-    const metaCols = `uuid, content, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned`;
+    const metaCols = `uuid, content, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned, superseded_at, superseded_by`;
     let query = `SELECT ${metaCols} FROM mg_entity_fact WHERE entity_id = $1`;
     const args: any[] = [entityUuid];
     let paramIdx = 2;
@@ -455,6 +461,8 @@ export class PostgresStore implements Store {
       threadStatus: row.thread_status ?? null,
       engagementScore: row.engagement_score ?? 0,
       pinned: row.pinned === 1,
+      supersededAt: row.superseded_at ?? undefined,
+      supersededBy: row.superseded_by ?? undefined,
     }));
   }
 
@@ -526,7 +534,7 @@ export class PostgresStore implements Store {
     const now = nowISO();
     const embedding = fact.embedding ? encodeEmbedding(fact.embedding) : null;
     await this.pool.query(
-      `INSERT INTO mg_entity_fact (uuid, entity_id, content, embedding, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)`,
+      `INSERT INTO mg_entity_fact (uuid, entity_id, content, embedding, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned, superseded_at, superseded_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)`,
       [
         fact.uuid,
         entityUuid,
@@ -556,6 +564,8 @@ export class PostgresStore implements Store {
         fact.threadStatus ?? null,
         fact.engagementScore ?? 0,
         fact.pinned ? 1 : 0,
+        fact.supersededAt ?? null,
+        fact.supersededBy ?? null,
       ]
     );
   }
@@ -570,7 +580,7 @@ export class PostgresStore implements Store {
         const now = nowISO();
         const embedding = fact.embedding ? encodeEmbedding(fact.embedding) : null;
         await client.query(
-          `INSERT INTO mg_entity_fact (uuid, entity_id, content, embedding, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)`,
+          `INSERT INTO mg_entity_fact (uuid, entity_id, content, embedding, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned, superseded_at, superseded_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)`,
           [
             fact.uuid,
             entityUuid,
@@ -600,6 +610,8 @@ export class PostgresStore implements Store {
             fact.threadStatus ?? null,
             fact.engagementScore ?? 0,
             fact.pinned ? 1 : 0,
+            fact.supersededAt ?? null,
+            fact.supersededBy ?? null,
           ]
         );
       }
@@ -777,7 +789,7 @@ export class PostgresStore implements Store {
       args.push(...filter.emotionalValences);
     }
 
-    query += ` ORDER BY significance DESC, created_at DESC`;
+    query += ` ORDER BY created_at DESC`;
     if (limit > 0) {
       query += ` LIMIT $${paramIdx++}`;
       args.push(limit);
@@ -808,13 +820,20 @@ export class PostgresStore implements Store {
     );
   }
 
-  async updateTemporalStatus(factUuid: string, status: string): Promise<void> {
+  async updateTemporalStatus(factUuid: string, status: string, supersededBy?: string): Promise<void> {
     await this.ready();
     const now = nowISO();
-    await this.pool.query(
-      `UPDATE mg_entity_fact SET temporal_status = $1, updated_at = $2 WHERE uuid = $3`,
-      [status, now, factUuid]
-    );
+    if (supersededBy && status === 'historical') {
+      await this.pool.query(
+        `UPDATE mg_entity_fact SET temporal_status = $1, updated_at = $2, superseded_at = $3, superseded_by = $4 WHERE uuid = $5`,
+        [status, now, now, supersededBy, factUuid]
+      );
+    } else {
+      await this.pool.query(
+        `UPDATE mg_entity_fact SET temporal_status = $1, updated_at = $2 WHERE uuid = $3`,
+        [status, now, factUuid]
+      );
+    }
   }
 
   async updateSignificance(factUuid: string, sig: number): Promise<void> {
@@ -922,7 +941,7 @@ export class PostgresStore implements Store {
         [newExpiry, row.uuid]
       );
       let mentions: string[] = [];
-      try { mentions = JSON.parse(row.entity_mentions ?? '[]'); } catch { mentions = []; }
+      try { mentions = JSON.parse(row.entity_mentions ?? '[]'); } catch (err) { console.warn('[memg] postgres_store: parse entity_mentions failed:', err); mentions = []; }
       return {
         session: {
           uuid: row.uuid,
@@ -1165,7 +1184,7 @@ export class PostgresStore implements Store {
       [sessionUuid]
     );
     if (res.rows.length === 0) return [];
-    try { return JSON.parse(res.rows[0].entity_mentions ?? '[]'); } catch { return []; }
+    try { return JSON.parse(res.rows[0].entity_mentions ?? '[]'); } catch (err) { console.warn('[memg] postgres_store: parse entity_mentions failed:', err); return []; }
   }
 
   // ---- Lifecycle ----

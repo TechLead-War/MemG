@@ -29,7 +29,7 @@ const VALID_EMOTIONAL_VALENCES = new Set([
   'grief', 'joy', 'anxiety', 'hope', 'love', 'anger', 'fear', 'pride', 'neutral',
 ]);
 
-/** Semantic dedup threshold — 0.92 cosine similarity. */
+/** Semantic dedup threshold — higher = keep more distinct facts. */
 const SEMANTIC_DEDUP_THRESHOLD = 0.92;
 
 /** Reinforcement count threshold for promotion to high significance. */
@@ -64,8 +64,6 @@ export function isTrivialTurn(messages: ExtractionMessage[]): boolean {
   if (messages.length === 0) return true;
 
   for (const msg of messages) {
-    if (msg.role !== 'user') continue;
-
     let content = msg.content.toLowerCase().trim();
     content = content.replace(/[^a-z0-9 ]/g, '').trim();
 
@@ -82,48 +80,50 @@ export function isTrivialTurn(messages: ExtractionMessage[]): boolean {
 /**
  * Build the extraction prompt. Matches Go exactly.
  */
-function buildExtractionPrompt(): string {
-  const now = new Date();
+function buildExtractionPrompt(sessionDate?: string): string {
+  let now: Date;
+  if (sessionDate) {
+    const parsed = new Date(sessionDate);
+    now = isNaN(parsed.getTime()) ? new Date() : parsed;
+  } else {
+    now = new Date();
+  }
   const today = now.toISOString().slice(0, 10);
   const yesterday = new Date(now.getTime() - 86400000).toISOString().slice(0, 10);
 
-  return `You are a knowledge extraction engine. Today's date is ${today}.
+  return `You are an exhaustive knowledge extraction engine. Today's date is ${today}.
 
-Extract facts from this conversation. Return a JSON array. Each fact:
+Extract EVERY fact from this conversation. Be thorough — extract even minor details. Return a JSON array. Each fact:
 {
-  "content": "the fact as a clear statement about the user",
+  "content": "the fact as a clear statement (MUST include the person's name)",
   "type": "identity|event|pattern",
   "significance": 1-10,
-  "tag": "category label",
-  "slot": "semantic slot name (e.g. location, job, diet, name, email, relationship, preference)",
-  "reference_time": "ISO date if time-bound, empty string if not",
+  "tag": "skill|preference|relationship|medical|location|work|hobby|personal|financial|other",
+  "slot": "semantic slot name",
+  "reference_time": "ISO date (YYYY-MM-DD) if time-bound, empty string if not",
   "confidence": 0.0-1.0,
   "emotional_weight": 0.0-1.0 or null,
-  "emotional_valence": "emotion category or null",
-  "verbatim": "user's exact words or null",
+  "emotional_valence": "grief|joy|anxiety|hope|love|anger|fear|pride|neutral or null",
+  "verbatim": "speaker's exact words or null",
   "started_at": "ISO date or null",
   "thread_status": "open or null"
 }
 
-Rules:
-- "identity" = enduring truths (preferences, attributes, relationships)
-- "event" = things that happened at a specific time
-- "pattern" = behavioral tendencies observed across the conversation
-- "tag" = a category label. Use one of: skill, preference, relationship, medical, location, work, hobby, personal, financial, or other
-- "slot" = the semantic slot this fact fills. Use: location, job, diet, name, email, relationship, preference, medical, hobby, skill, or other
-- "reference_time" = ISO 8601 date (YYYY-MM-DD) for time-bound facts, empty string otherwise
-- "confidence" = how confident you are (1.0 = explicitly stated by user, 0.5 = inferred, 0.0 = guessing)
-- "emotional_weight" = how emotionally significant this fact is (0.0 = neutral/factual, 1.0 = deeply emotional). null if not applicable
-- "emotional_valence" = the dominant emotion: grief, joy, anxiety, hope, love, anger, fear, pride, or neutral. null if not applicable
-- "verbatim" = the user's EXACT words that led to this fact, quoted verbatim. Only include when confidence >= 0.8. null otherwise
-- "started_at" = ISO date (YYYY-MM-DD) for when an ongoing state/situation began, if inferrable from context. For relative references like "for 3 weeks", compute the date: ${today} minus the duration. null if not inferrable
-- "thread_status" = "open" if this is an unresolved situation, pending decision, or open question the user is dealing with. null otherwise
-- Resolve relative dates: "today" → "${today}", "yesterday" → "${yesterday}"
-- Significance: 10 = life-critical (allergies, medical), 7-9 = important (job, location), 4-6 = moderate, 1-3 = trivial (lunch, weather)
-- Skip greetings, filler, "thank you", and trivial exchanges
-- If nothing is worth extracting, return []
+CRITICAL extraction rules:
+- Extract facts about ALL speakers by name. Always include the person's name in the content.
+- Extract EVERY specific detail mentioned: names of people, pets, places, restaurants, bands, books, movies, foods, activities, hobbies, classes, jobs, events, items, gifts, vehicles, etc.
+- For events: always include WHO did WHAT, WHERE, WHEN, and WITH WHOM if mentioned.
+- For preferences: "X likes Y", "X enjoys Y", "X's favorite Y is Z"
+- For activities: "X did Y", "X started Y", "X went to Y", "X attended Y"
+- For temporal facts: resolve relative dates. "today" → "${today}", "yesterday" → "${yesterday}", "last week" → compute date, "next month" → compute date
+- For advice/opinions: "X told Y to do Z", "X thinks Y about Z"
+- Significance: 10=life-critical, 7-9=important, 4-6=moderate, 1-3=minor details (specific items, food, small activities — STILL EXTRACT THESE)
+- confidence: 1.0=explicitly stated, 0.5=inferred, 0.0=guessing
+- DO NOT skip details just because they seem minor. A mention of a specific band, food, painting subject, car model, or game name is worth extracting.
+- DO NOT summarize multiple facts into one. Each distinct piece of information should be a separate fact.
+- If nothing factual is discussed, return []
 
-Return ONLY the JSON array, no other text.`;
+Return ONLY the JSON array.`;
 }
 
 /**
@@ -136,14 +136,14 @@ function parseExtractionResponse(content: string): ExtractedFact[] {
   // Try direct parse.
   try {
     return JSON.parse(content) as ExtractedFact[];
-  } catch { /* continue */ }
+  } catch (err) { console.warn('[memg] extract: direct JSON parse failed:', err); }
 
   // Try stripping code fences.
   const stripped = stripCodeFences(content);
   if (stripped !== content) {
     try {
       return JSON.parse(stripped) as ExtractedFact[];
-    } catch { /* continue */ }
+    } catch (err) { console.warn('[memg] extract: code-fence JSON parse failed:', err); }
   }
 
   // Try finding JSON array within the text.
@@ -153,7 +153,25 @@ function parseExtractionResponse(content: string): ExtractedFact[] {
     const candidate = content.slice(start, end + 1);
     try {
       return JSON.parse(candidate) as ExtractedFact[];
-    } catch { /* continue */ }
+    } catch (err) { console.warn('[memg] extract: array-slice JSON parse failed:', err); }
+  }
+
+  // Salvage: try to recover complete JSON objects from a truncated array.
+  const arrStart = content.indexOf('[');
+  if (arrStart >= 0) {
+    const inner = content.slice(arrStart + 1);
+    const objectMatches = inner.match(/\{[^{}]*\}/g);
+    if (objectMatches) {
+      const recovered: ExtractedFact[] = [];
+      for (const raw of objectMatches) {
+        try {
+          recovered.push(JSON.parse(raw) as ExtractedFact);
+        } catch (err) { console.warn('[memg] extract: skipping malformed object:', err); }
+      }
+      if (recovered.length > 0) {
+        return recovered;
+      }
+    }
   }
 
   throw new Error(`Could not parse JSON array from response: ${content.slice(0, 100)}`);
@@ -190,7 +208,7 @@ function validateExtraction(facts: ExtractedFact[]): ExtractedFact[] {
   for (const f of facts) {
     const content = (f.content ?? '').trim();
     if (content === '') continue;
-    if (content.length > 500) continue;
+    if (content.length > 1000) continue;
 
     if (f.reference_time) {
       const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
@@ -327,7 +345,21 @@ function ttlForSignificance(sig: number): string | null {
 }
 
 /**
- * Call an LLM via fetch for extraction. Supports OpenAI-compatible APIs.
+ * Resolve the chat completions URL for OpenAI-compatible providers.
+ */
+function resolveOpenAICompatibleUrl(provider: string): string {
+  switch (provider) {
+    case 'deepseek': return 'https://api.deepseek.com/v1/chat/completions';
+    case 'groq': return 'https://api.groq.com/openai/v1/chat/completions';
+    case 'togetherai': return 'https://api.together.xyz/v1/chat/completions';
+    case 'xai': return 'https://api.x.ai/v1/chat/completions';
+    case 'ollama': return `${process.env.OLLAMA_BASE_URL || 'http://localhost:11434'}/v1/chat/completions`;
+    default: return 'https://api.openai.com/v1/chat/completions';
+  }
+}
+
+/**
+ * Call an LLM via fetch for extraction. Supports all 10 providers.
  */
 export async function callLLM(
   apiKey: string,
@@ -346,7 +378,7 @@ export async function callLLM(
     body = JSON.stringify({
       systemInstruction: { parts: [{ text: systemPrompt }] },
       contents: [{ role: 'user', parts: [{ text: userContent }] }],
-      generationConfig: { temperature: 0.1 },
+      generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
     });
   } else if (provider === 'anthropic') {
     url = 'https://api.anthropic.com/v1/messages';
@@ -357,19 +389,37 @@ export async function callLLM(
     };
     body = JSON.stringify({
       model,
-      max_tokens: 2048,
+      max_tokens: 4096,
       system: systemPrompt,
       messages: [{ role: 'user', content: userContent }],
     });
+  } else if (provider === 'azureopenai') {
+    const endpoint = process.env.AZURE_OPENAI_ENDPOINT || '';
+    const apiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-10-21';
+    url = `${endpoint}/openai/deployments/${model}/chat/completions?api-version=${apiVersion}`;
+    headers = {
+      'Content-Type': 'application/json',
+      'api-key': apiKey,
+    };
+    body = JSON.stringify({
+      max_tokens: 4096,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userContent },
+      ],
+    });
+  } else if (provider === 'bedrock') {
+    return await callBedrockLLM(model, systemPrompt, userContent);
   } else {
-    url = 'https://api.openai.com/v1/chat/completions';
+    // OpenAI and all OpenAI-compatible providers (deepseek, groq, togetherai, xai, ollama).
+    url = resolveOpenAICompatibleUrl(provider);
     headers = {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
     };
     body = JSON.stringify({
       model,
-      max_tokens: 2048,
+      max_tokens: 4096,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userContent },
@@ -427,6 +477,39 @@ export async function callLLM(
 }
 
 /**
+ * Call AWS Bedrock Converse API for extraction.
+ * Requires @aws-sdk/client-bedrock-runtime as optional peer dependency.
+ */
+async function callBedrockLLM(
+  model: string,
+  systemPrompt: string,
+  userContent: string
+): Promise<string> {
+  let bedrock: any;
+  try {
+    const mod = '@aws-sdk/client-bedrock-runtime';
+    bedrock = await import(mod);
+  } catch (err) {
+    console.warn('[memg] extract: bedrock SDK import failed:', err);
+    throw new Error(
+      'Bedrock LLM provider requires @aws-sdk/client-bedrock-runtime. Install it: npm i @aws-sdk/client-bedrock-runtime'
+    );
+  }
+
+  const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1';
+  const client = new bedrock.BedrockRuntimeClient({ region });
+  const command = new bedrock.ConverseCommand({
+    modelId: model,
+    system: [{ text: systemPrompt }],
+    messages: [{ role: 'user', content: [{ text: userContent }] }],
+    inferenceConfig: { maxTokens: 4096 },
+  });
+
+  const response = await client.send(command);
+  return response.output?.message?.content?.[0]?.text ?? '';
+}
+
+/**
  * Find the most semantically similar existing fact above the dedup threshold.
  */
 function findSemanticMatch(
@@ -480,18 +563,16 @@ export async function runExtraction(
   entityUuid: string,
   apiKey: string,
   llmModel: string,
-  llmProvider: string
+  llmProvider: string,
+  sessionDate?: string
 ): Promise<{ inserted: number; reinforced: number }> {
   if (messages.length === 0) return { inserted: 0, reinforced: 0 };
   if (isTrivialTurn(messages)) return { inserted: 0, reinforced: 0 };
 
-  const userMessages = messages.filter((m) => m.role === 'user');
-  if (userMessages.length === 0) return { inserted: 0, reinforced: 0 };
+  // Build transcript from ALL messages (both speakers share facts).
+  const transcript = messages.map((m) => `${m.role}: ${m.content}`).join('\n');
 
-  // Build transcript from user messages only.
-  const transcript = userMessages.map((m) => `${m.role}: ${m.content}`).join('\n');
-
-  const systemPrompt = buildExtractionPrompt();
+  const systemPrompt = buildExtractionPrompt(sessionDate);
 
   let responseContent: string;
   try {
@@ -532,7 +613,7 @@ export async function runExtraction(
       slot: (ef.slot ?? '').toLowerCase().trim(),
       confidence: confidenceValue(ef.confidence),
       embeddingModel: embeddingModelName,
-      sourceRole: 'user',
+      sourceRole: 'mixed',
       reinforcedCount: 0,
       recallCount: 0,
       expiresAt: ttlForSignificance(significance) ?? undefined,
@@ -603,7 +684,7 @@ export async function runExtraction(
     ) {
       const conflicts = findSlotConflicts(fact.slot, existingFacts);
       for (const conflict of conflicts) {
-        await store.updateTemporalStatus(conflict.uuid, 'historical');
+        await store.updateTemporalStatus(conflict.uuid, 'historical', fact.uuid);
         conflict.temporalStatus = 'historical';
       }
     }
@@ -665,7 +746,8 @@ export async function runSegmentedExtraction(
   entityUuid: string,
   apiKey: string,
   llmModel: string,
-  llmProvider: string
+  llmProvider: string,
+  sessionDate?: string
 ): Promise<{ inserted: number; reinforced: number }> {
   let totalInserted = 0;
   let totalReinforced = 0;
@@ -702,7 +784,8 @@ export async function runSegmentedExtraction(
       entityUuid,
       apiKey,
       llmModel,
-      llmProvider
+      llmProvider,
+      sessionDate
     );
 
     totalInserted += result.inserted;

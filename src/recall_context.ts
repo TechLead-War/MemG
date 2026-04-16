@@ -56,7 +56,8 @@ export async function recallAndBuildContext(
   let vectors: number[][];
   try {
     vectors = await embedder.embed([query]);
-  } catch {
+  } catch (err) {
+    console.warn('[memg] recall_context: embed query failed:', err);
     return '';
   }
   if (vectors.length === 0 || vectors[0].length === 0) return '';

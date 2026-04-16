@@ -2,7 +2,7 @@
  * Gemini provider wrapping for MemG.
  *
  * Supports three modes:
- * - **native**: Full in-process engine (no Go server needed).
+ * - **native**: Full in-process engine (no external server needed).
  * - **client**: Intercepts calls locally, querying MCP for memory context.
  * - **proxy**: Not supported for Gemini (Gemini SDK does not use OpenAI-compatible endpoints).
  */
@@ -90,10 +90,10 @@ function wrapGeminiNative(client: any, opts: WrapOptions): any {
           messages.push({ role: 'assistant', content: assistantText });
         }
 
-        saveExchangeToSession(m, entityId, messages).catch(() => {});
-        m.extractFromMessages(entityId, messages).catch(() => {});
-      } catch {
-        // Never let extraction errors affect the response.
+        saveExchangeToSession(m, entityId, messages).catch((err: any) => { console.warn('[memg] gemini: saveExchangeToSession failed:', err); });
+        m.extractFromMessages(entityId, messages).catch((err: any) => { console.warn('[memg] gemini: extractFromMessages failed:', err); });
+      } catch (err) {
+        console.warn('[memg] gemini: extraction pipeline failed:', err);
       }
     }
 

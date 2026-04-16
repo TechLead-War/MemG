@@ -14,7 +14,8 @@
   "scripts": {
     "build": "tsc && node scripts/build-esm.js && node scripts/obfuscate.js",
     "build:clean": "npm run clean && npm run build",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "benchmark": "cd benchmark && tsx server.ts"
   },
   "engines": {
     "node": ">=18"

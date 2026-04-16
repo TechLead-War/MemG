@@ -130,4 +130,8 @@ export const SCHEMA_DDL: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_mg_fact_thread ON mg_entity_fact(entity_id, thread_status)`,
   `CREATE INDEX IF NOT EXISTS idx_mg_fact_pinned ON mg_entity_fact(entity_id, pinned)`,
   `CREATE INDEX IF NOT EXISTS idx_mg_fact_emotional ON mg_entity_fact(entity_id, emotional_valence)`,
+  // v3 migration: add superseded_at for temporal transition tracking
+  `ALTER TABLE mg_entity_fact ADD COLUMN superseded_at TEXT`,
+  `ALTER TABLE mg_entity_fact ADD COLUMN superseded_by TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_mg_fact_superseded ON mg_entity_fact(entity_id, superseded_at)`,
 ];

@@ -87,12 +87,13 @@ function fireExtraction(
   const exchange = buildExchangeMessages(messages, assistantContent);
   if (exchange.length === 0) return;
 
-  mcp.extractFromMessages(entityId, exchange).catch(() => {
+  mcp.extractFromMessages(entityId, exchange).catch((err: any) => {
+    console.warn('[memg] intercept: extractFromMessages failed:', err);
     // Fallback: server may not have extraction pipeline configured.
     // Send the user messages as raw snippets (better than nothing).
     const userMessage = extractLastUserMessage(messages);
     if (userMessage) {
-      mcp.add(entityId, [{ content: userMessage }]).catch(() => {});
+      mcp.add(entityId, [{ content: userMessage }]).catch((err2: any) => { console.warn('[memg] intercept: fallback add failed:', err2); });
     }
   });
 }
@@ -147,8 +148,8 @@ export function wrapOpenAIClient(
         if (typeof assistantContent === 'string' && assistantContent) {
           fireExtraction(mcp, entityId, params.messages || [], assistantContent);
         }
-      } catch {
-        // Fire-and-forget: never let extraction errors affect the response.
+      } catch (err) {
+        console.warn('[memg] intercept: OpenAI extraction failed:', err);
       }
     }
 
@@ -251,8 +252,8 @@ export function wrapAnthropicClient(
             fireExtraction(mcp, entityId, params.messages || [], textBlock.text);
           }
         }
-      } catch {
-        // Fire-and-forget.
+      } catch (err) {
+        console.warn('[memg] intercept: Anthropic extraction failed:', err);
       }
     }
 
@@ -311,8 +312,8 @@ export function wrapGeminiClient(
           const requestMessages = geminiContentsToMessages(augmentedParams);
           fireExtraction(mcp, entityId, requestMessages, text);
         }
-      } catch {
-        // Fire-and-forget.
+      } catch (err) {
+        console.warn('[memg] intercept: Gemini extraction failed:', err);
       }
     }
 

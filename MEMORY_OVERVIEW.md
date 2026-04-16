@@ -2,7 +2,7 @@
 
 ## 1. What is MemG
 
-MemG is a pluggable memory layer for language model applications. It gives LLMs persistent memory across conversations by intercepting API calls, recalling relevant knowledge from stored facts, and asynchronously extracting new knowledge from every interaction. The result is an LLM that remembers who it is talking to, what has been discussed before, and what matters most -- without the developer building any of this from scratch. MemG ships as a zero-code reverse proxy, a native SDK (Go, TypeScript, Python), and an MCP server for agent frameworks.
+MemG is a pluggable memory layer for language model applications. It gives LLMs persistent memory across conversations by intercepting API calls, recalling relevant knowledge from stored facts, and asynchronously extracting new knowledge from every interaction. The result is an LLM that remembers who it is talking to, what has been discussed before, and what matters most -- without the developer building any of this from scratch. MemG ships as a zero-code reverse proxy, a native TypeScript SDK (npm: memg-core-js), and an MCP server for agent frameworks.
 
 ---
 
@@ -22,7 +22,7 @@ The naive solution is to dump the entire conversation history into every request
 
 **Proxy mode** -- A reverse proxy that sits between your application and the LLM API. It intercepts chat completion requests, recalls relevant facts and conversation summaries, injects them into the system prompt, forwards to the real API, and extracts knowledge from the response in the background. Zero code changes required -- change one environment variable and your existing app gets persistent memory.
 
-**Library mode** -- Native SDKs for Go, TypeScript, and Python that provide programmatic APIs. Call `Chat()` or `Stream()` with a user identifier, and MemG handles recall, context building, and extraction automatically. Direct recall APIs are also available for applications that need fine-grained control over what is retrieved and how it is injected.
+**Library mode** -- Native TypeScript SDK that provides programmatic APIs. Call `Chat()` or `Stream()` with a user identifier, and MemG handles recall, context building, and extraction automatically. Direct recall APIs are also available for applications that need fine-grained control over what is retrieved and how it is injected.
 
 **MCP mode** -- Exposes memory operations as JSON-RPC tools that agent frameworks can invoke directly. Any MCP-compatible agent can store facts, recall context, manage sessions, and query the knowledge graph through a standard protocol.
 
@@ -87,7 +87,7 @@ Sessions use sliding expiry so continuous conversations are never interrupted. A
 
 ### Memory Truth and Provenance
 
-Every fact carries provenance metadata: a semantic slot for conflict resolution, an extraction confidence score, the embedding model that produced its vector, and whether it originated from user or assistant utterances. Slot-based conflict resolution automatically reclassifies superseded facts (the old location becomes historical when a new one arrives). Slot names are normalized via embedding similarity against a canonical registry, ensuring consistent conflict detection even when the LLM uses different words for the same concept.
+Every fact carries provenance metadata: a semantic slot for conflict resolution, an extraction confidence score, the embedding model that produced its vector, and whether it originated from user or assistant utterances. Slot-based conflict resolution automatically reclassifies superseded facts (the old location becomes historical when a new one arrives) and records the temporal transition — `supersededAt` captures exactly when a fact became historical, and `supersededBy` links to the fact that replaced it. This enables temporal queries ("where did the user live in January?") by filtering on validity intervals rather than just current/historical binary state. Slot names are normalized via embedding similarity against a canonical registry, ensuring consistent conflict detection even when the LLM uses different words for the same concept.
 
 ### Retrieval Correctness
 
@@ -95,11 +95,11 @@ The query is embedded once and reused for all recall passes, halving embedding c
 
 ### Runtime Efficiency
 
-A fixed-worker extraction pool with a bounded queue prevents goroutine pile-up under load. A trivial-turn gate skips extraction for greetings and acknowledgments, saving an LLM call per trivial exchange. Metadata-only reads skip the heavy embedding column when only content and metadata are needed. A per-entity conscious context cache with eager invalidation avoids repeated database queries for profile facts.
+A fixed-worker extraction pool with a bounded queue prevents goroutine pile-up under load. A trivial-turn gate skips extraction for greetings and acknowledgments, saving an LLM call per trivial exchange. Metadata-only reads skip the heavy embedding column when only content and metadata are needed. A per-entity conscious context cache with eager invalidation avoids repeated database queries for profile facts. Embedding providers batch multiple texts in a single API call where the provider supports it (Ollama, Gemini, OpenAI, Cohere, VoyageAI, Together) and parallelize with bounded concurrency where they don't (Bedrock), instead of sequential one-at-a-time processing.
 
 ### Long-Horizon Memory Hygiene
 
-Recall usage is tracked on every fact (how often it was injected into a prompt and when). Mutable identity facts that have not been reinforced or recalled for months are demoted in conscious mode ranking. A background consolidator clusters old event facts into pattern facts, preventing linear growth. Conversation summaries older than 90 days are pruned.
+Recall usage is tracked on every fact (how often it was injected into a prompt and when). Mutable identity facts that have not been reinforced or recalled for months are demoted in conscious mode ranking. A background consolidator clusters old event facts into pattern facts with configurable thresholds (minimum age, maximum significance, minimum group size, scan limit) and duplicate pattern detection via semantic similarity (0.88 threshold). Conversation summaries older than 90 days are pruned.
 
 ### Concurrency and Resource Bounds
 
@@ -115,11 +115,11 @@ A single function orchestrates the full recall pipeline: embedding the query, lo
 
 ### Hierarchical Memory Architecture
 
-The memory token budget is partitioned into three tiers modeled after the Atkinson-Shiffrin cognitive framework. Semantic memory (always-on identity facts) occupies the beginning of the prompt where transformer attention is strongest. Episodic memory (query-relevant recalled facts and summaries) fills the middle, ranked by an Ebbinghaus-inspired retention function that models exponential forgetting. Working memory (current session context) occupies the end of the prompt where recency bias is highest. Each tier has an independent budget with surplus cascading to the next tier.
+The memory token budget is partitioned into three tiers modeled after the Atkinson-Shiffrin cognitive framework. Semantic memory (always-on identity facts) occupies the beginning of the prompt where transformer attention is strongest. Episodic memory (query-relevant recalled facts and summaries) fills the middle, ranked by significance, confidence, and recency. Working memory (current session context) occupies the end of the prompt where recency bias is highest. Each tier has an independent budget with surplus cascading to the next tier.
 
-### Relational Memory Graph
+### Relational Memory Graph (planned)
 
-A knowledge graph of subject-predicate-object triples links facts through typed relationships, enabling multi-hop reasoning that pure vector search cannot achieve. When the user asks "How is my mother doing?", graph traversal connects "mother Priya" to "ill" to "upcoming surgery" to "worried" -- relationships that span multiple facts with low pairwise similarity. Entity resolution merges variant surface forms ("mom", "mother", "Priya") into canonical entities. Graph expansion augments standard recall by pulling in neighboring facts connected through the graph structure.
+A planned knowledge graph of subject-predicate-object triples would link facts through typed relationships, enabling multi-hop reasoning that pure vector search cannot achieve. When the user asks "How is my mother doing?", graph traversal would connect "mother Priya" to "ill" to "upcoming surgery" to "worried" -- relationships that span multiple facts with low pairwise similarity. Entity resolution would merge variant surface forms ("mom", "mother", "Priya") into canonical entities. Graph expansion would augment standard recall by pulling in neighboring facts connected through the graph structure. Note: This subsystem is on the roadmap and not yet implemented in the TypeScript SDK.
 
 ### Emotional Memory Scoring
 
@@ -141,9 +141,9 @@ Users can see their full memory profile, correct wrong facts, confirm inferred o
 
 ## 7. Storage and Providers
 
-MemG supports three storage backends out of the box: **PostgreSQL**, **SQLite**, and **MySQL**. Each backend implements the full repository contract including the knowledge graph triple table, artifact store, and turn summary schema.
+MemG supports three storage backends out of the box: **PostgreSQL**, **SQLite**, and **MySQL**. Each backend implements the full repository contract including the artifact store and turn summary schema.
 
-The system integrates with **10 LLM providers** (OpenAI, Anthropic, Gemini, Ollama, Azure OpenAI, AWS Bedrock, DeepSeek, Groq, Together AI, xAI) and **11 embedding providers** (OpenAI, Gemini, Ollama, HuggingFace, Azure OpenAI, AWS Bedrock, Together AI, Cohere, VoyageAI, in-process ONNX Runtime, and a local sentence-transformers service). Local embedding options require no API keys.
+The system integrates with **10 LLM providers** (OpenAI, Anthropic, Gemini, Ollama, Azure OpenAI, AWS Bedrock, DeepSeek, Groq, Together AI, xAI) and **10 embedding providers** (OpenAI, Gemini, Ollama, HuggingFace/Transformers, Azure OpenAI, AWS Bedrock, Together AI, Cohere, VoyageAI, plus local ONNX via @huggingface/transformers). Local embedding options require no API keys.
 
 Recall uses hybrid ranking: cosine similarity for semantic matching combined with BM25 for keyword matching, with adaptive query-length weighting and Kneedle dynamic cutoff.
 
@@ -153,7 +153,7 @@ Recall uses hybrid ranking: cosine similarity for semantic matching combined wit
 
 The architecture is grounded in established research across three domains:
 
-**Cognitive psychology** -- The three-tier memory hierarchy follows the Atkinson-Shiffrin model (sensory/short-term/long-term stores). Episodic decay uses an Ebbinghaus forgetting curve. Emotional memory scoring draws on flashbulb memory research (Brown and Kulik), the peak-end rule (Kahneman), and emotional memory bias findings (Talarico and Rubin). Proactive surfacing applies variable ratio reinforcement (Skinner), the Zeigarnik effect, and the nostalgia effect. User-visible memory leverages the IKEA effect and endowment effect.
+**Cognitive psychology** -- The three-tier memory hierarchy follows the Atkinson-Shiffrin model (sensory/short-term/long-term stores). Episodic decay uses significance-based TTL with reinforcement. Emotional memory scoring draws on flashbulb memory research (Brown and Kulik), the peak-end rule (Kahneman), and emotional memory bias findings (Talarico and Rubin). Proactive surfacing applies variable ratio reinforcement (Skinner), the Zeigarnik effect, and the nostalgia effect. User-visible memory leverages the IKEA effect and endowment effect.
 
 **Information retrieval** -- Fact recall combines dense vector search with Okapi BM25 lexical scoring, a hybrid approach standard in modern search systems. The Kneedle algorithm (Satopaa et al., 2011) provides dynamic result cutoff. Slot normalization uses embedding-based semantic similarity for entity resolution.
 

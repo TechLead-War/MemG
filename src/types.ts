@@ -17,6 +17,10 @@ export interface Memory {
   threadStatus?: 'open' | 'resolved' | null;
   /** Whether user pinned this memory. */
   pinned?: boolean;
+  /** When this fact was superseded by a newer fact (ISO date). */
+  supersededAt?: string;
+  /** UUID of the fact that superseded this one. */
+  supersededBy?: string;
 }
 
 /** Input payload for storing a new memory. */
@@ -103,6 +107,10 @@ export interface Fact {
   engagementScore?: number;
   /** Whether this fact is pinned by the user (never decays). */
   pinned?: boolean;
+  /** When this fact was superseded by a newer fact (ISO date). */
+  supersededAt?: string;
+  /** UUID of the fact that superseded this one. */
+  supersededBy?: string;
 }
 
 /** An entity record. */
@@ -219,6 +227,8 @@ export interface RecalledFact {
   factType?: string;
   /** Semantic tag. */
   tag?: string;
+  /** ISO date for time-bound facts. */
+  referenceTime?: string;
 }
 
 /** A high-significance fact loaded for conscious mode. */
@@ -254,7 +264,7 @@ export interface NativeConfig {
   /** Connection URL for postgres/mysql (e.g. 'postgresql://user:pass@host/db'). */
   storeUrl?: string;
   dbPath?: string;
-  embedProvider?: 'sentence-transformers' | 'openai' | 'gemini';
+  embedProvider?: 'sentence-transformers' | 'openai' | 'gemini' | 'ollama' | 'azureopenai' | 'bedrock' | 'togetherai' | 'cohere' | 'voyageai';
   embedModel?: string;
   embedDimension?: number;
   llmProvider?: string;
@@ -271,6 +281,28 @@ export interface NativeConfig {
   extract?: boolean;
   openaiApiKey?: string;
   geminiApiKey?: string;
+  /** API key for DeepSeek (or DEEPSEEK_API_KEY env var). */
+  deepseekApiKey?: string;
+  /** API key for Groq (or GROQ_API_KEY env var). */
+  groqApiKey?: string;
+  /** API key for Together AI (or TOGETHER_API_KEY env var). */
+  togetherApiKey?: string;
+  /** API key for xAI (or XAI_API_KEY env var). */
+  xaiApiKey?: string;
+  /** Azure OpenAI API key (or AZURE_OPENAI_API_KEY env var). */
+  azureOpenaiApiKey?: string;
+  /** Azure OpenAI endpoint URL (or AZURE_OPENAI_ENDPOINT env var). */
+  azureOpenaiEndpoint?: string;
+  /** Azure OpenAI API version (default: 2024-10-21). */
+  azureOpenaiApiVersion?: string;
+  /** AWS region for Bedrock (or AWS_REGION env var, default: us-east-1). */
+  bedrockRegion?: string;
+  /** Ollama base URL (default: http://localhost:11434). */
+  ollamaBaseUrl?: string;
+  /** API key for Cohere (or COHERE_API_KEY env var). */
+  cohereApiKey?: string;
+  /** API key for VoyageAI (or VOYAGE_API_KEY env var). */
+  voyageApiKey?: string;
   /** Maximum personal facts per context build (personalization throttle). Default: 15. */
   maxPersonalFacts?: number;
   /** Diversify recalled topics to avoid hammering the same subject. Default: true. */

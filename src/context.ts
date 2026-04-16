@@ -67,7 +67,8 @@ function formatSummaryDate(isoDate: string | undefined): string {
       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
     ];
     return `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
-  } catch {
+  } catch (err) {
+    console.warn('[memg] context: formatSummaryDate failed:', err);
     return 'Unknown date';
   }
 }
@@ -149,9 +150,19 @@ export function buildContext(input: ContextInput): string {
       if (f.temporalStatus === 'historical') {
         line += '[historical] ';
       }
+      if (f.referenceTime) {
+        line += `[${f.referenceTime}] `;
+      }
       line += f.content;
       const est = estimateTokens(line + '\n');
-      if (tokensUsed + sectionTokens + est > budget) break;
+      if (tokensUsed + sectionTokens + est > budget) {
+        // Always include at least top 5 recalled facts even if over budget
+        if (lines.length <= 5) {
+          // Allow slight budget overflow for critical facts
+        } else {
+          break;
+        }
+      }
       lines.push(line);
       sectionTokens += est;
       any = true;
@@ -304,7 +315,8 @@ function relativeDate(iso: string | undefined): string {
     const months = Math.floor(days / 30);
     if (months === 1) return '1 month ago';
     return `${months} months ago`;
-  } catch {
+  } catch (err) {
+    console.warn('[memg] context: relativeDate failed:', err);
     return 'unknown time ago';
   }
 }

@@ -59,7 +59,7 @@ export interface Store {
 
   // Fact lifecycle
   reinforceFact(factUuid: string, newExpiresAt: string | null): MaybeAsync<void>;
-  updateTemporalStatus(factUuid: string, status: string): MaybeAsync<void>;
+  updateTemporalStatus(factUuid: string, status: string, supersededBy?: string): MaybeAsync<void>;
   updateSignificance(factUuid: string, sig: number): MaybeAsync<void>;
   deleteFact(entityUuid: string, factUuid: string): MaybeAsync<void>;
   deleteEntityFacts(entityUuid: string): MaybeAsync<number>;
@@ -142,7 +142,8 @@ function decodeEmbedding(raw: Buffer | null | undefined): number[] | undefined {
     // Might be JSON
     try {
       return JSON.parse(raw.toString()) as number[];
-    } catch {
+    } catch (err) {
+      console.warn('[memg] store: decodeEmbedding JSON parse failed:', err);
       return undefined;
     }
   }
@@ -183,6 +184,8 @@ function rowToFact(row: any): Fact {
     threadStatus: row.thread_status ?? null,
     engagementScore: row.engagement_score ?? 0,
     pinned: row.pinned === 1,
+    supersededAt: row.superseded_at ?? undefined,
+    supersededBy: row.superseded_by ?? undefined,
   };
 }
 
@@ -240,7 +243,7 @@ function rowToArtifact(row: any): Artifact {
   };
 }
 
-const FACT_COLUMNS = `uuid, content, embedding, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned`;
+const FACT_COLUMNS = `uuid, content, embedding, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned, superseded_at, superseded_by`;
 
 function buildFactFilterClauses(filter: FactFilter): { clauses: string; args: any[] } {
   let clauses = '';
@@ -367,7 +370,7 @@ export class MemGStore implements Store {
   // ---- Fact metadata ----
 
   listFactsMetadata(entityUuid: string, filter: FactFilter, limit: number): Fact[] {
-    const metaCols = `uuid, content, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned`;
+    const metaCols = `uuid, content, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned, superseded_at, superseded_by`;
     const { clauses, args: filterArgs } = buildFactFilterClauses(filter);
     let query = `SELECT ${metaCols} FROM mg_entity_fact WHERE entity_id = ?${clauses}`;
     const args: any[] = [entityUuid, ...filterArgs];
@@ -470,7 +473,7 @@ export class MemGStore implements Store {
     const embedding = fact.embedding ? encodeEmbedding(fact.embedding) : null;
     this.db
       .prepare(
-        `INSERT INTO mg_entity_fact (uuid, entity_id, content, embedding, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO mg_entity_fact (uuid, entity_id, content, embedding, created_at, updated_at, fact_type, temporal_status, significance, content_key, reference_time, expires_at, reinforced_at, reinforced_count, tag, slot, confidence, embedding_model, source_role, recall_count, last_recalled_at, emotional_weight, emotional_valence, verbatim, started_at, thread_status, engagement_score, pinned, superseded_at, superseded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         fact.uuid,
@@ -500,7 +503,9 @@ export class MemGStore implements Store {
         fact.startedAt ?? null,
         fact.threadStatus ?? null,
         fact.engagementScore ?? 0,
-        fact.pinned ? 1 : 0
+        fact.pinned ? 1 : 0,
+        fact.supersededAt ?? null,
+        fact.supersededBy ?? null
       );
   }
 
@@ -542,7 +547,7 @@ export class MemGStore implements Store {
     let query = `SELECT ${FACT_COLUMNS} FROM mg_entity_fact WHERE entity_id = ?${clauses}`;
     const args: any[] = [entityUuid, ...filterArgs];
 
-    query += ` ORDER BY significance DESC, created_at DESC`;
+    query += ` ORDER BY created_at DESC`;
     if (limit > 0) {
       query += ` LIMIT ?`;
       args.push(limit);
@@ -571,11 +576,17 @@ export class MemGStore implements Store {
       .run(now, newExpiresAt, now, factUuid);
   }
 
-  updateTemporalStatus(factUuid: string, status: string): void {
+  updateTemporalStatus(factUuid: string, status: string, supersededBy?: string): void {
     const now = nowISO();
-    this.db
-      .prepare(`UPDATE mg_entity_fact SET temporal_status = ?, updated_at = ? WHERE uuid = ?`)
-      .run(status, now, factUuid);
+    if (supersededBy && status === 'historical') {
+      this.db
+        .prepare(`UPDATE mg_entity_fact SET temporal_status = ?, updated_at = ?, superseded_at = ?, superseded_by = ? WHERE uuid = ?`)
+        .run(status, now, now, supersededBy, factUuid);
+    } else {
+      this.db
+        .prepare(`UPDATE mg_entity_fact SET temporal_status = ?, updated_at = ? WHERE uuid = ?`)
+        .run(status, now, factUuid);
+    }
   }
 
   updateSignificance(factUuid: string, sig: number): void {
@@ -666,7 +677,7 @@ export class MemGStore implements Store {
       const newExpiry = new Date(now.getTime() + timeoutMs).toISOString();
       this.db.prepare(`UPDATE mg_session SET expires_at = ? WHERE uuid = ?`).run(newExpiry, row.uuid);
       let mentions: string[] = [];
-      try { mentions = JSON.parse(row.entity_mentions ?? '[]'); } catch { mentions = []; }
+      try { mentions = JSON.parse(row.entity_mentions ?? '[]'); } catch (err) { console.warn('[memg] store: parse entity_mentions failed:', err); mentions = []; }
       return {
         session: {
           uuid: row.uuid,
@@ -930,7 +941,7 @@ export class MemGStore implements Store {
       .prepare(`SELECT entity_mentions FROM mg_session WHERE uuid = ?`)
       .get(sessionUuid) as any;
     if (!row) return [];
-    try { return JSON.parse(row.entity_mentions ?? '[]'); } catch { return []; }
+    try { return JSON.parse(row.entity_mentions ?? '[]'); } catch (err) { console.warn('[memg] store: parse entity_mentions failed:', err); return []; }
   }
 
   // ---- Pin & Confirm ----

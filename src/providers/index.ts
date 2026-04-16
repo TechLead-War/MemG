@@ -13,7 +13,8 @@
  */
 export function detectProvider(client: any): 'openai' | 'anthropic' | 'gemini' | null {
   const name = client?.constructor?.name;
-  if (name === 'OpenAI') return 'openai';
+  // AzureOpenAI extends OpenAI — same chat.completions.create interface.
+  if (name === 'OpenAI' || name === 'AzureOpenAI') return 'openai';
   if (name === 'Anthropic') return 'anthropic';
   if (name === 'GoogleGenerativeAI' || name === 'GenerativeModel') return 'gemini';
 
@@ -22,6 +23,9 @@ export function detectProvider(client: any): 'openai' | 'anthropic' | 'gemini' |
   if (mod.includes('openai')) return 'openai';
   if (mod.includes('anthropic')) return 'anthropic';
   if (mod.includes('generative-ai') || mod.includes('google')) return 'gemini';
+
+  // Fallback: check for OpenAI-compatible interface (used by DeepSeek, Groq, Together, xAI, Ollama).
+  if (client?.chat?.completions?.create) return 'openai';
 
   // Fallback: check for Gemini SDK methods.
   if (typeof client?.generateContent === 'function') return 'gemini';

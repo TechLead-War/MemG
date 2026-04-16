@@ -1,0 +1,17 @@
+{
+  "name": "memg-locomo-benchmark",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx server.ts",
+    "dev": "tsx --watch server.ts",
+    "bench": "tsx server.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/better-sqlite3": "^7.6.12",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3"
+  }
+}

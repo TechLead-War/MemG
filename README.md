@@ -1,6 +1,6 @@
 # MemG
 
-A pluggable memory layer for language model applications, written in Go.
+A pluggable memory layer for language model applications, written in TypeScript.
 
 MemG intercepts LLM calls to automatically inject relevant recalled facts from stored knowledge, tracks conversations across sessions, and asynchronously extracts and manages knowledge with an enriched fact lifecycle — decay, reinforcement, evolution, and deduplication.
 
@@ -8,10 +8,10 @@ MemG intercepts LLM calls to automatically inject relevant recalled facts from s
 
 - **Zero-code memory proxy** — add persistent memory to any LLM app in any language by changing one env var
 - **10 LLM providers** — OpenAI, Anthropic, Gemini, Ollama, Azure OpenAI, AWS Bedrock, DeepSeek, Groq, Together AI, xAI
-- **11 embedding providers** — OpenAI, Gemini, Ollama, HuggingFace, Azure OpenAI, AWS Bedrock, Together AI, Cohere, VoyageAI, in-process ONNX Runtime, plus a local sentence-transformers gRPC service
+- **10 embedding providers** — OpenAI, Gemini, Ollama, Azure OpenAI, AWS Bedrock, Together AI, Cohere, VoyageAI, local ONNX via HuggingFace Transformers, plus bring-your-own via the Embedder interface
 - **Plug-and-play storage** — PostgreSQL, SQLite, MySQL out of the box
 - **Hybrid recall** — cosine similarity + BM25 lexical scoring with Kneedle dynamic cutoff
-- **Memory lifecycle** — fact types (identity/event/pattern), temporal status (current/historical), significance-based decay, reinforcement, and automatic deduplication
+- **Memory lifecycle** — fact types (identity/event/pattern), temporal status (current/historical) with `supersededAt`/`supersededBy` transition tracking, significance-based decay, reinforcement, and automatic deduplication
 - **Sliding sessions** — sessions extend on activity, auto-summarize on rollover, cap history to recent turns
 - **Conversation summaries** — auto-generated on session expiry, recalled by relevance, pruned after 90 days
 - **Built-in extraction** — the proxy ships with a default LLM-based extraction stage with slot/confidence/provenance output
@@ -19,40 +19,28 @@ MemG intercepts LLM calls to automatically inject relevant recalled facts from s
 - **Fact provenance** — confidence, source role, embedding model, and slot tracked on every fact
 - **Query transformation** — optional hook rewrites follow-up queries before embedding for better retrieval
 - **Re-embedding** — migrate facts to a new embedding model without data loss
-- **Consolidation** — background worker clusters old events into pattern facts
+- **Consolidation** — background worker clusters old events into pattern facts with configurable thresholds and duplicate detection
 - **Local embeddings** — in-process ONNX Runtime (no Python, no external services) or legacy Python gRPC service, both with zero API keys
 - **API key management** — per-provider config with env var fallback
 
-## Install SDKs
+## Install
 
 ```bash
-# Python
-pip install memg-sdk
-
-# TypeScript / Node.js
 npm install memg-core-js
-```
-
-## Publish SDKs
-
-```bash
-# PyPI
-cd sdk/python && python -m build && twine upload dist/*
-
-# npm
-cd sdk/typescript && npm run build && npm publish
 ```
 
 ## Quick Start (Proxy — Any Language, Zero Code Changes)
 
-The fastest way to use MemG. Start the proxy, set one env var, and your existing app gets persistent memory.
+The MemG proxy intercepts LLM API calls to add persistent memory. The proxy is available as a separate Go binary (see the [Go repository](https://github.com/memg/memg)).
+
+For TypeScript applications, native mode is recommended instead — it runs fully in-process with no external server needed.
+
+<details>
+<summary>Proxy mode details (requires Go binary)</summary>
 
 **1. Start the proxy:**
 
 ```bash
-# Install
-go install memg/cmd/memg@latest
-
 # Start (uses SQLite at ~/.memg/memory.db, OpenAI for extraction + embeddings)
 export OPENAI_API_KEY=sk-...
 memg proxy
@@ -131,96 +119,7 @@ response = client.chat.completions.create(
 # memg proxy --entity user-123
 ```
 
-## Quick Start (Go Library)
-
-```go
-package main
-
-import (
-	"context"
-	"database/sql"
-	"log"
-
-	_ "github.com/jackc/pgx/v5/stdlib"
-
-	"memg"
-	"memg/embed"
-	"memg/llm"
-	"memg/store/sqlstore"
-
-	_ "memg/embed/openai"   // register OpenAI embedder
-	_ "memg/llm/anthropic"  // register Anthropic provider
-)
-
-func main() {
-	db, err := sql.Open("pgx", "postgres://localhost:5432/myapp")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	repo := sqlstore.NewPostgres(db)
-
-	// One instance serves all users.
-	g, err := memg.New(repo,
-		memg.WithLLMProvider("anthropic", llm.ProviderConfig{
-			Model: "claude-sonnet-4-20250514",
-		}),
-		memg.WithEmbedProvider("openai", embed.ProviderConfig{
-			Model: "text-embedding-3-small",
-		}),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer g.Close()
-
-	if err := g.Migrate(context.Background()); err != nil {
-		log.Fatal(err)
-	}
-
-	// Pass the user ID per call — no need for separate instances.
-	resp, err := g.Chat(context.Background(), []*llm.Message{
-		llm.UserMessage("What do you remember about me?"),
-	}, memg.ForEntity("user-alice"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Println(resp.Content)
-
-	// Same instance, different user — completely isolated memory.
-	resp, err = g.Chat(context.Background(), []*llm.Message{
-		llm.UserMessage("Hello!"),
-	}, memg.ForEntity("user-bob"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Println(resp.Content)
-}
-```
-
-## Quick Start (Python SDK)
-
-```bash
-pip install memg-sdk
-```
-
-```python
-from memg import MemG
-import openai
-
-# One line — wraps your existing client with memory
-client = MemG.wrap(openai.OpenAI(), entity="user-123")
-
-# Everything else stays the same
-resp = client.chat.completions.create(
-    model="gpt-4o",
-    messages=[{"role": "user", "content": "What do you remember about me?"}],
-)
-```
-
-Also supports Anthropic (`MemG.wrap(anthropic.Anthropic(), ...)`), Gemini (`MemG.wrap(model, entity="user-123")`), custom stores (`MemG(store=my_store)`), client mode (`mode="client"`), and direct memory operations (`MemG().add(...)`, `MemG().search(...)`).
-
-See [`sdk/python/`](sdk/python/) for full documentation.
+</details>
 
 ## Quick Start (TypeScript SDK)
 
@@ -244,196 +143,82 @@ const resp = await client.chat.completions.create({
 
 Also supports Anthropic (`MemG.wrap(new Anthropic(), ...)`), Gemini (`MemG.wrap(geminiModel, { entity: 'user-123' })`), custom stores (`new MemG({ store: myStore })`), client mode (`mode: 'client'`), and direct memory operations (`new MemG().add(...)`, `new MemG().search(...)`).
 
-See [`sdk/typescript/`](sdk/typescript/) for full documentation.
-
 ## LLM Providers
 
-Select a provider by name with `WithLLMProvider`. Import the provider package to register it.
+MemG supports 10 LLM providers for extraction and chat. Set the provider via `llmProvider` in NativeConfig.
 
-| Provider | Registry Name | Default Model | API Key Env Var | Import |
-|---|---|---|---|---|
-| OpenAI | `openai` | gpt-4o | `OPENAI_API_KEY` | `_ "memg/llm/openai"` |
-| Anthropic | `anthropic` | claude-sonnet-4-20250514 | `ANTHROPIC_API_KEY` | `_ "memg/llm/anthropic"` |
-| Google Gemini | `gemini` | gemini-2.5-flash | `GEMINI_API_KEY` | `_ "memg/llm/gemini"` |
-| Ollama (local) | `ollama` | (user specified) | none | `_ "memg/llm/ollama"` |
-| Azure OpenAI | `azureopenai` | (user specified) | `AZURE_OPENAI_API_KEY` | `_ "memg/llm/azureopenai"` |
-| AWS Bedrock | `bedrock` | anthropic.claude-sonnet-4-20250514-v1:0 | `AWS_ACCESS_KEY_ID` | `_ "memg/llm/bedrock"` |
-| DeepSeek | `deepseek` | deepseek-chat | `DEEPSEEK_API_KEY` | `_ "memg/llm/deepseek"` |
-| Groq | `groq` | llama-3.3-70b-versatile | `GROQ_API_KEY` | `_ "memg/llm/groq"` |
-| Together AI | `togetherai` | meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo | `TOGETHER_API_KEY` | `_ "memg/llm/togetherai"` |
-| xAI | `xai` | grok-3 | `XAI_API_KEY` | `_ "memg/llm/xai"` |
+| Provider | Registry Name | Default Model | API Key Env Var |
+|---|---|---|---|
+| OpenAI | `openai` | gpt-4o | `OPENAI_API_KEY` |
+| Anthropic | `anthropic` | claude-sonnet-4-20250514 | `ANTHROPIC_API_KEY` |
+| Google Gemini | `gemini` | gemini-2.5-flash | `GEMINI_API_KEY` |
+| Ollama (local) | `ollama` | (user specified) | none |
+| Azure OpenAI | `azureopenai` | (user specified) | `AZURE_OPENAI_API_KEY` |
+| AWS Bedrock | `bedrock` | anthropic.claude-sonnet-4-20250514-v1:0 | `AWS_ACCESS_KEY_ID` |
+| DeepSeek | `deepseek` | deepseek-chat | `DEEPSEEK_API_KEY` |
+| Groq | `groq` | llama-3.3-70b-versatile | `GROQ_API_KEY` |
+| Together AI | `togetherai` | meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo | `TOGETHER_API_KEY` |
+| xAI | `xai` | grok-3 | `XAI_API_KEY` |
 
-API keys are resolved in order: explicit `ProviderConfig.APIKey` field, then the environment variable, then error.
+API keys are resolved in order: explicit config field, then the environment variable, then error.
 
 ## Embedding Providers
 
-| Provider | Registry Name | Default Model | Dimension | API Key Env Var | Import |
-|---|---|---|---|---|---|
-| OpenAI | `openai` | text-embedding-3-small | 1536 | `OPENAI_API_KEY` | `_ "memg/embed/openai"` |
-| Google Gemini | `gemini` | text-embedding-004 | 768 | `GEMINI_API_KEY` | `_ "memg/embed/gemini"` |
-| Ollama (local) | `ollama` | (user specified) | (user specified) | none | `_ "memg/embed/ollama"` |
-| HuggingFace | `huggingface` | sentence-transformers/all-MiniLM-L6-v2 | 384 | `HF_API_KEY` | `_ "memg/embed/huggingface"` |
-| Azure OpenAI | `azureopenai` | (user specified) | (user specified) | `AZURE_OPENAI_API_KEY` | `_ "memg/embed/azureopenai"` |
-| AWS Bedrock | `bedrock` | amazon.titan-embed-text-v2:0 | 1024 | `AWS_ACCESS_KEY_ID` | `_ "memg/embed/bedrock"` |
-| Together AI | `togetherai` | togethercomputer/m2-bert-80M-8k-retrieval | 768 | `TOGETHER_API_KEY` | `_ "memg/embed/togetherai"` |
-| Cohere | `cohere` | embed-english-v3.0 | 1024 | `COHERE_API_KEY` | `_ "memg/embed/cohere"` |
-| VoyageAI | `voyageai` | voyage-3 | 1024 | `VOYAGE_API_KEY` | `_ "memg/embed/voyageai"` |
-| ONNX Runtime | `onnx` | all-MiniLM-L6-v2 | 384 | none | `_ "memg/embed/onnx"` |
-| Local (gRPC) | `local` | all-MiniLM-L6-v2 | auto-detected | none | `_ "memg/embed/local"` |
+MemG supports 10 embedding providers. Set via `embedProvider` in NativeConfig.
+
+| Provider | Registry Name | Default Model | Dimension | API Key Env Var |
+|---|---|---|---|---|
+| OpenAI | `openai` | text-embedding-3-small | 1536 | `OPENAI_API_KEY` |
+| Google Gemini | `gemini` | text-embedding-004 | 768 | `GEMINI_API_KEY` |
+| Ollama (local) | `ollama` | (user specified) | (user specified) | none |
+| Azure OpenAI | `azureopenai` | (user specified) | (user specified) | `AZURE_OPENAI_API_KEY` |
+| AWS Bedrock | `bedrock` | amazon.titan-embed-text-v2:0 | 1024 | `AWS_ACCESS_KEY_ID` |
+| Together AI | `togetherai` | togethercomputer/m2-bert-80M-8k-retrieval | 768 | `TOGETHER_API_KEY` |
+| Cohere | `cohere` | embed-english-v3.0 | 1024 | `COHERE_API_KEY` |
+| VoyageAI | `voyageai` | voyage-3 | 1024 | `VOYAGE_API_KEY` |
+| HuggingFace Transformers | `sentence-transformers` | Xenova/all-MiniLM-L6-v2 | 384 | none |
 
 ## Embedding Modes
 
-**Most users need 1 service — just the Go proxy.** If you use a cloud embedding provider (OpenAI, Cohere, etc.), the proxy handles everything. No Python needed:
+**Cloud providers** — use any API-based provider by setting `embedProvider` and the corresponding API key:
+
+```typescript
+const m = new MemG({
+  embedProvider: 'openai',
+  openaiApiKey: process.env.OPENAI_API_KEY,
+});
+```
+
+**Local embeddings (recommended)** — in-process via `@huggingface/transformers`. No API keys, no external services:
 
 ```bash
-memg proxy   # uses OpenAI for embeddings (same API key as your LLM calls)
+npm install @huggingface/transformers
 ```
 
-**Local embeddings (recommended: ONNX)** — in-process, no Python, no external services, no API keys:
-
-```bash
-memg proxy --embed-provider onnx
+```typescript
+const m = new MemG({
+  embedProvider: 'sentence-transformers',  // default
+  embedModel: 'Xenova/all-MiniLM-L6-v2',  // default, 384d
+});
 ```
 
-This runs the embedding model directly inside the Go process using ONNX Runtime. See [ONNX Local Embeddings](#onnx-local-embeddings-recommended) below.
+**Ollama (local)** — use locally-hosted models via Ollama:
 
-**Local embeddings (legacy: gRPC)** — the Go proxy + a separate Python embedding service:
-
-```bash
-# Terminal 1: Python embedding service
-cd local/embedder && python server.py
-
-# Terminal 2: Go proxy
-memg proxy --embed-provider local
+```typescript
+const m = new MemG({
+  embedProvider: 'ollama',
+  embedModel: 'nomic-embed-text',
+  ollamaBaseUrl: 'http://localhost:11434',
+});
 ```
-
-The gRPC approach requires Python and a separate process. It remains available for users who need PyTorch-specific features or custom models not exported to ONNX.
-
-## ONNX Local Embeddings (Recommended)
-
-Run embedding models directly inside the Go process using ONNX Runtime. No Python, no external services, no API keys, no data leaves your machine.
-
-### Prerequisites
-
-**1. Install ONNX Runtime:**
-
-```bash
-# macOS (Apple Silicon)
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-osx-arm64-1.24.4.tgz
-tar xzf onnxruntime-osx-arm64-1.24.4.tgz
-cp onnxruntime-osx-arm64-1.24.4/lib/libonnxruntime.dylib /opt/homebrew/lib/
-
-# Linux (x86_64)
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-1.24.4.tgz
-tar xzf onnxruntime-linux-x64-1.24.4.tgz
-sudo cp onnxruntime-linux-x64-1.24.4/lib/libonnxruntime.so /usr/local/lib/
-
-# Or set ONNX_RUNTIME_LIB to point to the library directly
-export ONNX_RUNTIME_LIB=/path/to/libonnxruntime.dylib
-```
-
-**2. Download model files:**
-
-```bash
-mkdir -p ~/.memg/models/all-MiniLM-L6-v2
-# Download model.onnx and vocab.txt for all-MiniLM-L6-v2
-# from HuggingFace: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
-```
-
-### Use
-
-```bash
-# Proxy mode
-memg proxy --embed-provider onnx
-
-# With custom model directory
-memg proxy --embed-provider onnx --embed-base-url /path/to/model/dir
-```
-
-### Use from Go
-
-```go
-import _ "memg/embed/onnx"
-
-g, _ := memg.New(repo,
-    memg.WithEmbedProvider("onnx", embed.ProviderConfig{}), // defaults to ~/.memg/models/all-MiniLM-L6-v2
-)
-
-// Or with a custom model directory:
-g, _ := memg.New(repo,
-    memg.WithEmbedProvider("onnx", embed.ProviderConfig{
-        BaseURL: "/path/to/my/model/dir",  // must contain model.onnx + vocab.txt
-    }),
-)
-```
-
-### How It Works
-
-The ONNX provider loads the model and vocabulary into the Go process at startup. Each `Embed()` call runs inference in-process via ONNX Runtime — no network calls, no Python, no gRPC. Embeddings are mean-pooled and L2-normalized, matching the output of the Python sentence-transformers service.
-
-## Local Embeddings via gRPC (Legacy)
-
-MemG also includes a Python gRPC service that runs sentence-transformers models. This is the legacy approach — use the ONNX provider above unless you need PyTorch-specific features.
-
-### Setup
-
-```bash
-cd local/embedder
-pip install -r requirements.txt
-```
-
-### Run
-
-```bash
-# Default: all-MiniLM-L6-v2 (384d, fast)
-python server.py
-
-# Higher quality model
-python server.py --model all-mpnet-base-v2
-
-# Any HuggingFace sentence-transformers model
-python server.py --model BAAI/bge-small-en-v1.5
-python server.py --model intfloat/e5-large-v2
-
-# Custom port and GPU
-python server.py --port 50052 --device cuda
-```
-
-### Docker
-
-```bash
-# Build from repo root
-docker build -f local/embedder/Dockerfile -t memg-embedder .
-
-# Run with default model
-docker run -p 50051:50051 memg-embedder
-
-# Run with custom model
-docker run -p 50051:50051 memg-embedder --model all-mpnet-base-v2
-
-# Persist model cache across restarts
-docker run -p 50051:50051 -v hf_cache:/root/.cache/huggingface memg-embedder
-```
-
-### Use from Go
-
-```go
-import _ "memg/embed/local"
-
-g, _ := memg.New(repo,
-    memg.WithEmbedProvider("local", embed.ProviderConfig{}), // defaults to localhost:50051
-)
-```
-
-The Go client auto-detects the model dimension from the service — no manual configuration needed.
 
 ## Supported Databases
 
-| Database | Constructor | Driver |
+| Database | Store Class | Peer Dependency |
 |---|---|---|
-| PostgreSQL | `sqlstore.NewPostgres(db)` | `github.com/jackc/pgx/v5/stdlib` |
-| SQLite | `sqlstore.NewSQLite(db)` | `modernc.org/sqlite` |
-| MySQL | `sqlstore.NewMySQL(db)` | `github.com/go-sql-driver/mysql` |
+| SQLite | `MemGStore` (default) | `better-sqlite3` |
+| PostgreSQL | `PostgresStore` | `pg` |
+| MySQL | `MySQLStore` | `mysql2` |
 
 ## Memory Lifecycle
 
@@ -463,62 +248,21 @@ Three-tier memory inspired by the Atkinson-Shiffrin model and research from Memo
 | Tier | What It Holds | Token Budget | Persistence |
 |---|---|---|---|
 | **Semantic** | Identity facts, user profile, pinned facts | ~600 tokens | Never decays |
-| **Episodic** | Events, predictions, emotionally weighted memories | ~1400 tokens | Ebbinghaus decay curve |
+| **Episodic** | Events, predictions, emotionally weighted memories | ~1400 tokens | Significance-based TTL |
 | **Working** | Current session turns (compressed) | ~2000 tokens | Session-scoped |
 
 Projected impact: **60-75% token reduction** vs. flat context injection, with better answer quality due to principled budget allocation and positional optimization (identity at start, recent context at end).
 
-### Relational Memory Graph (Subsystem 9)
+### Relational Memory Graph (Subsystem 9) — Planned
 
-Promotes the existing `graph/` package to a first-class recall mechanism. Built on research from HippoRAG (NeurIPS 2024), AriGraph (IJCAI 2025), and A-MEM (NeurIPS 2025):
+A knowledge graph of subject-predicate-object triples for multi-hop reasoning. Based on HippoRAG (NeurIPS 2024), AriGraph (IJCAI 2025), and A-MEM (NeurIPS 2025):
 
 - **Graph-augmented recall** — seed facts expand to connected subgraphs via 1-hop traversal
 - **Entity resolution** — "mom", "mother", "Priya" merge into one node using embedding similarity
 - **Knowledge cards** — structured entity summaries injected instead of disconnected fact snippets
 - **Anti-hallucination** — graph provides closed-world assumption for personal facts
 
-**SDK Interface:**
-
-```go
-// Go — query the knowledge graph for an entity
-graph, err := m.GetEntityGraph(ctx, entityID, "Priya")
-// Returns: []Triple — all triples where "Priya" appears as subject or object
-
-// Go — graph-augmented recall is automatic when GraphRecall is enabled
-ctx := memory.RecallAndBuildContext(ctx, repo, embedder, engine, entityUUID, query, cfg)
-// The pipeline checks for TripleStore and expands if available
-```
-
-```typescript
-// TypeScript — query the knowledge graph
-const graph = await memg.getEntityGraph(entityId, "Priya");
-// Returns: Triple[] — all triples involving "Priya"
-
-// TypeScript — graph-augmented context building
-const context = await memg.buildMemoryContext(entityId, query, {
-  graphRecall: true,
-  graphExpansionHops: 1,
-  graphProximityBonus: 0.05,
-  entityResolutionThreshold: 0.85
-});
-// Graph expansion happens internally when the store supports it
-```
-
-```python
-# Python — query the knowledge graph
-graph = memg.get_entity_graph(entity_id, "Priya")
-# Returns: list[Triple] — all triples involving "Priya"
-
-# Python — graph-augmented context building
-context = memg.build_memory_context(
-    entity_id=entity_id,
-    query=query,
-    graph_recall=True,
-    graph_expansion_hops=1,
-    graph_proximity_bonus=0.05,
-    entity_resolution_threshold=0.85
-)
-```
+> **Note:** This subsystem is on the roadmap and not yet implemented in the TypeScript SDK.
 
 ### Emotional Memory Scoring (Subsystem 10)
 
@@ -530,62 +274,15 @@ Emotional annotation on facts based on flashbulb memory research (Brown & Kulik,
 - Peak moment detection identifies the most impactful conversations
 - Empathetic annotations mark sensitive facts for careful handling
 
-**SDK Interface:**
-
-```go
-// Go — retrieve peak moments for an entity
-peaks, err := m.GetPeakMoments(ctx, entityID, memory.PeakMomentFilter{
-    MinScore:  7.0,
-    Limit:     10,
-    SinceDate: time.Now().AddDate(-1, 0, 0), // last year
-})
-// Returns: []PeakMoment — conversations flagged as peaks, with summaries and scores
-
-// Go — emotionally-aware context building (automatic when EmotionalScoring enabled)
-ctx := memory.RecallAndBuildContext(ctx, repo, embedder, engine, entityUUID, query, cfg)
-// Emotional metadata on recalled facts is used for:
-//   - Ebbinghaus decay modulation (emotional_weight)
-//   - Emotional relevance matching (category/valence bonus)
-//   - Empathetic annotation ([Emotionally sensitive] tags)
-```
+**TypeScript API:**
 
 ```typescript
-// TypeScript — retrieve peak moments
-const peaks = await memg.getPeakMoments(entityId, {
-  minScore: 7.0,
-  limit: 10,
-  sinceDate: new Date('2025-03-29')
-});
-// Returns: PeakMoment[] — { conversationId, summary, peakScore, date, emotionalCategories }
-
-// TypeScript — emotionally-aware context building
-const context = await memg.buildMemoryContext(entityId, query, {
-  emotionalScoring: true,
-  emotionalRecallBoost: 0.03,
-  empatheticAnnotation: true
+// Emotionally-aware context is built automatically via buildHierarchicalMemoryContext()
+const context = await memg.buildHierarchicalMemoryContext(entityId, query, {
+  includeEmotional: true,  // default: true
 });
 // Emotional metadata is applied automatically during recall and context assembly
-```
-
-```python
-# Python — retrieve peak moments
-peaks = memg.get_peak_moments(
-    entity_id=entity_id,
-    min_score=7.0,
-    limit=10,
-    since_date=datetime(2025, 3, 29)
-)
-# Returns: list[PeakMoment] — conversations with peak_score >= threshold
-
-# Python — emotionally-aware context building
-context = memg.build_memory_context(
-    entity_id=entity_id,
-    query=query,
-    emotional_scoring=True,
-    emotional_recall_boost=0.03,
-    empathetic_annotation=True
-)
-# Emotional metadata applied during recall scoring and context injection
+// The [EMOTIONAL STATE] section shows recent emotional facts with valence and verbatim
 ```
 
 ### Proactive Memory Surfacing (Subsystem 11)
@@ -602,76 +299,20 @@ Context surfacing without a user query, based on variable ratio reinforcement (S
 
 Triggers fire on a **variable schedule** — unpredictable timing creates the dopamine response that drives habit formation (Nir Eyal's Hook Model).
 
-**SDK Interface:**
-
-```go
-// Go — evaluate proactive triggers at session start
-func (m *MemG) GetProactiveContext(ctx context.Context, entityID string, opts ...ProactiveOption) (*ProactiveResult, error)
-
-// ProactiveResult contains the output of a proactive evaluation.
-type ProactiveResult struct {
-    Triggered bool              // Whether a trigger fired
-    Type      string            // Trigger type that fired (e.g. "milestone", "prediction_followup")
-    Context   string            // Formatted context string for injection
-    Metadata  map[string]any    // Trigger-specific metadata (e.g. session_count, prediction content)
-}
-
-// Go — register a prediction for future follow-up (alternative to extraction-stage tagging)
-func (m *MemG) TrackPrediction(ctx context.Context, entityID string, p Prediction) error
-
-type Prediction struct {
-    Content              string     // What was predicted: "Career improvement by end of March"
-    TargetDate           time.Time  // When the prediction should be evaluated
-    SourceConversationID string     // Which conversation produced this prediction
-}
-```
+**TypeScript API:**
 
 ```typescript
-// TypeScript — evaluate proactive triggers
+// Evaluate proactive triggers
 const proactive = await memg.getProactiveContext(entityId, {
-  trigger: 'session_start',
-  currentDate: new Date(),
-  sessionCount: 47
+  trigger: 'all',
+  limit: 3,
 });
-// Returns: { triggered: boolean, type: string, context: string, metadata: {...} } | null
+// Returns: ProactiveContext[] — sorted by priority
 
-// TypeScript — register a prediction
-await memg.trackPrediction(entityId, {
-  content: "Career improvement by end of March",
-  targetDate: new Date('2026-03-31'),
-  sourceConversationId: 'conv-uuid'
+// Proactive context is also included in hierarchical context building
+const context = await memg.buildHierarchicalMemoryContext(entityId, query, {
+  includeProactive: true,  // default: true
 });
-
-// TypeScript — include proactive context in unified recall
-const context = await memg.buildMemoryContext(entityId, query, {
-  proactiveRecall: true,
-  sessionCount: 47,
-  currentDate: new Date()
-});
-```
-
-```python
-# Python — evaluate proactive triggers
-proactive = await memg.get_proactive_context(entity_id,
-    trigger="session_start",
-    current_date=datetime.now(),
-    session_count=47
-)
-# Returns: ProactiveResult(triggered=True, type="milestone", context="...", metadata={...}) or None
-
-# Python — register a prediction
-await memg.track_prediction(entity_id,
-    content="Career improvement by end of March",
-    target_date=datetime(2026, 3, 31),
-    source_conversation_id="conv-uuid"
-)
-
-# Python — include proactive context in unified recall
-context = await memg.build_memory_context(entity_id, query,
-    proactive_recall=True,
-    session_count=47,
-    current_date=datetime.now()
-)
 ```
 
 ### Confidence-Gated Generation (Subsystem 12)
@@ -710,35 +351,6 @@ await memg.correctFact(entityId, factId, "User does not have a sister");
 // New fact created with confidence 1.0, source_role "user"
 ```
 
-```python
-# Python SDK
-context = memg.build_memory_context(
-    entity_id=entity_id,
-    query=query,
-    confidence_labeling=True,
-    confidence_floor=0.5,
-    source_provenance=True
-)
-# context.facts -> list of facts with .confidence, .tier, .source_role
-
-memg.confirm_fact(entity_id, fact_id)
-memg.correct_fact(entity_id, fact_id, "User does not have a sister")
-```
-
-```go
-// Go library
-ctx := memory.RecallAndBuildContext(ctx, repo, embedder, engine, entityUUID, query, memory.RecallConfig{
-    ConfidenceLabeling: true,
-    ConfidenceFloor:    0.5,
-    SourceProvenance:   true,
-})
-
-// Confirm a fact
-memory.ConfirmFact(ctx, repo, entityUUID, factUUID)
-
-// Correct a fact
-memory.CorrectFact(ctx, repo, embedder, entityUUID, factUUID, "User does not have a sister")
-```
 
 ### User-Visible Memory (Subsystem 13)
 
@@ -794,60 +406,6 @@ await memg.setExtractionPreferences(entityId, {
   excludeTags: ['financial'],
   patternVisibility: false
 });
-```
-
-```python
-# Python SDK
-
-profile = memg.list_memory(entity_id, user_visible=True, group_by="category")
-
-memg.correct_fact(entity_id, fact_id, new_content="Works at Infosys")
-
-memg.confirm_fact(entity_id, fact_id)
-
-memg.pin_fact(entity_id, fact_id)
-
-memg.unpin_fact(entity_id, fact_id)
-
-memg.add_user_note(entity_id, content="...", tag="work")
-
-memg.deny_fact(entity_id, fact_id)
-
-memg.delete_fact(entity_id, fact_id)
-
-exported = memg.export_memory(entity_id)
-
-memg.set_extraction_preferences(entity_id, exclude_tags=["financial"], pattern_visibility=False)
-```
-
-```go
-// Go library
-
-profile, err := m.ListMemoryProfile(ctx, entityUUID, memg.ProfileOptions{
-    UserVisible: true,
-    GroupBy:     "category",
-})
-
-err = m.CorrectFact(ctx, entityUUID, factUUID, "Works at Infosys")
-
-err = m.ConfirmFact(ctx, entityUUID, factUUID)
-
-err = m.PinFact(ctx, entityUUID, factUUID)
-
-err = m.UnpinFact(ctx, entityUUID, factUUID)
-
-err = m.AddUserNote(ctx, entityUUID, store.UserNote{Content: "...", Tag: "work"})
-
-err = m.DenyFact(ctx, entityUUID, factUUID)
-
-err = m.DeleteFact(ctx, entityUUID, factUUID)
-
-exported, err := m.ExportMemory(ctx, entityUUID)
-
-err = m.SetExtractionPreferences(ctx, entityUUID, store.ExtractionPreferences{
-    ExcludeTags:       []string{"financial"},
-    PatternVisibility: false,
-})
 ```
 
 ---
@@ -1386,7 +944,12 @@ All 9 methods are implemented in `MemGStore` (SQLite), `PostgresStore`, and `MyS
 
 ## Configuration
 
-Configuration is resolved in this order: **CLI flags > environment variables > config file > defaults**. You can use any combination.
+For the TypeScript SDK, all configuration is passed via `NativeConfig` at construction time. Environment variables are used as fallback for API keys.
+
+The config file and CLI flags below apply to the Go proxy binary (separate repo).
+
+<details>
+<summary>Proxy config file and CLI flags (Go binary)</summary>
 
 ### Config File
 
@@ -1469,81 +1032,71 @@ memg proxy
 
 Provider-specific API keys use their standard env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.).
 
-### Go Library Options
+</details>
 
-**Instance-level options** (shared across all calls):
+### TypeScript SDK Options
 
-```go
-memg.New(repo,
-    memg.WithLLMProvider("openai", llm.ProviderConfig{Model: "gpt-4o"}),
-    memg.WithEmbedProvider("local", embed.ProviderConfig{}),
-    memg.WithRecallLimit(100),
-    memg.WithRecallThreshold(0.10),
-    memg.WithSessionTimeout(30 * time.Minute),
-    memg.WithPruneInterval(5 * time.Minute),
-    memg.WithConsciousMode(true),
-    memg.WithConsciousLimit(10),
-    memg.WithWorkingMemoryTurns(10),
-    memg.WithMemoryTokenBudget(4000),
-    memg.WithSummaryTokenBudget(1000),
-    memg.WithMaxRecallCandidates(50),
-    memg.WithEmbedDimension(384),
-    memg.WithDebug(),
-)
+All options are passed via `NativeConfig`:
+
+```typescript
+const m = new MemG({
+  storeProvider: 'sqlite',            // 'sqlite' | 'postgres' | 'mysql'
+  dbPath: './memory.db',              // SQLite path
+  storeUrl: 'postgresql://...',       // Postgres/MySQL connection URL
+  embedProvider: 'sentence-transformers',
+  embedModel: 'Xenova/all-MiniLM-L6-v2',
+  llmProvider: 'openai',
+  llmModel: 'gpt-4o-mini',
+  openaiApiKey: process.env.OPENAI_API_KEY,
+  recallLimit: 100,
+  recallThreshold: 0.10,
+  sessionTimeout: 30 * 60 * 1000,    // 30 minutes in ms
+  workingMemoryTurns: 10,
+  memoryTokenBudget: 4000,
+  summaryTokenBudget: 1000,
+  consciousMode: true,
+  consciousLimit: 10,
+  maxPersonalFacts: 15,
+  diversifyTopics: true,
+  freshnessBias: 0.3,
+});
+await m.init();
 ```
 
-**Per-call options** (vary per request):
+**Per-call entity scoping** — one instance serves all users:
 
-```go
-// Entity scoping — one instance serves all users
-g.Chat(ctx, messages, memg.ForEntity("user-alice"))
-g.Chat(ctx, messages, memg.ForEntity("user-bob"))
+```typescript
+// Different users, completely isolated memory
+await m.chat(messages, 'user-alice');
+await m.chat(messages, 'user-bob');
 
-// Filter recall to specific fact categories
-g.Chat(ctx, messages, memg.ForEntity("user-alice"),
-    memg.WithFactFilter(store.FactFilter{
-        Tags:            []string{"medical"},
-        MinSignificance: 7,
-    }),
-)
-
-// LLM options can be combined with MemG options
-g.Chat(ctx, messages, memg.ForEntity("user-alice"), llm.WithModel("gpt-4o-mini"))
+// Direct memory operations per entity
+await m.add('user-alice', 'Allergic to peanuts');
+const results = await m.search('user-alice', 'dietary restrictions');
 ```
-
-`WithEntity("user-42")` still works at the instance level for single-user apps. `ForEntity()` overrides it per call for multi-user apps.
-
-Both `Chat()` and `Stream()` accept the same per-call options (`ForEntity`, `WithFactFilter`, plus LLM options).
 
 ## Architecture
 
 ```
-Any app (Python, Node.js, Go, curl, ...)
+Your app (Node.js / TypeScript)
        │
-       │  OPENAI_BASE_URL=http://localhost:8787/v1
+       │  MemG.wrap(client, { entity, mode: 'native' })
        │
        ▼
 ┌──────────────────────────────────────────────────────────────┐
-│   MemG Proxy (:8787)                                        │
-│                                                              │
-│   /v1/chat/completions      → intercept (OpenAI format)     │
-│   /v1/messages              → intercept (Anthropic format)  │
-│   :generateContent          → intercept (Gemini format)     │
-│   :streamGenerateContent    → intercept (Gemini streaming)  │
-│   /v1/models, /v1/files,... → pass through untouched        │
+│   MemG Native Engine (in-process)                           │
 │                                                              │
 │   ┌──────────┐  ┌──────────┐  ┌─────────┐  ┌─────────────┐ │
-│   │ Recall   │  │ Summary  │  │ Augment │  │ Built-in    │ │
-│   │ (facts + │  │ Recall   │  │ Pipeline│  │ Extraction  │ │
-│   │ summaries│  │          │  │ + Pruner│  │ Stage       │ │
+│   │ Recall   │  │ Summary  │  │ Context │  │ Extraction  │ │
+│   │ (facts + │  │ Recall   │  │ Builder │  │ Pipeline    │ │
+│   │ summaries│  │          │  │ (5-tier)│  │             │ │
 │   │ Kneedle) │  │          │  │         │  │             │ │
 │   └────┬─────┘  └────┬─────┘  └────┬────┘  └──────┬──────┘ │
 │        │             │             │               │        │
 │   ┌────┴─────────────┴─────────────┴───────────────┴──────┐ │
-│   │              store.Repository                         │ │
-│   │  (facts with type, status, significance, TTL,         │ │
-│   │   content key, reinforcement, reference time,         │ │
-│   │   conversation summaries with embeddings)             │ │
+│   │              Store Interface                          │ │
+│   │  (facts, sessions, conversations, artifacts,          │ │
+│   │   turn summaries, v2 fields)                          │ │
 │   └───────────────────────────────────────────────────────┘ │
 └───────────┬─────────────────┬─────────────────┬─────────────┘
        ┌────┴────┐       ┌────┴────┐       ┌────┴────┐
@@ -1552,113 +1105,54 @@ Any app (Python, Node.js, Go, curl, ...)
 
 Provider Layer:
   LLM:   OpenAI │ Anthropic │ Gemini │ Ollama │ Azure │ Bedrock │ DeepSeek │ Groq │ Together │ xAI
-  Embed: OpenAI │ Gemini │ Ollama │ HuggingFace │ Azure │ Bedrock │ Together │ Cohere │ Voyage │ ONNX(local) │ gRPC(legacy)
+  Embed: OpenAI │ Gemini │ Ollama │ Azure │ Bedrock │ Together │ Cohere │ Voyage │ HuggingFace(local)
 ```
 
-## Direct Provider Construction
+## Custom Embedder
 
-Instead of the registry, you can construct providers directly:
+Implement the `Embedder` interface to use any embedding provider:
 
-```go
-import (
-    "memg/embed/openai"
-    "memg/llm/anthropic"
-)
+```typescript
+import type { Embedder } from 'memg';
 
-emb, err := openai.New(embed.ProviderConfig{
-    APIKey: "sk-...",
-    Model:  "text-embedding-3-large",
-})
-
-prov, err := anthropic.New(llm.ProviderConfig{
-    APIKey: "sk-ant-...",
-    Model:  "claude-sonnet-4-20250514",
-})
-
-g, _ := memg.New(repo)
-g.SetProvider(prov)
-g.SetEmbedder(emb)
-
-// Use ForEntity per call for multi-user support
-g.Chat(ctx, messages, memg.ForEntity("user-42"))
-```
-
-## Custom Augmentation Stages
-
-MemG extracts knowledge through user-defined stages. The pipeline handles deduplication, reinforcement, and default-filling automatically.
-
-```go
-type MyStage struct{}
-
-func (s *MyStage) Name() string { return "my-stage" }
-
-func (s *MyStage) Execute(ctx context.Context, job *augment.Job) (*augment.Extraction, error) {
-    // Analyze job.Messages, extract facts
-    return &augment.Extraction{
-        Facts: []*store.Fact{
-            {
-                Content:      "User is allergic to peanuts",
-                Type:         store.FactTypeIdentity,
-                Significance: store.SignificanceHigh,
-            },
-        },
-    }, nil
+class MyEmbedder implements Embedder {
+  async embed(texts: string[]): Promise<number[][]> {
+    // Call your embedding API
+    return texts.map(t => [/* ... */]);
+  }
+  dimension(): number { return 768; }
+  modelName(): string { return 'my-model'; }
 }
 
-g.AddStage(&MyStage{})
+const m = new MemG({ store: new MemGStore('./memory.db') });
+// Pass custom embedder via the store config
 ```
-
-The pipeline automatically:
-- Fills defaults for unset fields (type=identity, status=current, significance=medium)
-- Computes content key and deduplicates against existing facts
-- Reinforces existing facts instead of creating duplicates
-- Resolves slot conflicts for mutable identity facts (e.g., `slot: "location"` — new value replaces old)
-- Calls `ConflictDetector.DetectConflicts()` if the stage implements it
-- Reclassifies conflicting identity facts from current to historical
-- Drops low-confidence assistant-sourced facts (confidence < 0.7) by default
-
-## Query Transformer
-
-Register an optional query transformer to rewrite follow-up queries into standalone retrieval queries:
-
-```go
-type MyTransformer struct {
-    llm llm.Provider
-}
-
-func (t *MyTransformer) TransformQuery(ctx context.Context, query string, recentHistory []string) (*memory.QueryTransform, error) {
-    // Use an LLM or rules to rewrite "what about that?" into
-    // "user dietary preferences and restrictions"
-    return &memory.QueryTransform{RewrittenQuery: rewritten}, nil
-}
-
-g.SetQueryTransformer(&MyTransformer{llm: provider})
-```
-
-The transformer runs before the query is embedded, so the retrieval vector matches the rewritten intent rather than the ambiguous follow-up.
 
 ## Re-Embedding Facts
 
 When you change your embedding model, existing facts become invisible (dimension mismatch). Re-embed all facts for an entity:
 
-```go
-updated, err := g.ReEmbedFacts(ctx, "user-alice")
+```typescript
+import { reEmbedFacts } from 'memg';
+
+const updated = await reEmbedFacts(store, embedder, entityUuid);
 // updated = number of facts re-embedded
 ```
 
-This processes facts in batches of 50 and updates each fact's vector and `embedding_model` field in place.
+This processes facts in batches and updates each fact's vector and `embedding_model` field in place.
 
 ## Consolidator
 
 The background consolidator clusters old event facts into pattern facts:
 
-```go
-consolidator := memory.NewConsolidator(repo, provider, embedder, 24*time.Hour)
-consolidator.Start()
-defer consolidator.Stop()
+```typescript
+import { consolidateEntity } from 'memg';
 
-// Or trigger for a specific entity on demand:
-err := consolidator.ConsolidateEntity(ctx, entityUUID)
+const patternsCreated = await consolidateEntity(store, embedder, entityUuid, {
+  apiKey: process.env.OPENAI_API_KEY!,
+  llmModel: 'gpt-4o-mini',
+  llmProvider: 'openai',
+});
 ```
 
-It finds event facts older than 30 days, groups them by tag, asks the LLM to summarize each cluster into a behavioral pattern, and marks originals as historical. Disabled by default (zero interval).
+It finds event facts older than 30 days, groups them by tag, asks the LLM to summarize each cluster into a behavioral pattern, and marks originals as historical.

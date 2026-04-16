@@ -81,5 +81,9 @@ export async function loadConsciousContext(
     content: s.fact.content,
     significance: s.fact.significance,
     tag: s.fact.tag,
+    confidence: s.fact.confidence,
+    verbatim: s.fact.verbatim,
+    emotionalValence: s.fact.emotionalValence,
+    factType: s.fact.factType,
   }));
 }

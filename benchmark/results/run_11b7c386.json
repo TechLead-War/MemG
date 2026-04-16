@@ -1,0 +1,1120 @@
+{
+  "id": "11b7c386",
+  "startedAt": "2026-03-30T05:30:04.659Z",
+  "status": "completed",
+  "config": {
+    "llmProvider": "gemini",
+    "extractionModel": "gemini-2.0-flash",
+    "answerModel": "gemini-2.0-flash",
+    "judgeModel": "gemini-2.0-flash",
+    "embedProvider": "gemini",
+    "conversations": [
+      0
+    ],
+    "categories": [
+      4
+    ],
+    "useLLMJudge": false
+  },
+  "conversations": [
+    {
+      "conversationIdx": 0,
+      "speakerA": "Caroline",
+      "speakerB": "Melanie",
+      "sessions": 19,
+      "turns": 419,
+      "totalQuestions": 70,
+      "factsExtracted": 8,
+      "questions": [
+        {
+          "questionIdx": 0,
+          "conversationIdx": 0,
+          "question": "What did the charity race raise awareness for?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "mental health",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user applied to adoption agencies this week.\n- The user volunteered at an LGBTQ+ youth center.\n- The user is continuing to volunteer at the LGBTQ+ youth center.\n- The user received help from friends, family, and role models during a difficult time.\n- The user is seeking adoption advice from their mentor.\n- The user went through a long process of finding self-acceptance.\n- Melanie has children.\n- The user finds joy in helping others grow.\n- The user found the transgender poetry reading to be empowering.\n- Some of the user's friends were not able to handle their transition.\n- The user values support from close friends.\n- The user passed the adoption agency interviews on 2026-03-28.\n- The user values authenticity.\n- [historical] The user values having people who understand what they are going through.\n- [historical] The user's goal is to give kids a loving home.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D2:2"
+          ]
+        },
+        {
+          "questionIdx": 1,
+          "conversationIdx": 0,
+          "question": "What did Melanie realize after the charity race?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "self-care is important",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D2:3"
+          ]
+        },
+        {
+          "questionIdx": 2,
+          "conversationIdx": 0,
+          "question": "How does Melanie prioritize self-care?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "by carving out some me-time each day for activities like running, reading, or playing the violin",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user went through a long process of finding self-acceptance.\n- [historical] The user views self-discovery as an ongoing adventure of learning and growing.\n- The user values support from close friends.\n- The user finds joy in helping others grow.\n- The user values authenticity.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D2:5"
+          ]
+        },
+        {
+          "questionIdx": 3,
+          "conversationIdx": 0,
+          "question": "What are Caroline's plans for the summer?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "researching adoption agencies",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Some of the user's friends were not able to handle their transition.\n- [historical] The user's friends and family are helping with their transition.\n- [historical] The user's goal is to give kids a loving home.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D2:8"
+          ]
+        },
+        {
+          "questionIdx": 4,
+          "conversationIdx": 0,
+          "question": "What type of individuals does the adoption agency Caroline is considering support?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "LGBTQ+ individuals",
+          "predicted": "The adoption agency helps LGBTQ+ folks with adoption.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user passed the adoption agency interviews on 2026-03-28.\n- The user applied to adoption agencies this week.\n- The user is seeking adoption advice from their mentor.\n- The user values support from close friends.\n- [historical] The user is excited to start the adoption process.",
+          "f1": 0.22222222222222224,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D2:12"
+          ]
+        },
+        {
+          "questionIdx": 5,
+          "conversationIdx": 0,
+          "question": "Why did Caroline choose the adoption agency?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "because of their inclusivity and support for LGBTQ+ individuals",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user passed the adoption agency interviews on 2026-03-28.\n- The user applied to adoption agencies this week.\n- The user is seeking adoption advice from their mentor.\n- [historical] The user is excited to start the adoption process.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D2:12"
+          ]
+        },
+        {
+          "questionIdx": 6,
+          "conversationIdx": 0,
+          "question": "What is Caroline excited about in the adoption process?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "creating a family for kids who need one",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- [historical] The user is excited to start the adoption process.\n- The user applied to adoption agencies this week.\n- The user is seeking adoption advice from their mentor.\n- The user passed the adoption agency interviews on 2026-03-28.\n- The user went through a long process of finding self-acceptance.\n- The user finds joy in helping others grow.\n- [historical] The user is determined to adopt.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D2:14"
+          ]
+        },
+        {
+          "questionIdx": 7,
+          "conversationIdx": 0,
+          "question": "What does Melanie think about Caroline's decision to adopt?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "she thinks Caroline is doing something amazing and will be an awesome mom",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- [historical] The user is determined to adopt.\n- The user is seeking adoption advice from their mentor.\n- [historical] The user wants to adopt a child.\n- Some of the user's friends were not able to handle their transition.\n- The user applied to adoption agencies this week.\n- The user passed the adoption agency interviews on 2026-03-28.\n- [historical] The user's goal is to give kids a loving home.\n- [historical] The user's friends and family are helping with their transition.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D2:15"
+          ]
+        },
+        {
+          "questionIdx": 8,
+          "conversationIdx": 0,
+          "question": "How long have Mel and her husband been married?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Mel and her husband have been married for 5 years.",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user went through a long process of finding self-acceptance.\n- Melanie has children.\n- [historical] Melanie values her family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D3:16"
+          ]
+        },
+        {
+          "questionIdx": 9,
+          "conversationIdx": 0,
+          "question": "What does Caroline's necklace symbolize?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "love, faith, and strength",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Some of the user's friends were not able to handle their transition.\n- [historical] The user's friends and family are helping with their transition.\n- [historical] The user's art is about expressing their trans experience.\n- [historical] The user's goal is to give kids a loving home.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D4:3"
+          ]
+        },
+        {
+          "questionIdx": 10,
+          "conversationIdx": 0,
+          "question": "What country is Caroline's grandma from?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Sweden",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Some of the user's friends were not able to handle their transition.\n- [historical] The user's friends and family are helping with their transition.\n- [historical] The user's goal is to give kids a loving home.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D4:3"
+          ]
+        },
+        {
+          "questionIdx": 11,
+          "conversationIdx": 0,
+          "question": "What was grandma's gift to Caroline?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "necklace",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Some of the user's friends were not able to handle their transition.\n- [historical] The user's friends and family are helping with their transition.\n- [historical] The user's goal is to give kids a loving home.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D4:3"
+          ]
+        },
+        {
+          "questionIdx": 12,
+          "conversationIdx": 0,
+          "question": "What is Melanie's hand-painted bowl a reminder of?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "art and self-expression",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- Some of the user's friends were not able to handle their transition.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D4:5"
+          ]
+        },
+        {
+          "questionIdx": 13,
+          "conversationIdx": 0,
+          "question": "What did Melanie and her family do while camping?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "explored nature, roasted marshmallows, and went on a hike",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user received help from friends, family, and role models during a difficult time.\n- [historical] The user values family.\n- The user found the sunset at the beach amazing and calming.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D4:8"
+          ]
+        },
+        {
+          "questionIdx": 14,
+          "conversationIdx": 0,
+          "question": "What kind of counseling and mental health services is Caroline interested in pursuing?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "working with trans people, helping them accept themselves and supporting their mental health",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- [historical] The user is interested in counseling or mental health work.\n- The user is seeking adoption advice from their mentor.\n- The user applied to adoption agencies this week.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D4:13"
+          ]
+        },
+        {
+          "questionIdx": 15,
+          "conversationIdx": 0,
+          "question": "What workshop did Caroline attend recently?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "LGBTQ+ counseling workshop",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user applied to adoption agencies this week.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D4:13"
+          ]
+        },
+        {
+          "questionIdx": 16,
+          "conversationIdx": 0,
+          "question": "What was discussed in the LGBTQ+ counseling workshop?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "therapeutic methods and how to best work with trans people",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user volunteered at an LGBTQ+ youth center.\n- The user is continuing to volunteer at the LGBTQ+ youth center.\n- [historical] The user is interested in counseling or mental health work.\n- [historical] The user is an LGBTQ artist.\n- [historical] The user is an LGBTQ rights advocate.\n- [historical] The user is inspired to keep fighting for LGBTQ rights.\n- [historical] The user uses art to speak up for the LGBTQ+ community and push for acceptance.\n- The user found the transgender poetry reading to be empowering.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D4:13"
+          ]
+        },
+        {
+          "questionIdx": 17,
+          "conversationIdx": 0,
+          "question": "What motivated Caroline to pursue counseling?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "her own journey and the support she received, and how counseling improved her life",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- [historical] The user is interested in counseling or mental health work.\n- The user finds joy in helping others grow.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D4:15"
+          ]
+        },
+        {
+          "questionIdx": 18,
+          "conversationIdx": 0,
+          "question": "What kind of place does Caroline want to create for people?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "a safe and inviting place for people to grow",
+          "predicted": "Caroline wants to create a safe and loving home for children.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- [historical] The user values having people who understand what they are going through.\n- [historical] The user is passionate about helping people and making a positive impact.\n- [historical] The user believes people should accept growth and change.\n- [historical] The user is happier being around people who accept and love them.\n- The user finds joy in helping others grow.",
+          "f1": 0.4444444444444445,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D4:15"
+          ]
+        },
+        {
+          "questionIdx": 19,
+          "conversationIdx": 0,
+          "question": "Did Melanie make the black and white bowl in the photo?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Yes",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- [historical] The user is planning to make a family for kids who need one.\n- The user volunteered at an LGBTQ+ youth center.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D5:8"
+          ]
+        },
+        {
+          "questionIdx": 20,
+          "conversationIdx": 0,
+          "question": "What kind of books does Caroline have in her library?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "kids' books - classics, stories from different cultures, educational books",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user values authenticity.\n- Melanie has children.\n- The user finds joy in helping others grow.\n- The user values support from close friends.\n- The user found the transgender poetry reading to be empowering.\n- The user is seeking adoption advice from their mentor.\n- The user went through a long process of finding self-acceptance.\n- The user volunteered at an LGBTQ+ youth center.\n- The user applied to adoption agencies this week.\n- The user is continuing to volunteer at the LGBTQ+ youth center.\n- The user received help from friends, family, and role models during a difficult time.\n- Some of the user's friends were not able to handle their transition.\n- The user found the sunset at the beach amazing and calming.\n- [historical] Melanie values her family.\n- [historical] The user wants to help others to live authentically.\n- The user passed the adoption agency interviews on 2026-03-28.\n- [historical] The user values family.\n- [historical] The user wants to live authentically.\n- [historical] The user values staying true to themselves and embracing their womanhood.\n- [historical] The user's goal is to give kids a loving home.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D6:9"
+          ]
+        },
+        {
+          "questionIdx": 21,
+          "conversationIdx": 0,
+          "question": "What was Melanie's favorite book from her childhood?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "\"Charlotte's Web\"",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- Some of the user's friends were not able to handle their transition.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D6:10"
+          ]
+        },
+        {
+          "questionIdx": 22,
+          "conversationIdx": 0,
+          "question": "What book did Caroline recommend to Melanie?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "\"Becoming Nicole\"",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user is seeking adoption advice from their mentor.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D7:11"
+          ]
+        },
+        {
+          "questionIdx": 23,
+          "conversationIdx": 0,
+          "question": "What did Caroline take away from the book \"Becoming Nicole\"?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Lessons on self-acceptance and finding support",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user found the transgender poetry reading to be empowering.\n- The user went through a long process of finding self-acceptance.\n- Some of the user's friends were not able to handle their transition.\n- The user applied to adoption agencies this week.\n- The user is seeking adoption advice from their mentor.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D7:13"
+          ]
+        },
+        {
+          "questionIdx": 24,
+          "conversationIdx": 0,
+          "question": "What are the new shoes that Melanie got used for?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Running",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D7:19"
+          ]
+        },
+        {
+          "questionIdx": 25,
+          "conversationIdx": 0,
+          "question": "What is Melanie's reason for getting into running?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "To de-stress and clear her mind",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- Some of the user's friends were not able to handle their transition.\n- The user went through a long process of finding self-acceptance.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D7:21"
+          ]
+        },
+        {
+          "questionIdx": 26,
+          "conversationIdx": 0,
+          "question": "What does Melanie say running has been great for?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Her mental health",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- [historical] Art has been a great way for the user to work through stuff they're going through.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D7:24"
+          ]
+        },
+        {
+          "questionIdx": 27,
+          "conversationIdx": 0,
+          "question": "What did Mel and her kids make during the pottery workshop?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "pots",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] The user is planning to make a family for kids who need one.\n- The user applied to adoption agencies this week.\n- [historical] Melanie values her family.\n- The user volunteered at an LGBTQ+ youth center.\n- [historical] The user's goal is to give kids a loving home.\n- The user received help from friends, family, and role models during a difficult time.\n- The user is continuing to volunteer at the LGBTQ+ youth center.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D8:2"
+          ]
+        },
+        {
+          "questionIdx": 28,
+          "conversationIdx": 0,
+          "question": "What kind of pot did Mel and her kids make with clay?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "a cup with a dog face on it",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] The user is planning to make a family for kids who need one.\n- [historical] Melanie values her family.\n- [historical] The user's goal is to give kids a loving home.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D8:4"
+          ]
+        },
+        {
+          "questionIdx": 29,
+          "conversationIdx": 0,
+          "question": "What creative project do Mel and her kids do together besides pottery?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "painting",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] The user is planning to make a family for kids who need one.\n- [historical] The user's goal is to give kids a loving home.\n- [historical] The user dreams of having a family and giving a loving home to kids who need it.\n- [historical] Melanie values her family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D8:5"
+          ]
+        },
+        {
+          "questionIdx": 30,
+          "conversationIdx": 0,
+          "question": "What did Mel and her kids paint in their latest project in July 2023?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "a sunset with a palm tree",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] The user is planning to make a family for kids who need one.\n- [historical] The user's goal is to give kids a loving home.\n- [historical] The user dreams of having a family and giving a loving home to kids who need it.\n- [historical] Melanie values her family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D8:6"
+          ]
+        },
+        {
+          "questionIdx": 31,
+          "conversationIdx": 0,
+          "question": "What did Caroline see at the council meeting for adoption?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "many people wanting to create loving homes for children in need",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user applied to adoption agencies this week.\n- The user is seeking adoption advice from their mentor.\n- The user passed the adoption agency interviews on 2026-03-28.\n- [historical] The user is excited to start the adoption process.",
+          "f1": 0.12500000000000003,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D8:9"
+          ]
+        },
+        {
+          "questionIdx": 32,
+          "conversationIdx": 0,
+          "question": "What do sunflowers represent according to Caroline?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "warmth and happiness",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user finds joy in helping others grow.\n- The user found the sunset at the beach amazing and calming.\n- The user values authenticity.\n- The user went through a long process of finding self-acceptance.\n- Melanie has children.\n- The user values support from close friends.\n- The user received help from friends, family, and role models during a difficult time.\n- The user is continuing to volunteer at the LGBTQ+ youth center.\n- The user volunteered at an LGBTQ+ youth center.\n- The user applied to adoption agencies this week.\n- The user found the transgender poetry reading to be empowering.\n- The user is seeking adoption advice from their mentor.\n- Some of the user's friends were not able to handle their transition.\n- [historical] Melanie values her family.\n- [historical] The user values staying true to themselves and embracing their womanhood.\n- [historical] The user values having people who understand what they are going through.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D8:11"
+          ]
+        },
+        {
+          "questionIdx": 33,
+          "conversationIdx": 0,
+          "question": "Why are flowers important to Melanie?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "They remind her to appreciate the small moments and were a part of her wedding decor",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user finds joy in helping others grow.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D8:12"
+          ]
+        },
+        {
+          "questionIdx": 34,
+          "conversationIdx": 0,
+          "question": "What inspired Caroline's painting for the art show?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "visiting an LGBTQ center and wanting to capture unity and strength",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- [historical] The user's art is about expressing their trans experience.\n- [historical] The user has used painting and drawing to express their feelings and explore their gender identity.\n- [historical] The user finds art empowering and cathartic.\n- Some of the user's friends were not able to handle their transition.\n- [historical] Art has been a great way for the user to work through stuff they're going through.\n- [historical] The user is inspired to keep fighting for LGBTQ rights.\n- [historical] Art has allowed the user to explore their transition and changing body.\n- [historical] The user uses art to speak up for the LGBTQ+ community and push for acceptance.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D9:16"
+          ]
+        },
+        {
+          "questionIdx": 35,
+          "conversationIdx": 0,
+          "question": "How often does Melanie go to the beach with her kids?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "once or twice a year",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- The user found the sunset at the beach amazing and calming.\n- [historical] Melanie values her family.\n- [historical] The user's goal is to give kids a loving home.\n- [historical] The user is planning to make a family for kids who need one.\n- [historical] The user dreams of having a family and giving a loving home to kids who need it.\n- The user applied to adoption agencies this week.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D10:10"
+          ]
+        },
+        {
+          "questionIdx": 36,
+          "conversationIdx": 0,
+          "question": "What did Melanie and her family see during their camping trip last year?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Perseid meteor shower",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user received help from friends, family, and role models during a difficult time.\n- The user found the sunset at the beach amazing and calming.\n- [historical] The user values family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D10:14"
+          ]
+        },
+        {
+          "questionIdx": 37,
+          "conversationIdx": 0,
+          "question": "How did Melanie feel while watching the meteor shower?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "in awe of the universe",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user found the sunset at the beach amazing and calming.\n- The user found the transgender poetry reading to be empowering.",
+          "f1": 0.22222222222222224,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D10:18"
+          ]
+        },
+        {
+          "questionIdx": 38,
+          "conversationIdx": 0,
+          "question": "Whose birthday did Melanie celebrate recently?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Melanie's daughter",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D11:1"
+          ]
+        },
+        {
+          "questionIdx": 39,
+          "conversationIdx": 0,
+          "question": "Who performed at the concert at Melanie's daughter's birthday?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Matt Patterson",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- Some of the user's friends were not able to handle their transition.\n- [historical] The user's friends and family are helping with their transition.\n- The user found the transgender poetry reading to be empowering.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D11:3"
+          ]
+        },
+        {
+          "questionIdx": 40,
+          "conversationIdx": 0,
+          "question": "Why did Melanie choose to use colors and patterns in her pottery project?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "She wanted to catch the eye and make people smile.",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D12:6"
+          ]
+        },
+        {
+          "questionIdx": 41,
+          "conversationIdx": 0,
+          "question": "What pet does Caroline have?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "guinea pig",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- The user is seeking adoption advice from their mentor.\n- The user applied to adoption agencies this week.\n- The user finds joy in helping others grow.\n- The user values support from close friends.\n- The user received help from friends, family, and role models during a difficult time.\n- The user went through a long process of finding self-acceptance.\n- The user passed the adoption agency interviews on 2026-03-28.\n- The user volunteered at an LGBTQ+ youth center.\n- The user values authenticity.\n- Some of the user's friends were not able to handle their transition.\n- The user is continuing to volunteer at the LGBTQ+ youth center.\n- The user found the sunset at the beach amazing and calming.\n- The user found the transgender poetry reading to be empowering.\n- [historical] The user is determined to adopt.\n- [historical] Melanie values her family.\n- [historical] The user is excited to start the adoption process.\n- [historical] The user's friends and family are helping with their transition.\n- [historical] The user values family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D13:3"
+          ]
+        },
+        {
+          "questionIdx": 42,
+          "conversationIdx": 0,
+          "question": "What pets does Melanie have?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Two cats and a dog",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D13:4"
+          ]
+        },
+        {
+          "questionIdx": 43,
+          "conversationIdx": 0,
+          "question": "Where did Oliver hide his bone once?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "In Melanie's slipper",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user applied to adoption agencies this week.\n- The user went through a long process of finding self-acceptance.\n- The user received help from friends, family, and role models during a difficult time.\n- The user values support from close friends.\n- The user is seeking adoption advice from their mentor.\n- The user volunteered at an LGBTQ+ youth center.\n- Melanie has children.\n- The user values authenticity.\n- Some of the user's friends were not able to handle their transition.\n- The user passed the adoption agency interviews on 2026-03-28.\n- The user finds joy in helping others grow.\n- The user is continuing to volunteer at the LGBTQ+ youth center.\n- The user found the sunset at the beach amazing and calming.\n- The user found the transgender poetry reading to be empowering.\n- [historical] The user is determined to adopt.\n- [historical] The user's goal is to give kids a loving home.\n- [historical] The user values family.\n- [historical] Melanie values her family.\n- [historical] The user is proud of who they are.\n- [historical] The user's friends and family are helping with their transition.\n- [historical] The user wants to live authentically.",
+          "f1": 0.22222222222222224,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D13:6"
+          ]
+        },
+        {
+          "questionIdx": 44,
+          "conversationIdx": 0,
+          "question": "What activity did Caroline used to do with her dad?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Horseback riding",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- [historical] The user has used painting and drawing to express their feelings and explore their gender identity.\n- The user received help from friends, family, and role models during a difficult time.\n- The user finds joy in helping others grow.\n- Melanie has children.\n- The user values support from close friends.\n- The user volunteered at an LGBTQ+ youth center.\n- The user went through a long process of finding self-acceptance.\n- The user applied to adoption agencies this week.\n- The user is seeking adoption advice from their mentor.\n- The user is continuing to volunteer at the LGBTQ+ youth center.\n- The user values authenticity.\n- The user found the sunset at the beach amazing and calming.\n- Some of the user's friends were not able to handle their transition.\n- [historical] Melanie values her family.\n- The user found the transgender poetry reading to be empowering.\n- The user passed the adoption agency interviews on 2026-03-28.\n- [historical] The user values family.\n- [historical] The user's friends and family are helping with their transition.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D13:7"
+          ]
+        },
+        {
+          "questionIdx": 45,
+          "conversationIdx": 0,
+          "question": "What did Caroline make for a local church?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "a stained glass window",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- [historical] The user is planning to make a family for kids who need one.\n- The user volunteered at an LGBTQ+ youth center.\n- The user is continuing to volunteer at the LGBTQ+ youth center.\n- The user finds joy in helping others grow.\n- Melanie has children.\n- The user applied to adoption agencies this week.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D14:17"
+          ]
+        },
+        {
+          "questionIdx": 46,
+          "conversationIdx": 0,
+          "question": "What did Caroline find in her neighborhood during her walk?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "a rainbow sidewalk",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- The user found the sunset at the beach amazing and calming.\n- The user went through a long process of finding self-acceptance.\n- The user received help from friends, family, and role models during a difficult time.\n- The user applied to adoption agencies this week.\n- The user finds joy in helping others grow.\n- The user volunteered at an LGBTQ+ youth center.\n- The user is continuing to volunteer at the LGBTQ+ youth center.\n- Some of the user's friends were not able to handle their transition.\n- The user values support from close friends.\n- The user values authenticity.\n- The user found the transgender poetry reading to be empowering.\n- The user is seeking adoption advice from their mentor.\n- [historical] The user finds the rainbow flag mural special.\n- The user passed the adoption agency interviews on 2026-03-28.\n- [historical] Melanie values her family.\n- [historical] The user's friends and family are helping with their transition.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D14:23"
+          ]
+        },
+        {
+          "questionIdx": 47,
+          "conversationIdx": 0,
+          "question": "Which song motivates Caroline to be courageous?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Brave by Sara Bareilles",
+          "predicted": "The song \"Brave\" by Sara Bareilles has a lot of significance for the user.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- [historical] The song \"Brave\" by Sara Bareilles has a lot of significance for the user.\n- [historical] The user feels accepted and courageous due to the support group.",
+          "f1": 0.5714285714285715,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D15:23"
+          ]
+        },
+        {
+          "questionIdx": 48,
+          "conversationIdx": 0,
+          "question": "Which  classical musicians does Melanie enjoy listening to?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Bach and Mozart",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user values support from close friends.\n- The user values authenticity.\n- The user finds joy in helping others grow.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D15:28"
+          ]
+        },
+        {
+          "questionIdx": 49,
+          "conversationIdx": 0,
+          "question": "Who is Melanie a fan of in terms of modern music?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Ed Sheeran",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user values authenticity.\n- The user values support from close friends.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D15:28"
+          ]
+        },
+        {
+          "questionIdx": 50,
+          "conversationIdx": 0,
+          "question": "How long has Melanie been creating art?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "7 years",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user went through a long process of finding self-acceptance.\n- [historical] The user finds art empowering and cathartic.\n- [historical] Art has been a great way for the user to work through stuff they're going through.\n- [historical] The user's art is about expressing their trans experience.\n- [historical] Art has allowed the user to explore their transition and changing body.\n- [historical] The user uses art to speak up for the LGBTQ+ community and push for acceptance.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D16:7"
+          ]
+        },
+        {
+          "questionIdx": 51,
+          "conversationIdx": 0,
+          "question": "What precautionary sign did Melanie see at the café?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "A sign stating that someone is not being able to leave",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.",
+          "f1": 0.14285714285714285,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D16:16"
+          ]
+        },
+        {
+          "questionIdx": 52,
+          "conversationIdx": 0,
+          "question": "What advice does Caroline give for getting started with adoption?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Do research, find an adoption agency or lawyer, gather necessary documents, and prepare emotionally.",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user is seeking adoption advice from their mentor.\n- The user applied to adoption agencies this week.\n- The user passed the adoption agency interviews on 2026-03-28.\n- [historical] The user is excited to start the adoption process.\n- [historical] The user's goal is to give kids a loving home.\n- [historical] The user wants to adopt a child.\n- [historical] The user is determined to adopt.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D17:7"
+          ]
+        },
+        {
+          "questionIdx": 53,
+          "conversationIdx": 0,
+          "question": "What setback did Melanie face in October 2023?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "She got hurt and had to take a break from pottery.",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D17:8"
+          ]
+        },
+        {
+          "questionIdx": 54,
+          "conversationIdx": 0,
+          "question": "What does Melanie do to keep herself busy during her pottery break?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Read a book and paint.",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D17:10"
+          ]
+        },
+        {
+          "questionIdx": 55,
+          "conversationIdx": 0,
+          "question": "What painting did Melanie show to Caroline on October 13, 2023?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "A painting inspired by sunsets with a pink sky.",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- [historical] The user has used painting and drawing to express their feelings and explore their gender identity.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D17:12"
+          ]
+        },
+        {
+          "questionIdx": 56,
+          "conversationIdx": 0,
+          "question": "What kind of painting did Caroline share with Melanie on October 13, 2023?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "An abstract painting with blue streaks on a wall.",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- [historical] The user has used painting and drawing to express their feelings and explore their gender identity.\n- The user finds joy in helping others grow.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D17:14"
+          ]
+        },
+        {
+          "questionIdx": 57,
+          "conversationIdx": 0,
+          "question": "What was the poetry reading that Caroline attended about?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "It was a transgender poetry reading where transgender people shared their stories.",
+          "predicted": "The user found the transgender poetry reading to be empowering.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user found the transgender poetry reading to be empowering.",
+          "f1": 0.33333333333333326,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D17:18"
+          ]
+        },
+        {
+          "questionIdx": 58,
+          "conversationIdx": 0,
+          "question": "What did the posters at the poetry reading say?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "\"Trans Lives Matter\"",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- The user found the transgender poetry reading to be empowering.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D17:19"
+          ]
+        },
+        {
+          "questionIdx": 59,
+          "conversationIdx": 0,
+          "question": "What does Caroline's drawing symbolize for her?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Freedom and being true to herself.",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- [historical] The user has used painting and drawing to express their feelings and explore their gender identity.\n- Some of the user's friends were not able to handle their transition.\n- [historical] The user's art is about expressing their trans experience.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D17:23"
+          ]
+        },
+        {
+          "questionIdx": 60,
+          "conversationIdx": 0,
+          "question": "How do Melanie and Caroline describe their journey through life together?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "An ongoing adventure of learning and growing.",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user went through a long process of finding self-acceptance.\n- [historical] The user believes everyone has the key to discovering their true potential and living their best life.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D17:25"
+          ]
+        },
+        {
+          "questionIdx": 61,
+          "conversationIdx": 0,
+          "question": "What happened to Melanie's son on their road trip?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "He got into an accident",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- Some of the user's friends were not able to handle their transition.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D18:1"
+          ]
+        },
+        {
+          "questionIdx": 62,
+          "conversationIdx": 0,
+          "question": "How did Melanie's son handle the accident?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "He was scared but reassured by his family",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- Some of the user's friends were not able to handle their transition.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D18:6",
+            "D18:7"
+          ]
+        },
+        {
+          "questionIdx": 63,
+          "conversationIdx": 0,
+          "question": "How did Melanie feel about her family after the accident?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "They are important and mean the world to her",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user received help from friends, family, and role models during a difficult time.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D18:5"
+          ]
+        },
+        {
+          "questionIdx": 64,
+          "conversationIdx": 0,
+          "question": "How did Melanie's children handle the accident?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "They were scared but resilient",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- Some of the user's friends were not able to handle their transition.\n- The user received help from friends, family, and role models during a difficult time.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D18:7"
+          ]
+        },
+        {
+          "questionIdx": 65,
+          "conversationIdx": 0,
+          "question": "How did Melanie feel after the accident?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Grateful and thankful for her family",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D18:5"
+          ]
+        },
+        {
+          "questionIdx": 66,
+          "conversationIdx": 0,
+          "question": "What was Melanie's reaction to her children enjoying the Grand Canyon?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "She was happy and thankful",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user found the sunset at the beach amazing and calming.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D18:5"
+          ]
+        },
+        {
+          "questionIdx": 67,
+          "conversationIdx": 0,
+          "question": "What do Melanie's family give her?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Strength and motivation",
+          "predicted": "Melanie's family provides her with support.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- [historical] The user's friends and family are helping with their transition.\n- The user received help from friends, family, and role models during a difficult time.\n- [historical] The user's goal is to give kids a loving home.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D18:9"
+          ]
+        },
+        {
+          "questionIdx": 68,
+          "conversationIdx": 0,
+          "question": "How did Melanie feel about her family supporting her?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "She appreciated them a lot",
+          "predicted": "Melanie's family provides her with support.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user received help from friends, family, and role models during a difficult time.\n- The user values support from close friends.\n- [historical] The user's friends and family are helping with their transition.\n- [historical] The user values community and supporting others.\n- [historical] The user has a strong support network of friends and family.\n- [historical] The user has a strong support system of friends, family, and mentors.\n- [historical] The user values family.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D18:13"
+          ]
+        },
+        {
+          "questionIdx": 69,
+          "conversationIdx": 0,
+          "question": "What did Melanie do after the road trip to relax?",
+          "category": 4,
+          "categoryName": "Single-hop",
+          "groundTruth": "Went on a nature walk or hike",
+          "predicted": "This was not discussed in the conversation.\n",
+          "memoryContext": "User profile:\n- The user values love and acceptance.\n- The user wants to create a safe and loving home for children.\n- The user's goal is to have a family.\n- The user transitioned.\n- The user experienced a tough breakup.\n- Melanie was recently involved in an accident.\n- The user felt a sense of belonging at the LGBTQ+ pride parade.\n- The user is looking into adoption agencies that help LGBTQ+ folks with adoption.\n- The user's transition has changed their relationships.\n- The user is looking into counseling and mental health jobs.\n- The user is researching adoption agencies.\n- The user struggled with mental health in the past.\n- The user wants to offer love and support to others.\n- The user is undergoing a transition.\n- Melanie's family provides her with support.\n\nRelevant context from memory:\n- Melanie has children.\n- [historical] Melanie values her family.\n- The user found the sunset at the beach amazing and calming.\n- The user went through a long process of finding self-acceptance.",
+          "f1": 0,
+          "exactMatch": false,
+          "evidenceIds": [
+            "D18:17"
+          ]
+        }
+      ],
+      "categoryScores": [
+        {
+          "category": 4,
+          "name": "Single-hop",
+          "total": 70,
+          "f1Avg": 0.03262471655328799,
+          "exactMatchRate": 0
+        }
+      ],
+      "overallF1": 0.03262471655328799,
+      "overallExactMatch": 0,
+      "ingestionTimeMs": 164483,
+      "evaluationTimeMs": 20390
+    }
+  ],
+  "overall": {
+    "totalQuestions": 70,
+    "totalFacts": 8,
+    "f1Avg": 0.03262471655328799,
+    "exactMatchRate": 0,
+    "categoryScores": [
+      {
+        "category": 4,
+        "name": "Single-hop",
+        "total": 70,
+        "f1Avg": 0.03262471655328799,
+        "exactMatchRate": 0
+      }
+    ]
+  },
+  "progress": {
+    "totalConversations": 1,
+    "completedConversations": 1,
+    "totalQuestions": 70,
+    "completedQuestions": 70,
+    "currentConversation": 0,
+    "currentPhase": "evaluating"
+  },
+  "completedAt": "2026-03-30T05:33:10.142Z"
+}

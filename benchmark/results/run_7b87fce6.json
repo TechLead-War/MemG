@@ -1,0 +1,37 @@
+{
+  "id": "7b87fce6",
+  "startedAt": "2026-03-30T17:35:33.026Z",
+  "status": "failed",
+  "config": {
+    "llmProvider": "gemini",
+    "extractionModel": "gemini-2.0-flash",
+    "answerModel": "gemini-2.0-flash",
+    "judgeModel": "gemini-2.0-flash",
+    "embedProvider": "gemini",
+    "conversations": [
+      0
+    ],
+    "categories": [
+      4
+    ],
+    "useLLMJudge": true
+  },
+  "conversations": [],
+  "overall": {
+    "totalQuestions": 0,
+    "totalFacts": 0,
+    "f1Avg": 0,
+    "exactMatchRate": 0,
+    "categoryScores": []
+  },
+  "progress": {
+    "totalConversations": 1,
+    "completedConversations": 0,
+    "totalQuestions": 70,
+    "completedQuestions": 0,
+    "currentConversation": 0,
+    "currentPhase": "ingesting"
+  },
+  "error": "MemG native mode requires geminiApiKey when embedProvider=\"gemini\".",
+  "completedAt": "2026-03-30T17:35:33.123Z"
+}

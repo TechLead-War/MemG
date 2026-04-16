@@ -93,8 +93,8 @@ export function detectArtifacts(
           language: '',
           sourceRole: role,
         });
-      } catch {
-        // Not valid JSON — skip.
+      } catch (err) {
+        console.warn('[memg] artifact_detect: JSON parse failed, skipping:', err);
       }
     }
 

@@ -37,7 +37,8 @@ export async function recallFacts(
   let vectors: number[][];
   try {
     vectors = await embedder.embed([queryText]);
-  } catch {
+  } catch (err) {
+    console.warn('[memg] recall: embed query failed:', err);
     return [];
   }
   if (vectors.length === 0 || vectors[0].length === 0) return [];
@@ -82,7 +83,8 @@ export async function recallFactsWithVector(
     excludeExpired: true,
   };
 
-  if (maxCandidates <= 0) maxCandidates = 50;
+  // maxCandidates <= 0 means "load all facts" — no artificial ceiling.
+  // Previously defaulted to 50 which silently dropped 50-80% of facts.
 
   const facts = await store.listFactsForRecall(entityUuid, effectiveFilter, maxCandidates);
   if (facts.length === 0) return [];
@@ -140,6 +142,7 @@ export async function recallFactsWithVector(
       startedAt: orig?.startedAt,
       factType: orig?.factType,
       tag: r.tag,
+      referenceTime: orig?.referenceTime,
     };
   });
 }
@@ -159,7 +162,8 @@ export async function recallSummaries(
   let vectors: number[][];
   try {
     vectors = await embedder.embed([queryText]);
-  } catch {
+  } catch (err) {
+    console.warn('[memg] recall: embed summaries query failed:', err);
     return [];
   }
   if (vectors.length === 0 || vectors[0].length === 0) return [];
@@ -259,6 +263,7 @@ function buildRecallCandidates(
       tag: f.tag,
       pinned: f.pinned,
       engagementScore: f.engagementScore,
+      referenceTime: f.referenceTime,
     };
   });
 }

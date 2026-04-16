@@ -1,0 +1,48 @@
+{
+  "id": "6e2bb6f1",
+  "startedAt": "2026-03-30T18:17:18.195Z",
+  "status": "cancelled",
+  "config": {
+    "llmProvider": "gemini",
+    "extractionModel": "gemini-2.0-flash",
+    "answerModel": "gemini-2.0-flash",
+    "judgeModel": "gemini-2.0-flash",
+    "embedProvider": "gemini",
+    "conversations": [],
+    "categories": [],
+    "useLLMJudge": true
+  },
+  "conversations": [
+    {
+      "conversationIdx": 0,
+      "speakerA": "Caroline",
+      "speakerB": "Melanie",
+      "sessions": 19,
+      "turns": 419,
+      "totalQuestions": 0,
+      "factsExtracted": 65,
+      "questions": [],
+      "categoryScores": [],
+      "overallF1": 0,
+      "overallExactMatch": 0,
+      "ingestionTimeMs": 64269,
+      "evaluationTimeMs": 0
+    }
+  ],
+  "overall": {
+    "totalQuestions": 0,
+    "totalFacts": 65,
+    "f1Avg": 0,
+    "exactMatchRate": 0,
+    "categoryScores": []
+  },
+  "progress": {
+    "totalConversations": 10,
+    "completedConversations": 1,
+    "totalQuestions": 1986,
+    "completedQuestions": 0,
+    "currentConversation": 0,
+    "currentPhase": "evaluating"
+  },
+  "completedAt": "2026-03-30T18:18:23.154Z"
+}

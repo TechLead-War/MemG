@@ -7,7 +7,7 @@
  * - Client-mode interception (local memory injection via MCP)
  * - Direct memory operations via MCP (add, search, list, delete)
  *
- * @example Native mode (recommended — no Go server needed)
+ * @example Native mode (recommended — no external server needed)
  * ```typescript
  * import { MemG } from 'memg';
  * import OpenAI from 'openai';
@@ -85,7 +85,7 @@ export { storeArtifacts, recallArtifacts } from './artifact.js';
 export { maintainTurnSummaries } from './turn_summary.js';
 export { extractEntityMentions } from './entity_mentions.js';
 export { recallFacts, recallSummaries } from './recall.js';
-export { consolidateEntity, type ConsolidatorConfig } from './consolidator.js';
+export { consolidateEntity, type ConsolidatorConfig, type ConsolidateOptions } from './consolidator.js';
 export { loadConsciousContext } from './conscious.js';
 export { pruneExpiredAndStale } from './decay.js';
 export { getProactiveContext, type ProactiveOptions } from './proactive.js';
@@ -98,7 +98,17 @@ export {
 } from './conversation.js';
 export { type QueryTransform, type QueryTransformer } from './query.js';
 export { recallAndBuildContext, type RecallConfig } from './recall_context.js';
-export { TransformersEmbedder, OpenAIEmbedder, GeminiEmbedder } from './embedder.js';
+export {
+  TransformersEmbedder,
+  OpenAIEmbedder,
+  GeminiEmbedder,
+  OllamaEmbedder,
+  AzureOpenAIEmbedder,
+  BedrockEmbedder,
+  TogetherEmbedder,
+  CohereEmbedder,
+  VoyageEmbedder,
+} from './embedder.js';
 export type { Embedder } from './embedder.js';
 export type {
   Memory,
@@ -193,6 +203,60 @@ export class MemG {
       const { TransformersEmbedder } = await import('./embedder.js');
       this.embedder = await TransformersEmbedder.create(
         this.config.embedModel || 'Xenova/all-MiniLM-L6-v2'
+      );
+    } else if (this.config.embedProvider === 'ollama') {
+      const { OllamaEmbedder } = await import('./embedder.js');
+      this.embedder = new OllamaEmbedder(
+        this.config.embedModel || 'nomic-embed-text',
+        this.config.embedDimension || 768,
+        this.config.ollamaBaseUrl || 'http://localhost:11434'
+      );
+    } else if (this.config.embedProvider === 'azureopenai') {
+      const apiKey = this.config.azureOpenaiApiKey || process.env.AZURE_OPENAI_API_KEY || '';
+      const endpoint = this.config.azureOpenaiEndpoint || process.env.AZURE_OPENAI_ENDPOINT || '';
+      if (!apiKey) throw new Error('Azure OpenAI embedder requires azureOpenaiApiKey or AZURE_OPENAI_API_KEY.');
+      if (!endpoint) throw new Error('Azure OpenAI embedder requires azureOpenaiEndpoint or AZURE_OPENAI_ENDPOINT.');
+      const { AzureOpenAIEmbedder } = await import('./embedder.js');
+      this.embedder = new AzureOpenAIEmbedder(
+        apiKey,
+        endpoint,
+        this.config.embedModel || 'text-embedding-ada-002',
+        this.config.embedDimension || 1536,
+        this.config.azureOpenaiApiVersion || '2024-10-21'
+      );
+    } else if (this.config.embedProvider === 'bedrock') {
+      const { BedrockEmbedder } = await import('./embedder.js');
+      this.embedder = await BedrockEmbedder.create(
+        this.config.bedrockRegion || process.env.AWS_REGION || 'us-east-1',
+        this.config.embedModel || 'amazon.titan-embed-text-v2:0',
+        this.config.embedDimension || 1024
+      );
+    } else if (this.config.embedProvider === 'togetherai') {
+      const apiKey = this.config.togetherApiKey || process.env.TOGETHER_API_KEY || '';
+      if (!apiKey) throw new Error('Together AI embedder requires togetherApiKey or TOGETHER_API_KEY.');
+      const { TogetherEmbedder } = await import('./embedder.js');
+      this.embedder = new TogetherEmbedder(
+        apiKey,
+        this.config.embedModel || 'togethercomputer/m2-bert-80M-8k-retrieval',
+        this.config.embedDimension || 768
+      );
+    } else if (this.config.embedProvider === 'cohere') {
+      const apiKey = this.config.cohereApiKey || process.env.COHERE_API_KEY || '';
+      if (!apiKey) throw new Error('Cohere embedder requires cohereApiKey or COHERE_API_KEY.');
+      const { CohereEmbedder } = await import('./embedder.js');
+      this.embedder = new CohereEmbedder(
+        apiKey,
+        this.config.embedModel || 'embed-english-v3.0',
+        this.config.embedDimension || 1024
+      );
+    } else if (this.config.embedProvider === 'voyageai') {
+      const apiKey = this.config.voyageApiKey || process.env.VOYAGE_API_KEY || '';
+      if (!apiKey) throw new Error('VoyageAI embedder requires voyageApiKey or VOYAGE_API_KEY.');
+      const { VoyageEmbedder } = await import('./embedder.js');
+      this.embedder = new VoyageEmbedder(
+        apiKey,
+        this.config.embedModel || 'voyage-3',
+        this.config.embedDimension || 1024
       );
     } else {
       throw new Error(`Unsupported embedProvider "${this.config.embedProvider}".`);
@@ -313,8 +377,8 @@ export class MemG {
         try {
           const [vec] = await this.embedder.embed([mem.content]);
           fact.embedding = vec;
-        } catch {
-          // Skip embedding on failure.
+        } catch (err) {
+          console.warn('[memg] index: embed content failed:', err);
         }
       }
 
@@ -467,9 +531,10 @@ export class MemG {
         sessionUuid = session.uuid;
         conversationUuid = await ensureConversation(this.store!, sessionUuid, entityUuid);
         if (isNew) {
-          this.summarizeClosedConversation(entityUuid, sessionUuid).catch(() => {});
+          this.summarizeClosedConversation(entityUuid, sessionUuid).catch((err: any) => { console.warn('[memg] index: summarizeClosedConversation failed:', err); });
         }
-      } catch {
+      } catch (err) {
+        console.warn('[memg] index: session setup failed:', err);
       }
     }
 
@@ -481,7 +546,8 @@ export class MemG {
           const historyMsgs = history.map((h) => ({ role: h.role, content: h.content }));
           retrievalMessages = [...historyMsgs, ...messages];
         }
-      } catch {
+      } catch (err) {
+        console.warn('[memg] index: loadRecentHistory failed:', err);
       }
     }
 
@@ -515,7 +581,7 @@ export class MemG {
         try {
           if (userText) await saveUserMessage(this.store!, conversationUuid, userText);
           if (content) await saveAssistantMessage(this.store!, conversationUuid, content);
-        } catch { /* never block on save failure */ }
+        } catch (err) { console.warn('[memg] index: save message failed:', err); }
       });
     }
 
@@ -525,15 +591,24 @@ export class MemG {
     if (content) {
       extractMessages.push({ role: 'assistant', content });
     }
-    this.extractFromMessages(entityId, extractMessages).catch(() => {});
+    this.extractFromMessages(entityId, extractMessages).catch((err: any) => { console.warn('[memg] index: extractFromMessages failed:', err); });
 
     return { content, role: 'assistant', memoryContext };
   }
 
   private resolveChatApiKey(provider: string): string {
-    if (provider === 'gemini') return this.config.geminiApiKey;
-    if (provider === 'anthropic') return process.env.ANTHROPIC_API_KEY ?? '';
-    return this.config.openaiApiKey;
+    switch (provider) {
+      case 'gemini': return this.config.geminiApiKey;
+      case 'anthropic': return process.env.ANTHROPIC_API_KEY ?? '';
+      case 'deepseek': return this.config.deepseekApiKey || process.env.DEEPSEEK_API_KEY || '';
+      case 'groq': return this.config.groqApiKey || process.env.GROQ_API_KEY || '';
+      case 'togetherai': return this.config.togetherApiKey || process.env.TOGETHER_API_KEY || '';
+      case 'xai': return this.config.xaiApiKey || process.env.XAI_API_KEY || '';
+      case 'azureopenai': return this.config.azureOpenaiApiKey || process.env.AZURE_OPENAI_API_KEY || '';
+      case 'bedrock': return 'aws-sigv4'; // Bedrock uses IAM, not API keys.
+      case 'ollama': return 'ollama'; // Ollama is local, no key needed.
+      default: return this.config.openaiApiKey;
+    }
   }
 
   /**
@@ -577,7 +652,7 @@ export class MemG {
     const entity = await this.store!.lookupEntity(entityId);
     if (!entity) return '';
 
-    this.backfillMissingEmbeddings(entity.uuid).catch(() => {});
+    this.backfillMissingEmbeddings(entity.uuid).catch((err: any) => { console.warn('[memg] index: backfillMissingEmbeddings failed:', err); });
     this.pruneIfDue(entity.uuid);
 
     let consciousFacts: ConsciousFact[] = [];
@@ -636,7 +711,8 @@ export class MemG {
    */
   async extractFromMessages(
     entityId: string,
-    messages: ExtractionMessage[]
+    messages: ExtractionMessage[],
+    sessionDate?: string
   ): Promise<void> {
     if (!this.config.extract) return;
 
@@ -653,7 +729,8 @@ export class MemG {
         entityUuid,
         apiKey,
         this.config.llmModel,
-        this.config.llmProvider
+        this.config.llmProvider,
+        sessionDate
       );
     } catch (err) {
       console.warn('[memg] extraction failed:', err);
@@ -664,10 +741,7 @@ export class MemG {
    * Resolve the API key for the extraction LLM provider.
    */
   private resolveExtractionApiKey(): string {
-    const provider = this.config.llmProvider;
-    if (provider === 'gemini') return this.config.geminiApiKey;
-    if (provider === 'anthropic') return process.env.ANTHROPIC_API_KEY ?? '';
-    return this.config.openaiApiKey; // openai and openai-compatible
+    return this.resolveChatApiKey(this.config.llmProvider);
   }
 
   /**
@@ -874,8 +948,8 @@ export class MemG {
     if (opts?.includeProactive !== false) {
       try {
         proactiveItems = await getProactiveContextFn(this.store!, entity.uuid);
-      } catch {
-        // Proactive context is best-effort.
+      } catch (err) {
+        console.warn('[memg] index: proactive context failed:', err);
       }
     }
 
@@ -999,7 +1073,8 @@ export class MemG {
     let embeddings: number[][];
     try {
       embeddings = await this.embedder!.embed(contents);
-    } catch {
+    } catch (err) {
+      console.warn('[memg] index: backfill embed failed:', err);
       return;
     }
 
@@ -1007,7 +1082,8 @@ export class MemG {
     for (let i = 0; i < embeddings.length && i < unembedded.length; i++) {
       try {
         await this.store!.updateFactEmbedding(unembedded[i].uuid, embeddings[i], model);
-      } catch {
+      } catch (err) {
+        console.warn('[memg] index: backfill updateFactEmbedding failed:', err);
       }
     }
   }
@@ -1048,7 +1124,8 @@ If the conversation contains no meaningful content worth remembering (e.g. just 
     let summary: string;
     try {
       summary = await callLLM(apiKey, this.config.llmModel, summaryPrompt, transcript, this.config.llmProvider);
-    } catch {
+    } catch (err) {
+      console.warn('[memg] index: summarize LLM call failed:', err);
       return;
     }
 
@@ -1060,7 +1137,8 @@ If the conversation contains no meaningful content worth remembering (e.g. just 
       try {
         const [vec] = await this.embedder.embed([summary]);
         embedding = vec;
-      } catch {
+      } catch (err) {
+        console.warn('[memg] index: summarize embed failed:', err);
       }
     }
 
@@ -1083,7 +1161,7 @@ If the conversation contains no meaningful content worth remembering (e.g. just 
     if (now - this._lastPruneAt < 300_000) return; // 5 min interval
     this._lastPruneAt = now;
     const nowISO = new Date().toISOString();
-    Promise.resolve(this.store!.pruneExpiredFacts(entityUuid, nowISO)).catch(() => {});
+    Promise.resolve(this.store!.pruneExpiredFacts(entityUuid, nowISO)).catch((err: any) => { console.warn('[memg] index: pruneExpiredFacts failed:', err); });
   }
 
   private ensureInitialized(): void {
@@ -1159,6 +1237,17 @@ function extractLastUser(messages: Array<{ role: string; content: string }>): st
   return null;
 }
 
+function chatResolveOpenAICompatibleUrl(provider: string): string {
+  switch (provider) {
+    case 'deepseek': return 'https://api.deepseek.com/v1/chat/completions';
+    case 'groq': return 'https://api.groq.com/openai/v1/chat/completions';
+    case 'togetherai': return 'https://api.together.xyz/v1/chat/completions';
+    case 'xai': return 'https://api.x.ai/v1/chat/completions';
+    case 'ollama': return `${process.env.OLLAMA_BASE_URL || 'http://localhost:11434'}/v1/chat/completions`;
+    default: return 'https://api.openai.com/v1/chat/completions';
+  }
+}
+
 async function chatCallLLM(
   apiKey: string,
   model: string,
@@ -1190,8 +1279,40 @@ async function chatCallLLM(
     const payload: any = { model, max_tokens: maxTokens, messages: chatMsgs };
     if (system) payload.system = system;
     body = JSON.stringify(payload);
+  } else if (provider === 'azureopenai') {
+    const endpoint = process.env.AZURE_OPENAI_ENDPOINT || '';
+    const apiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-10-21';
+    url = `${endpoint}/openai/deployments/${model}/chat/completions?api-version=${apiVersion}`;
+    headers = { 'Content-Type': 'application/json', 'api-key': apiKey };
+    body = JSON.stringify({ max_tokens: maxTokens, messages });
+  } else if (provider === 'bedrock') {
+    // Bedrock uses the AWS SDK Converse API.
+    let bedrock: any;
+    try {
+      const mod = '@aws-sdk/client-bedrock-runtime';
+      bedrock = await import(mod);
+    } catch (err) {
+      console.warn('[memg] index: bedrock SDK import failed:', err);
+      throw new Error('Bedrock LLM requires @aws-sdk/client-bedrock-runtime');
+    }
+    const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1';
+    const client = new bedrock.BedrockRuntimeClient({ region });
+    const systemText = messages.find((m) => m.role === 'system')?.content ?? '';
+    const chatMsgs = messages.filter((m) => m.role !== 'system').map((m) => ({
+      role: m.role as 'user' | 'assistant',
+      content: [{ text: m.content }],
+    }));
+    const command = new bedrock.ConverseCommand({
+      modelId: model,
+      system: systemText ? [{ text: systemText }] : undefined,
+      messages: chatMsgs,
+      inferenceConfig: { maxTokens },
+    });
+    const response = await client.send(command);
+    return response.output?.message?.content?.[0]?.text ?? '';
   } else {
-    url = 'https://api.openai.com/v1/chat/completions';
+    // OpenAI and all OpenAI-compatible providers.
+    url = chatResolveOpenAICompatibleUrl(provider);
     headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` };
     body = JSON.stringify({ model, max_tokens: maxTokens, messages });
   }

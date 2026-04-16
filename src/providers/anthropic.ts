@@ -2,7 +2,7 @@
  * Anthropic provider wrapping for MemG.
  *
  * Supports three modes:
- * - **native**: Full in-process engine (no Go server needed).
+ * - **native**: Full in-process engine (no external server needed).
  * - **proxy**: Redirects traffic through the MemG reverse proxy.
  * - **client**: Intercepts calls locally, querying MCP for memory context.
  */
@@ -96,10 +96,10 @@ function wrapAnthropicNative(client: any, opts: WrapOptions): any {
           }
         }
 
-        saveExchangeToSession(m, entityId, messages).catch(() => {});
-        m.extractFromMessages(entityId, messages).catch(() => {});
-      } catch {
-        // Never let extraction errors affect the response.
+        saveExchangeToSession(m, entityId, messages).catch((err: any) => { console.warn('[memg] anthropic: saveExchangeToSession failed:', err); });
+        m.extractFromMessages(entityId, messages).catch((err: any) => { console.warn('[memg] anthropic: extractFromMessages failed:', err); });
+      } catch (err) {
+        console.warn('[memg] anthropic: extraction pipeline failed:', err);
       }
     }
 
@@ -136,7 +136,7 @@ function wrapAnthropicStreamNative(
           } else {
             if (accumulated) {
               messages.push({ role: 'assistant', content: accumulated });
-              memg.extractFromMessages(entityId, messages).catch(() => {});
+              memg.extractFromMessages(entityId, messages).catch((err: any) => { console.warn('[memg] anthropic: stream extraction failed:', err); });
             }
           }
           return result;
@@ -144,7 +144,7 @@ function wrapAnthropicStreamNative(
         async return(value?: any): Promise<IteratorResult<any>> {
           if (accumulated) {
             messages.push({ role: 'assistant', content: accumulated });
-            memg.extractFromMessages(entityId, messages).catch(() => {});
+            memg.extractFromMessages(entityId, messages).catch((err: any) => { console.warn('[memg] anthropic: stream return extraction failed:', err); });
           }
           if (iterator.return) return iterator.return(value);
           return { done: true, value };
